@@ -182,6 +182,29 @@ config BK7258_APP_USBMODE_STACKSIZE
 
 endif
 
+config BK7258_APP_RESET_ALIAS
+	bool "BK7258 reset command alias"
+	default n
+	depends on !BK7258_AP_CORE && BOARDCTL_RESET && SYSTEM_NSH
+	select BUILTIN
+	select NSH_BUILTIN_APPS
+	help
+		Register reset as an alias for the NSH reboot command.  Both commands
+		enter BOARDIOC_RESET and the CP-owned AON watchdog whole-device reset
+		path; neither command depends on the COM-port RTS/DTR lines.
+
+if BK7258_APP_RESET_ALIAS
+
+config BK7258_APP_RESET_ALIAS_PRIORITY
+	int "reset alias priority"
+	default 100
+
+config BK7258_APP_RESET_ALIAS_STACKSIZE
+	int "reset alias stack size"
+	default 2048
+
+endif
+
 config BK7258_APP_OTA
 	bool "BK7258 paired OTA operator command"
 	default n

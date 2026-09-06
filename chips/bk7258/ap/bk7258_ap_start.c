@@ -28,6 +28,7 @@
 #define BK7258_SCB_CPACR         (*(volatile uint32_t *)0xe000ed88u)
 #define BK7258_FPU_FPCCR         (*(volatile uint32_t *)0xe000ef34u)
 #define BK7258_SCB_CCR_DCACHE    (1u << 16)
+#define BK7258_SCB_CCR_ICACHE    (1u << 17)
 #define BK7258_SCB_CCSIDR        0xe000ed80u
 #define BK7258_SCB_CSSELR        0xe000ed84u
 #define BK7258_SCB_ICIALLU       0xe000ef50u
@@ -93,9 +94,12 @@ bk7258_ap_smp_memory_initialize(void)
    * This is the reset-safe counterpart of the official v3.1.1.9 AP startup
    * sequence, which maintains the complete D-cache on both AP cores.
    *
-   * Invalidate I-cache as well so a same-session AP reflash cannot execute
-   * retained XIP lines.  The routine uses no stack because the reset stack
-   * itself lives in the SRAM whose attributes are being replaced.
+   * Invalidate and explicitly enable I-cache on each AP core.  Physical CPU1
+   * inherits the enabled state from BL2, but physical CPU2 enters through its
+   * own reset path and cannot rely on that private CCR bit.  This also matches
+   * the official SMP SystemInitCpu1/SystemInitCpu2 contract before either core
+   * executes substantial XIP code.  The routine uses no stack because the
+   * reset stack itself lives in the SRAM whose attributes are being replaced.
    */
 
   __asm volatile
@@ -131,6 +135,12 @@ bk7258_ap_smp_memory_initialize(void)
       "isb sy\n"
       "ldr r0, =%c[iciallu]\n"
       "movs r1, #0\n"
+      "str r1, [r0]\n"
+      "dsb sy\n"
+      "isb sy\n"
+      "ldr r0, =%c[ccr]\n"
+      "ldr r1, [r0]\n"
+      "orr r1, r1, %c[ic]\n"
       "str r1, [r0]\n"
       "dsb sy\n"
       "isb sy\n"
@@ -175,6 +185,7 @@ bk7258_ap_smp_memory_initialize(void)
       :
       : [ccr] "i" (0xe000ed14u),
         [dc] "i" (BK7258_SCB_CCR_DCACHE),
+        [ic] "i" (BK7258_SCB_CCR_ICACHE),
         [ccsidr] "i" (BK7258_SCB_CCSIDR),
         [csselr] "i" (BK7258_SCB_CSSELR),
         [iciallu] "i" (BK7258_SCB_ICIALLU),

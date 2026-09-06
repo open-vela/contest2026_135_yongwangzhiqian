@@ -65,6 +65,8 @@ _Static_assert(BK7258_SDK_IRQ_PRIORITY_SHIFT == NVIC_SYSH_PRIORITY_SHIFT,
                "Stage B gate: SDK and NuttX priority shifts must match");
 _Static_assert(INT_SRC_LCD == 27,
                "Stage B gate: LCD priority exception must remain source 27");
+_Static_assert(INT_SRC_AUDIO == 23,
+               "BK7258 audio IRQ routing must remain CPU0 bit 23");
 #ifdef CONFIG_BK7258_GPIO_IRQ_TEST
 _Static_assert(INT_SRC_GPIO == 55,
                "GPIO IRQ test requires GPIO_S source 55");
@@ -182,6 +184,21 @@ static int bk7258_sdk_irq_dispatch(int irq, void *context, void *arg)
 }
 
 #ifdef CONFIG_BK7258_AP_SMP_SCHED_ONLINE
+static bool bk7258_sdk_irq_routes_secondary(icu_int_src_t source)
+{
+  /* The immutable BK7258 AP SDK's sys_hal_aud_int_en() writes only
+   * CPU0_INT_0_31_EN.audio (SYS_REG 0x20, bit 23).  The AUDIO source is
+   * therefore physically routed to AP logical CPU0, unlike SDK sources
+   * whose board code may select either AP core.  Mirroring a late AUDIO
+   * registration with the synchronous NuttX SMP-call API cannot improve
+   * delivery and can indefinitely hold an audio start transaction if the
+   * target CPU does not service that call.  Keep CPU1's local NVIC/vector
+   * entry disabled for this CPU0-owned source.
+   */
+
+  return source != INT_SRC_AUDIO;
+}
+
 static int bk7258_sdk_irq_secondary_update(void *arg)
 {
   FAR struct bk7258_sdk_irq_secondary_op_s *op = arg;
@@ -297,7 +314,8 @@ int bk7258_sdk_irq_secondary_initialize(void)
         }
 
       index = (unsigned int)(irq - BK7258_SDK_IRQ_FIRST);
-      if (g_bk7258_sdk_irq_handlers[index] != NULL)
+      if (g_bk7258_sdk_irq_handlers[index] != NULL &&
+          bk7258_sdk_irq_routes_secondary((icu_int_src_t)index))
         {
           ret = irq_attach(irq, bk7258_sdk_irq_dispatch, NULL);
           if (ret < 0)
@@ -338,7 +356,8 @@ int bk7258_sdk_irq_secondary_online(void)
   flags = spin_lock_irqsave(&g_bk7258_sdk_irq_lock);
   for (index = 0; index < BK7258_SDK_IRQ_COUNT; index++)
     {
-      if (g_bk7258_sdk_irq_handlers[index] == NULL)
+      if (g_bk7258_sdk_irq_handlers[index] == NULL ||
+          !bk7258_sdk_irq_routes_secondary((icu_int_src_t)index))
         {
           continue;
         }
@@ -439,6 +458,7 @@ out:
   spin_unlock_irqrestore(&g_bk7258_sdk_irq_lock, flags);
 #ifdef CONFIG_BK7258_AP_SMP_SCHED_ONLINE
   if (result == BK_OK &&
+      bk7258_sdk_irq_routes_secondary(source) &&
       bk7258_sdk_irq_mirror_secondary(irq, priority, handler != NULL) < 0)
     {
       result = BK_FAIL;
@@ -465,6 +485,7 @@ bk_err_t bk_int_isr_unregister(icu_int_src_t source)
   spin_unlock_irqrestore(&g_bk7258_sdk_irq_lock, flags);
 #ifdef CONFIG_BK7258_AP_SMP_SCHED_ONLINE
   if (result == BK_OK &&
+      bk7258_sdk_irq_routes_secondary(source) &&
       bk7258_sdk_irq_mirror_secondary(irq,
         (int)(BK7258_SDK_IRQ_DEFAULT_PRIORITY <<
               BK7258_SDK_IRQ_PRIORITY_SHIFT), false) < 0)
@@ -506,6 +527,7 @@ bk_err_t bk_int_set_priority(icu_int_src_t source, uint32_t priority)
   spin_unlock_irqrestore(&g_bk7258_sdk_irq_lock, flags);
 #ifdef CONFIG_BK7258_AP_SMP_SCHED_ONLINE
   if (result == BK_OK &&
+      bk7258_sdk_irq_routes_secondary(source) &&
       bk7258_sdk_irq_mirror_secondary(irq, encoded, registered) < 0)
     {
       result = BK_FAIL;
