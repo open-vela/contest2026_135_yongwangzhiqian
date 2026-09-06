@@ -10,6 +10,12 @@ fuse/option-byte changes, or security-state changes. A successful host command
 also does not prove that the target reset or changed state; target-side evidence
 must be checked separately.
 
+For BK7258 Flash transport, use the sibling
+[`bk7258-hil-download`](../bk7258-hil-download/SKILL.md) skill. It owns BK Loader
+preflight/evidence and board profiles, then hands post-download capture or reset
+back to this toolkit. This keeps destructive chip-specific policy out of the
+board-independent debugger.
+
 - 中文操作手册：[SOP.zh-CN.md](SOP.zh-CN.md)
 - Claude/Codex 操作约束：[AI_AGENT_SOP.md](AI_AGENT_SOP.md)
 - Agent Skill entry point: [SKILL.md](SKILL.md)
