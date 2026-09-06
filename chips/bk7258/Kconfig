@@ -1300,6 +1300,9 @@ config BK7258_WDT
 		Register /dev/watchdog0 backed by the BK7258 APB hardware
 		watchdog.  Mirrors the Armino SDK WDT BSP
 		(bk_wdt_driver_init / bk_wdt_start / bk_wdt_feed path).
+		The feed operation uses a mutex.  Profiles enabling WATCHDOG_AUTOMONITOR
+		must select its LPWORK or HPWORK method; interrupt callbacks are not
+		supported.  The lower-half build rejects unsafe automonitor methods.
 
 config BK7258_WDT_PRETIMEOUT_PANIC
 	bool "Panic with context ahead of the watchdog hardware reset"
