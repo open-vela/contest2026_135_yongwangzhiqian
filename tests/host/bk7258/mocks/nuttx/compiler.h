@@ -13,6 +13,10 @@
 #define FAR
 #endif
 
+#ifndef CODE
+#define CODE
+#endif
+
 #ifndef UNUSED
 #define UNUSED(x) ((void)(x))
 #endif

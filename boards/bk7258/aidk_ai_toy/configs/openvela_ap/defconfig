@@ -80,7 +80,10 @@ CONFIG_SENSORS=y
 CONFIG_EXAMPLES_FB=y
 # MIC1 is the primary microphone and MIC2 is the populated AEC loopback.
 CONFIG_BK7258_MIC=y
-CONFIG_BK7258_AUDIO_PREPROCESS=y
+# Raw MIC capture is the current acceptance baseline.
+# AEC processing is enabled only after its own hardware acceptance.
+# CONFIG_BK7258_AUDIO_PREPROCESS is not set
+CONFIG_BK7258_MIC_STACKSIZE=8192
 # MFRC522 is on UART1 at P0/P1.
 CONFIG_BK7258_UART1=y
 CONFIG_BK7258_UART1_BAUD=9600

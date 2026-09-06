@@ -15,7 +15,6 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
-
 #include <nuttx/arch.h>
 #include <nuttx/clock.h>
 #include <nuttx/mutex.h>
@@ -152,11 +151,13 @@ static void bk7258_pm_publish_vendor_votes(
 #define BK7258_SDK_PM_DEV_JPEG      28u
 #define BK7258_SDK_PM_DEV_DISPLAY   29u
 #define BK7258_SDK_PM_DEV_AUDIO     30u
+#define BK7258_SDK_CLOCK_AUDIO      30u
 #define BK7258_SDK_PM_DEV_DECODER   33u
 #define BK7258_SDK_PM_DEV_SECURE    36u
 #define BK7258_SDK_PM_DEV_DEFAULT   40u
 #define BK7258_SDK_PM_CPU_FREQ_MAX  7
 #define BK7258_SDK_PM_SLEEP_LOG     22u
+#define BK7258_PM_LOCK_TIMEOUT_MS   1000u
 
 static const enum bk7258_pm_clock_e
 g_bk7258_pm_sdk_clock_map[BK7258_SDK_CLOCK_COUNT] =
@@ -212,12 +213,12 @@ static bool g_bk7258_pm_sdk_rotator_enabled;
 static bool g_bk7258_pm_sdk_scale0_enabled;
 static bool g_bk7258_pm_sdk_scale1_enabled;
 static bool g_bk7258_pm_sdk_h264_enabled;
-static bool g_bk7258_pm_sdk_audio_power_enabled;
 static uint8_t g_bk7258_pm_sdk_freq[BK7258_PM_FREQ_CLIENT_COUNT];
 static uint32_t g_bk7258_pm_sdk_generation;
 
 extern int __real_bk_pm_module_vote_power_ctrl(unsigned int module,
                                                 int power_state);
+extern uint32_t __real_sys_drv_aud_select_clock(uint32_t value);
 static void bk7258_pm_sdk_reset_generation(uint32_t generation)
 {
   unsigned int i;
@@ -232,7 +233,6 @@ static void bk7258_pm_sdk_reset_generation(uint32_t generation)
   g_bk7258_pm_sdk_scale0_enabled = false;
   g_bk7258_pm_sdk_scale1_enabled = false;
   g_bk7258_pm_sdk_h264_enabled = false;
-  g_bk7258_pm_sdk_audio_power_enabled = false;
   for (i = 0; i < BK7258_PM_FREQ_CLIENT_COUNT; i++)
     {
       g_bk7258_pm_sdk_freq[i] = BK7258_PM_OPP_DEFAULT;
@@ -298,6 +298,11 @@ static int bk7258_pm_send_bounded(struct bk7258_pm_client_s *priv,
         {
           return OK;
         }
+
+      /* OpenAMP returns its own no-buffer code from rpmsg_trysend().
+       * It is transient transport backpressure, not a failed PM operation.
+       * Keep the existing deadline and yield so CP can recycle TX buffers.
+       */
 
       if (ret != RPMSG_ERR_NO_BUFF && ret != -ENOMEM && ret != -EAGAIN)
         {
@@ -548,7 +553,12 @@ static int bk7258_pm_request(uint32_t resource,
       return -EAGAIN;
     }
 
-  ret = nxmutex_lock(&priv->lock);
+  /* Every transport wait below is bounded.  Bound admission as well so a
+   * stalled peer request cannot turn a second SMP caller into an unobservable
+   * mutex wait outside the PM protocol timeout contract.
+   */
+
+  ret = nxmutex_timedlock(&priv->lock, BK7258_PM_LOCK_TIMEOUT_MS);
   if (ret < 0)
     {
       return ret;
@@ -813,7 +823,8 @@ int __wrap_bk_pm_module_vote_cpu_freq(unsigned int module, int cpu_freq)
       return -EINVAL;
     }
 
-  ret = nxmutex_lock(&g_bk7258_pm_sdk_lock);
+  ret = nxmutex_timedlock(&g_bk7258_pm_sdk_lock,
+                          BK7258_PM_LOCK_TIMEOUT_MS);
   if (ret < 0)
     {
       return ret;
@@ -849,6 +860,25 @@ out:
   return ret;
 }
 
+/* The immutable common-audio driver selects XTAL immediately after its AUDP
+ * power vote.  That selector is a shared SYS_REG field and the SDK helper
+ * reaches it through the legacy mailbox AMP lock.  CP already owns the AUDP
+ * first edge through this service, so it now performs the XTAL selection in
+ * the same power -> select -> clock order.  Suppress only the duplicate XTAL
+ * write on AP.  Preserve the real SDK path for APLL callers outside the fixed
+ * BK7258 NuttX audio profiles.
+ */
+
+uint32_t __wrap_sys_drv_aud_select_clock(uint32_t value)
+{
+  if (value != 0u)
+    {
+      return __real_sys_drv_aud_select_clock(value);
+    }
+
+  return 0u;
+}
+
 /* The immutable AP SDK declares bk_pm_clock_ctrl() with enum arguments and a
  * bk_err_t return value; all three use the ordinary C int ABI.  Keep SDK
  * headers out of this board service so raw vendor IDs cannot escape beyond
@@ -875,8 +905,28 @@ int __wrap_bk_pm_clock_ctrl(int module, int clock_state)
       return -EINVAL;
     }
 
+  /* SDK v3.1.1.9 brackets PM_CLK_ID_AUDIO with the AUDP_AUDIO power vote:
+   *
+   *   init:   AUDP_AUDIO ON  -> AUDIO clock UP
+   *   deinit: AUDIO clock DOWN -> AUDP_AUDIO OFF
+   *
+   * The NuttX RESERVE/RELEASE audio-session boundary maps the complete
+   * lifetime to the CP-owned composite AUDIO resource, including domain
+   * power, XTAL selection and the hardware clock edge.  Forwarding this inner
+   * set-state call would acquire the same logical resource a second time and
+   * cannot report failures because the immutable common driver discards its
+   * return value.  Keep the SDK ordering visible while making the redundant
+   * inner call local and idempotent.
+   */
+
+  if (module == BK7258_SDK_CLOCK_AUDIO)
+    {
+      return OK;
+    }
+
   enable = clock_state != 0;
-  ret = nxmutex_lock(&g_bk7258_pm_sdk_lock);
+  ret = nxmutex_timedlock(&g_bk7258_pm_sdk_lock,
+                          BK7258_PM_LOCK_TIMEOUT_MS);
   if (ret < 0)
     {
       return ret;
@@ -920,12 +970,12 @@ out:
   return ret;
 }
 
-/* Route the verified BK7258 v3.1.1.9 audio and VIDP submodules through the
- * CP-owned PM service.  The immutable audio driver issues a domain vote
- * followed by PM_CLK_ID_AUDIO; both acquire the composite AUDIO resource,
- * so the first edge powers the domain/clock and the last edge reverses it.
- * Other vendor modules retain their SDK behavior until their ownership is
- * reviewed.
+/* Route the verified BK7258 v3.1.1.9 VIDP submodules through the CP-owned PM
+ * service.  AUDIO is different: the NuttX audio-session boundary owns its
+ * composite CP resource because the immutable common driver ignores all three
+ * power/clock return values.  Its nested SDK operations therefore validate
+ * arguments and remain local.  Other vendor modules retain their SDK behavior
+ * until their ownership is reviewed.
  */
 
 int __wrap_bk_pm_module_vote_power_ctrl(unsigned int module,
@@ -939,13 +989,19 @@ int __wrap_bk_pm_module_vote_power_ctrl(unsigned int module,
   bool enable;
   int ret;
 
+  if (module == BK7258_SDK_POWER_AUDP_AUDIO)
+    {
+      if (power_state != BK7258_SDK_POWER_STATE_ON &&
+          power_state != BK7258_SDK_POWER_STATE_OFF)
+        {
+          return -EINVAL;
+        }
+
+      return OK;
+    }
+
   switch (module)
     {
-      case BK7258_SDK_POWER_AUDP_AUDIO:
-        clock = BK7258_PM_CLOCK_AUDIO;
-        enabled = &g_bk7258_pm_sdk_audio_power_enabled;
-        break;
-
       case BK7258_SDK_POWER_VIDP_JPEG_ENCODER:
         clock = BK7258_PM_CLOCK_JPEG;
         enabled = &g_bk7258_pm_sdk_jpeg_encoder_enabled;
@@ -1002,7 +1058,8 @@ int __wrap_bk_pm_module_vote_power_ctrl(unsigned int module,
     }
 
   enable = power_state == BK7258_SDK_POWER_STATE_ON;
-  ret = nxmutex_lock(&g_bk7258_pm_sdk_lock);
+  ret = nxmutex_timedlock(&g_bk7258_pm_sdk_lock,
+                          BK7258_PM_LOCK_TIMEOUT_MS);
   if (ret < 0)
     {
       return ret;

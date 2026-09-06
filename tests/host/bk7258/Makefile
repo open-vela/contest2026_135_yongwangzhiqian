@@ -1189,6 +1189,27 @@ $(BUILD)/test_bk7258_pinmux: $(AP_DIR)/bk7258_pinmux.o \
 	$(AP_DIR)/test_bk7258_pinmux.o $(BUILD)/mock_reg32.o
 	$(CC) $(AP_CFLAGS) $^ -o $@
 
+# bk7258_media_root.c: verify the AP SMP session gate owns exactly one
+# CP composite AUDIO reference and converges ambiguous RPMsg outcomes before
+# allowing a later MIC/DAC owner.
+
+$(AP_DIR)/bk7258_media_root.o: $(CHIP_ROOT)/ap/bk7258_media_root.c \
+		$(CHIP_ROOT)/ap/bk7258_media_root.h | $(AP_DIR)
+	$(CC) $(AP_CFLAGS) $(AP_INC) -I $(CHIP_ROOT)/ap \
+		-DCONFIG_BK7258_AP_CORE -DCONFIG_BK7258_PM_CLOCK -c $< -o $@
+
+$(AP_DIR)/test_bk7258_media_root.o: \
+		$(AP_MODULES)/test_bk7258_media_root.c | $(AP_DIR)
+	$(CC) $(AP_CFLAGS) $(AP_INC) -I $(CHIP_ROOT)/ap \
+		-DCONFIG_BK7258_AP_CORE -DCONFIG_BK7258_PM_CLOCK -c $< -o $@
+
+$(BUILD)/test_bk7258_media_root: $(AP_DIR)/bk7258_media_root.o \
+		$(AP_DIR)/test_bk7258_media_root.o
+	$(CC) $(AP_CFLAGS) $^ -o $@ -lpthread
+
+run-media-audio-session: $(BUILD)/test_bk7258_media_root
+	./$(BUILD)/test_bk7258_media_root
+
 # bk7258_can.c: zero-patch template -- no bare-metal MMIO or ARM
 # barriers.  The suite mock TU provides its own real-blocking nxsem_*
 # (mocks/nuttx_can/nuttx/semaphore.h, selected by MOCK_CAN_INC) and the
@@ -1221,7 +1242,8 @@ AP_TARGETS := $(BUILD)/test_bk7258_jpeg_decoder \
 	$(BUILD)/test_bk7258_scale_rotate \
 	$(BUILD)/test_bk7258_can \
 	$(BUILD)/test_bk7258_irda \
-	$(BUILD)/test_bk7258_pinmux
+	$(BUILD)/test_bk7258_pinmux \
+	$(BUILD)/test_bk7258_media_root
 
 ap: $(AP_TARGETS)
 
@@ -1233,6 +1255,7 @@ run-ap: ap
 	./$(BUILD)/test_bk7258_can
 	./$(BUILD)/test_bk7258_irda
 	./$(BUILD)/test_bk7258_pinmux
+	./$(BUILD)/test_bk7258_media_root
 
 clean:
 	rm -rf $(BUILD)
@@ -1241,3 +1264,5 @@ clean:
 run-camera-storage:
 	python3 test_gc2145_controls.py
 	python3 test_sdio_tx_sram.py
+
+.PHONY: run-media-audio-session

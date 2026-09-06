@@ -37,6 +37,7 @@ extern int bk_pm_module_vote_power_ctrl(unsigned int module,
 extern void sys_drv_module_power_ctrl(int module, int power_state);
 extern int32_t sys_drv_module_power_state_get(int module);
 extern void smem_reset_lastblock(void);
+extern void sys_hal_aud_select_clock(uint32_t value);
 extern void sys_hal_set_auxs_cis_clk_sel(uint32_t value);
 extern void sys_hal_set_auxs_cis_clk_div(uint32_t value);
 extern void sys_hal_set_cis_auxs_clk_en(uint32_t value);
@@ -293,8 +294,10 @@ static int bk7258_pm_set_clock(enum bk7258_pm_clock_e clock, bool enable)
         break;
       case BK7258_PM_CLOCK_AUDIO:
         /* AP SDK v3.1.1.9 votes PM_POWER_SUB_MODULE_NAME_AUDP_AUDIO
-         * immediately before PM_CLK_ID_AUDIO.  Both AP calls reference this
-         * composite resource.  Preserve the official hardware order on the
+         * around PM_CLK_ID_AUDIO.  The NuttX RESERVE/RELEASE audio-session
+         * boundary owns this composite resource; both nested SDK operations
+         * are local compatibility checks because that driver discards their
+         * return values.  Preserve the official hardware order on the
          * first/last CP-owned edge without reviving the vendor mailbox PM
          * service that conflicts with NuttX RPTUN.
          */
@@ -308,6 +311,15 @@ static int bk7258_pm_set_clock(enum bk7258_pm_clock_e clock, bool enable)
               {
                 return ret;
               }
+
+            /* Match the immutable common-audio driver's order while keeping
+             * the shared SYS_REG clock selector on its CP owner: power the
+             * AUDP domain, select XTAL, then expose the AUDIO clock.  The AP
+             * compatibility wrapper turns the driver's duplicate XTAL write
+             * into a no-op, avoiding the legacy mailbox AMP lock.
+             */
+
+            sys_hal_aud_select_clock(0);
           }
 
         sys_drv_dev_clk_pwr_up(BK7258_SDK_CLOCK_AUDIO, state);
