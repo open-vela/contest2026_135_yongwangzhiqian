@@ -16,9 +16,13 @@
 
 #include "bk7258_product_lifecycle.h"
 
+#ifdef CONFIG_BK7258_HAPTIC_SERVICE
+#include "bk7258_haptic_service.h"
+#endif
+
 int bk7258_ap_application_prepare(void)
 {
-  int ret;
+  int ret = 0;
 
 #ifdef CONFIG_BK7258_APP_AGENT
   ret = bk7258_agent_product_prepare();
@@ -44,12 +48,20 @@ int bk7258_ap_application_prepare(void)
     }
 #endif
 
-  return 0;
+  return ret;
 }
 
 int bk7258_ap_application_start(void)
 {
   int ret;
+
+#ifdef CONFIG_BK7258_HAPTIC_SERVICE
+  ret = bkhaptic_service_initialize();
+  if (ret < 0)
+    {
+      return ret;
+    }
+#endif
 
 #ifdef CONFIG_BK7258_VISION_SERVICE
   ret = bk7258_vision_service_start();
