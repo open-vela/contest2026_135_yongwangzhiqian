@@ -46,6 +46,32 @@ config BK7258_APP_VOICE_STACKSIZE
 
 endif
 
+config BK7258_APP_HAPTIC
+	bool "BK7258 bounded force-feedback command (bkhaptic)"
+	default n
+	depends on !BK7258_AP_CORE && BK7258_RPTUN && SYSTEM_NSH
+	select BUILTIN
+	select NSH_BUILTIN_APPS
+	help
+		Query, explicitly request one bounded pulse, or stop the AP-owned
+		standard force-feedback device.  Startup never requests a pulse.
+
+if BK7258_APP_HAPTIC
+
+config BK7258_APP_HAPTIC_PROGNAME
+	string "bkhaptic program name"
+	default "bkhaptic"
+
+config BK7258_APP_HAPTIC_PRIORITY
+	int "bkhaptic priority"
+	default 100
+
+config BK7258_APP_HAPTIC_STACKSIZE
+	int "bkhaptic stack size"
+	default 4096
+
+endif
+
 config BK7258_APP_VISION
 	bool "BK7258 camera command (bkvision)"
 	default n
@@ -97,6 +123,34 @@ config BK7258_VOICE_SERVICE_PRIORITY
 config BK7258_VOICE_SERVICE_STACKSIZE
 	int "BKVoice AP worker stack size"
 	default 8192
+
+endif
+
+config BK7258_HAPTIC_SERVICE
+	bool "BK7258 AP force-feedback service"
+	default n
+	depends on BK7258_AP_CORE && BK7258_RPTUN && INPUT_FF
+	select BK7258_AP_APPLICATION_LIFECYCLE
+	help
+		Serve bkhaptic requests through standard NuttX force-feedback ioctls
+		in a dedicated worker.  The lower half owns pulse bounds and capture
+		inhibition.  Link teardown stops and closes the owned effect.
+
+if BK7258_HAPTIC_SERVICE
+
+config BK7258_HAPTIC_DEVPATH
+	string "Force-feedback device path"
+	default "/dev/input_ff0"
+
+config BK7258_HAPTIC_RPC_PRIORITY
+	int "Force-feedback RPMsg worker priority"
+	default 80
+	range 1 255
+
+config BK7258_HAPTIC_RPC_STACKSIZE
+	int "Force-feedback RPMsg worker stack size"
+	default 4096
+	range 2048 32768
 
 endif
 

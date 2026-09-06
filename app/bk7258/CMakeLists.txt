@@ -1,5 +1,5 @@
 if(CONFIG_BK7258_APP_AGENT OR CONFIG_BK7258_VOICE_SERVICE OR
-   CONFIG_BK7258_VISION_SERVICE)
+   CONFIG_BK7258_VISION_SERVICE OR CONFIG_BK7258_HAPTIC_SERVICE)
   target_sources(apps PRIVATE bk7258_product_lifecycle.c)
 endif()
 
@@ -28,6 +28,18 @@ if(CONFIG_BK7258_VOICE_SERVICE)
                               bk7258_voice_companion.c
                               bk7258_voice_turn.c
                               bk7258_voice_turn_audio.c)
+endif()
+
+if(CONFIG_BK7258_HAPTIC_SERVICE)
+  target_sources(apps PRIVATE bk7258_haptic_service.c)
+endif()
+
+if(CONFIG_BK7258_APP_HAPTIC)
+  nuttx_add_application(
+    NAME ${CONFIG_BK7258_APP_HAPTIC_PROGNAME}
+    SRCS bk7258_haptic_main.c bk7258_haptic_client.c
+    STACKSIZE ${CONFIG_BK7258_APP_HAPTIC_STACKSIZE}
+    PRIORITY ${CONFIG_BK7258_APP_HAPTIC_PRIORITY})
 endif()
 
 if(CONFIG_BK7258_VISION_SERVICE)
