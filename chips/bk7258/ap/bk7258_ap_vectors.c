@@ -14,6 +14,7 @@
 
 #include <stdint.h>
 
+#include <nuttx/arch.h>
 #include <nuttx/sched.h>
 
 #include <arch/chip/bk7258_amp.h>
@@ -89,6 +90,10 @@ static inline void bk7258_ap_fault_doorbell(uint32_t event,
   state->state      = BK7258_AP_STATE_FAILED;
   state->error      = error;
   state->last_event = event;
+  __asm volatile ("dmb sy" ::: "memory");
+  up_clean_dcache((uintptr_t)state,
+                  (uintptr_t)state + sizeof(*state));
+  __asm volatile ("dsb sy; isb sy" ::: "memory");
 
   mbox[BK7258_MBOX_SENDER_OFFSET / 4] = 1u << 1;
   mbox[BK7258_MBOX_RECEIVER_OFFSET / 4] = 1u << 0;
@@ -190,6 +195,10 @@ bk7258_ap_fault_handler(uint32_t *stack, uint32_t exc_return,
   fault->stacked_xpsr  = stacked_xpsr;
   __asm volatile ("dmb sy" ::: "memory");
   fault->magic = BK7258_AP_FAULT_STATE_MAGIC;
+  __asm volatile ("dmb sy" ::: "memory");
+  up_clean_dcache((uintptr_t)fault,
+                  (uintptr_t)fault + sizeof(*fault));
+  __asm volatile ("dsb sy; isb sy" ::: "memory");
 
   bk7258_ap_fault_doorbell(BK7258_AP_EVENT_FAILED, error);
 

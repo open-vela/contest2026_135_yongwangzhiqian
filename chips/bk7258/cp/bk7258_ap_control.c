@@ -73,6 +73,7 @@ extern void sys_drv_set_cpu2_reset(uint32_t reset_value);
 
 static mutex_t g_bk7258_ap_lock = NXMUTEX_INITIALIZER;
 static bool g_bk7258_ap_initialized;
+static bool g_bk7258_ap_live_this_boot;
 static bool g_bk7258_ap_faulted;
 static struct bk7258_ap_image_desc_s g_bk7258_ap_image;
 
@@ -547,7 +548,13 @@ static int bk7258_ap_start_locked(uint32_t timeout_ms)
     }
 #endif
 
-  if (state->magic == BK7258_AP_BOOT_STATE_MAGIC &&
+  /* Shared SRAM survives some whole-chip reset paths.  Only reject a second
+   * start when this CP boot actually released AP; a retained READY header
+   * from the previous boot must be normalized below.
+   */
+
+  if (g_bk7258_ap_live_this_boot &&
+      state->magic == BK7258_AP_BOOT_STATE_MAGIC &&
       (state->state == BK7258_AP_STATE_READY ||
        state->state == BK7258_AP_STATE_STARTING))
     {
@@ -559,6 +566,7 @@ static int bk7258_ap_start_locked(uint32_t timeout_ms)
    * primary CPU, a state NuttX SMP does not support.
    */
 
+  g_bk7258_ap_live_this_boot = false;
   bk7258_cpu2_sdk_stop();
   bk7258_cpu1_sdk_stop();
   up_mdelay(BK7258_AP_RESTART_DELAY_MS);
@@ -630,6 +638,7 @@ static int bk7258_ap_start_locked(uint32_t timeout_ms)
       return bk7258_ap_start_fail(state, ret, BK7258_AP_ERROR_TIMEOUT);
     }
 
+  g_bk7258_ap_live_this_boot = true;
   return ret;
 }
 
@@ -690,6 +699,7 @@ static int bk7258_ap_stop_locked(uint32_t timeout_ms)
   bk7258_cpu2_sdk_stop();
   bk7258_cpu1_sdk_stop();
   up_mdelay(BK7258_AP_RESTART_DELAY_MS);
+  g_bk7258_ap_live_this_boot = false;
 
   if (ret < 0 && state->state != BK7258_AP_STATE_FAILED)
     {

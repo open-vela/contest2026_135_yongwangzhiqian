@@ -418,6 +418,9 @@ static void bk7258_cpu2_fail(uint32_t error)
   __asm volatile ("dmb sy" ::: "memory");
   state->state = BK7258_CPU2_PROBE_STATE_FAILED;
   __asm volatile ("dmb sy" ::: "memory");
+  up_clean_dcache((uintptr_t)state,
+                  (uintptr_t)state + sizeof(*state));
+  __asm volatile ("dsb sy; isb sy" ::: "memory");
 }
 
 #ifndef CONFIG_BK7258_AP_SMP_SCHED_ONLINE

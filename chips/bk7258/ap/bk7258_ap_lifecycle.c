@@ -72,6 +72,7 @@ extern const void *const _vectors[80];
 #define BK7258_SYSTICK_TICKINT      (1u << 1)
 #define BK7258_SCB_CCR              (*(volatile uint32_t *)0xe000ed14u)
 #define BK7258_SCB_CCR_DCACHE       (1u << 16)
+#define BK7258_SCB_CCR_ICACHE       (1u << 17)
 #define BK7258_MPU_CTRL             (*(volatile uint32_t *)0xe000ed94u)
 #define BK7258_MPU_RNR              (*(volatile uint32_t *)0xe000ed98u)
 #define BK7258_MPU_RBAR             (*(volatile uint32_t *)0xe000ed9cu)
@@ -341,6 +342,7 @@ static int bk7258_ap_validate_runtime(void)
     }
 
   if ((state->reserved[0] & BK7258_SCB_CCR_DCACHE) != 0 ||
+      (state->reserved[0] & BK7258_SCB_CCR_ICACHE) == 0 ||
       (state->reserved[1] & BK7258_MPU_CTRL_EXPECTED) !=
         BK7258_MPU_CTRL_EXPECTED ||
       state->reserved[2] != BK7258_MPU_SRAM_RBAR ||
@@ -410,7 +412,9 @@ static int bk7258_ap_validate_secondary_bootstrap(void)
       cpu2->runtime_msp > BK7258_CPU2_BOOT_STACK_TOP ||
       cpu2->idle_stack_base < BK7258_AP_RAM_BASE ||
       cpu2->idle_stack_base >= cpu2->idle_stack_top ||
-      cpu2->idle_stack_top > BK7258_CPU2_BOOT_STACK_BASE)
+      cpu2->idle_stack_top > BK7258_CPU2_BOOT_STACK_BASE ||
+      (cpu2->reserved[0] & BK7258_SCB_CCR_DCACHE) != 0 ||
+      (cpu2->reserved[0] & BK7258_SCB_CCR_ICACHE) == 0)
     {
       return BK7258_AP_ERROR_CPU2_SMP_BOOTSTRAP;
     }
