@@ -16,6 +16,21 @@ config BK7258_BOARD_AIDK_AI_TOY
 		P9 is reserved for its active-high control; fitting does not imply
 		that the motor driver has passed hardware verification.
 
+config BK7258_AIDK_MOTOR
+	bool "AIDK CN10 motor as standard force feedback"
+	default n
+	depends on BK7258_BOARD_AIDK_AI_TOY && BK7258_AP_CORE
+	select INPUT
+	select INPUT_FF
+	select INPUT_GPIO_FF
+	help
+		Bind fitted CN10 to /dev/input_ff0 using the standard NuttX
+		FF_RUMBLE interface. P9 is high-active; only finite pulses with
+		a cooldown are accepted. Expiry/cancel stops P9 directly and
+		MIC capture inhibits actions. P52 uses a separate motor vote.
+		Enabling registers a stopped device; it never starts a test pulse.
+		Requires the maintained NuttX input/FF lifecycle patch.
+
 config BK7258_AIDK_SD_NAND
 	bool "AIDK SD NAND"
 	default n

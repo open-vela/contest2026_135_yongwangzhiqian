@@ -277,6 +277,13 @@
 
 #define BK7258_BOARD_MOTOR_ACTIVE_HIGH           1
 
+/* Initial bring-up bounds.  Physical pulse/current/temperature acceptance
+ * must precede any increase or a product intensity claim.
+ */
+
+#define BK7258_BOARD_MOTOR_MAX_ON_MS              100u
+#define BK7258_BOARD_MOTOR_MIN_OFF_MS             1000u
+
 #if BK7258_BOARD_USER_LED_GPIO == BK7258_BOARD_PIN_MOTOR || \
     BK7258_BOARD_USER_BUTTON_GPIO == BK7258_BOARD_PIN_MOTOR
 #  error "AIDK P9 belongs to the motor and cannot be a GPIO test binding"

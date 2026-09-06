@@ -900,10 +900,20 @@ static int bk7258_mic_hw_start(struct bk7258_mic_dev_s *priv)
         }
     }
 
+  if (priv->config->set_capture_quiet != NULL)
+    {
+      ret = priv->config->set_capture_quiet(true);
+      if (ret < 0)
+        {
+          return ret;
+        }
+    }
+
   err = bk_dma_start(priv->dma_id);
   if (err != BK_OK)
     {
       auderr("ERROR: bk_dma_start failed: %d\n", err);
+      bk7258_mic_hw_stop(priv);
       return bk7258_mic_result(err);
     }
 
@@ -911,7 +921,7 @@ static int bk7258_mic_hw_start(struct bk7258_mic_dev_s *priv)
   if (err != BK_OK)
     {
       auderr("ERROR: bk_aud_adc_start failed: %d\n", err);
-      bk_dma_stop(priv->dma_id);
+      bk7258_mic_hw_stop(priv);
       return bk7258_mic_result(err);
     }
 
@@ -920,8 +930,18 @@ static int bk7258_mic_hw_start(struct bk7258_mic_dev_s *priv)
 
 static void bk7258_mic_hw_stop(struct bk7258_mic_dev_s *priv)
 {
-  bk_dma_stop(priv->dma_id);
-  bk_aud_adc_stop();
+  bk_err_t dma_ret = bk_dma_stop(priv->dma_id);
+  bk_err_t adc_ret = bk_aud_adc_stop();
+
+  /* Keep the board quiet if the hardware has not confirmed capture stopped.
+   * A later successful STOP may release the interlock.
+   */
+
+  if (dma_ret == BK_OK && adc_ret == BK_OK &&
+      priv->config->set_capture_quiet != NULL)
+    {
+      (void)priv->config->set_capture_quiet(false);
+    }
 }
 
 /****************************************************************************
