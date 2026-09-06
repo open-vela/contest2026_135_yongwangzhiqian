@@ -1,0 +1,4 @@
+interface:
+  display_name: "BK7258 Profiled HIL"
+  short_description: "Profiled BK7258 flash plus Windows HIL handoff"
+  default_prompt: "Use $bk7258-hil-download to select a board profile, preflight an exact BK7258 download, and hand off post-flash evidence to windows-hardware-debug."
