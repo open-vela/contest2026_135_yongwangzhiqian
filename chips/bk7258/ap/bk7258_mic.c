@@ -60,18 +60,19 @@
 #include <inttypes.h>
 #include <errno.h>
 #include <debug.h>
-#include <syslog.h>
 #include <assert.h>
 
 #include <nuttx/arch.h>
 #include <nuttx/kmalloc.h>
 #include <nuttx/mutex.h>
 #include <nuttx/semaphore.h>
+#include <nuttx/signal.h>
 #include <nuttx/queue.h>
 #include <nuttx/kthread.h>
 #include <nuttx/audio/audio.h>
 
 #include <arch/chip/bk7258_mic.h>
+#include <arch/chip/bk7258_pm.h>
 #include <arch/chip/bk7258_psram.h>
 
 /* SDK API headers.
@@ -122,11 +123,15 @@
 
 #define BK7258_MIC_DMA_PROGRAM_ATTEMPTS  3u
 #define BK7258_MIC_DMA_RETRY_DELAY_US    10u
+#define BK7258_MIC_FIRST_DMA_TIMEOUT_US  100000u
+#define BK7258_MIC_FIRST_DMA_POLL_US     1000u
+#define BK7258_MIC_STOP_TIMEOUT_MS       1000u
 #define BK7258_MIC_DMA_CTRL_CONFIG_MASK  0x00001ff8u
 #define BK7258_MIC_DMA_CTRL_CONFIG_VALUE 0x00001fa8u
 #define BK7258_MIC_DMA_CTRL_LENGTH_MASK  0xffff0000u
 #define BK7258_MIC_DMA_REQ_MUX_MASK      0x3f7ff3ffu
 #define BK7258_MIC_DMA_REQ_MUX_VALUE     0x0030000eu
+#define BK7258_MIC_REQUIRED_CPU_HZ       480000000u
 
 /* Frames of one channel carried per DMA completion.  The DMA transfer
  * length is derived from this and is always two channels wide because the
@@ -226,6 +231,7 @@ struct bk7258_mic_dev_s
   sem_t             donesem;           /* Posted as the thread exits */
   volatile bool     terminate;
   volatile bool     streaming;
+  volatile uint32_t dma_isr_count;
 
   /* Serialize the capture worker against pause/stop.  Once pause returns,
    * no buffer callback from the pre-pause stream remains in flight.
@@ -236,6 +242,8 @@ struct bk7258_mic_dev_s
   enum bk7258_mic_state_e state;
   bool close_safe;
   bool reserved;
+  bool frequency_voted;
+  bool frequency_uncertain;
   bool audio_session_owned;
 
   /* Buffers queued by the upper half awaiting capture payload */
@@ -265,7 +273,7 @@ static void bk7258_mic_deinterleave(int16_t *dest, const int16_t *src,
                                     unsigned int frames);
 static int  bk7258_mic_capture_thread(int argc, char **argv);
 static void bk7258_mic_flush_pending(struct bk7258_mic_dev_s *priv);
-static void bk7258_mic_stop_thread(struct bk7258_mic_dev_s *priv);
+static int  bk7258_mic_stop_thread(struct bk7258_mic_dev_s *priv);
 
 /* audio_ops_s */
 
@@ -535,6 +543,8 @@ static void bk7258_mic_dma_isr(dma_id_t dma_id)
 
   UNUSED(dma_id);
 
+  __atomic_add_fetch(&priv->dma_isr_count, 1u, __ATOMIC_RELAXED);
+
   if (priv->streaming)
     {
       nxsem_post(&priv->dmasem);
@@ -584,9 +594,10 @@ static int bk7258_mic_hw_setup(struct bk7258_mic_dev_s *priv)
 
   cfg.clk_src       = AUD_CLK_XTAL;
 
-  /* bk_aud_adc_init() internally performs bk_aud_driver_init() (power vote,
-   * PM_CLK_ID_AUDIO, INT_SRC_AUDIO registration, ANA_REG baseline) and
-   * bk_aud_clk_config(), including the converter clock setup.
+  /* bk_aud_adc_init() performs the immutable common-driver initialization
+   * internally.  Its SDK power/clock calls are local compatibility checks;
+   * RESERVE already acquired the CP-owned composite AUDIO resource through
+   * the NuttX audio-session boundary, where failures can be returned.
    */
 
   err = bk_aud_adc_init(&cfg);
@@ -856,6 +867,7 @@ static int bk7258_mic_hw_start(struct bk7258_mic_dev_s *priv)
   uint32_t ctrl;
   uint32_t req_mux;
   uint32_t dest_start;
+  uint32_t waited_us;
   bk_err_t err;
   int ret;
 
@@ -909,6 +921,9 @@ static int bk7258_mic_hw_start(struct bk7258_mic_dev_s *priv)
         }
     }
 
+  /* START and RESUME must both observe a completion from this activation. */
+
+  __atomic_store_n(&priv->dma_isr_count, 0, __ATOMIC_RELEASE);
   err = bk_dma_start(priv->dma_id);
   if (err != BK_OK)
     {
@@ -923,6 +938,31 @@ static int bk7258_mic_hw_start(struct bk7258_mic_dev_s *priv)
       auderr("ERROR: bk_aud_adc_start failed: %d\n", err);
       bk7258_mic_hw_stop(priv);
       return bk7258_mic_result(err);
+    }
+
+  /* One DMA frame is 20 ms at a 16 kHz capture rate.  Require proof
+   * that the SDK's GDMA ISR reached this driver, but return as soon as the
+   * first completion arrives.  The audio upper half cannot start the
+   * recorder's queue consumer until this lower-half start call returns.  A
+   * fixed 100-ms sleep can otherwise fill that bounded queue before its
+   * consumer exists and stall the callback path.
+   */
+
+  for (waited_us = 0;
+       __atomic_load_n(&priv->dma_isr_count, __ATOMIC_ACQUIRE) == 0 &&
+       waited_us < BK7258_MIC_FIRST_DMA_TIMEOUT_US;
+       waited_us += BK7258_MIC_FIRST_DMA_POLL_US)
+    {
+      (void)nxsig_usleep(BK7258_MIC_FIRST_DMA_POLL_US);
+    }
+
+  if (__atomic_load_n(&priv->dma_isr_count, __ATOMIC_ACQUIRE) == 0)
+    {
+      auderr("ERROR: DMA%u first completion timed out after %u us\n",
+             (unsigned int)priv->dma_id,
+             (unsigned int)BK7258_MIC_FIRST_DMA_TIMEOUT_US);
+      bk7258_mic_hw_stop(priv);
+      return -ETIMEDOUT;
     }
 
   return OK;
@@ -1014,9 +1054,8 @@ static int bk7258_mic_capture_thread(int argc, char **argv)
   struct bk7258_mic_dev_s *priv = &g_bk7258_mic;
   struct ap_buffer_s *apb;
   unsigned int frames;
+  uint32_t fill;
   uint32_t got;
-
-  audinfo("Capture thread started\n");
 
   while (!priv->terminate)
     {
@@ -1045,8 +1084,8 @@ static int bk7258_mic_capture_thread(int argc, char **argv)
 
       /* Only consume a frame once the DMA has actually landed one. */
 
-      if (ring_buffer_get_fill_size(&priv->ring) <
-          BK7258_MIC_DMA_FRAME_BYTES)
+      fill = ring_buffer_get_fill_size(&priv->ring);
+      if (fill < BK7258_MIC_DMA_FRAME_BYTES)
         {
           nxmutex_unlock(&priv->worker_lock);
           continue;
@@ -1181,11 +1220,13 @@ static int bk7258_mic_capture_thread(int argc, char **argv)
  *
  ****************************************************************************/
 
-static void bk7258_mic_stop_thread(struct bk7258_mic_dev_s *priv)
+static int bk7258_mic_stop_thread(struct bk7258_mic_dev_s *priv)
 {
+  int ret;
+
   if (priv->pid < 0)
     {
-      return;
+      return OK;
     }
 
   priv->streaming = false;
@@ -1194,9 +1235,17 @@ static void bk7258_mic_stop_thread(struct bk7258_mic_dev_s *priv)
   /* Wake the thread out of its wait for the next DMA completion. */
 
   nxsem_post(&priv->dmasem);
-  nxsem_wait_uninterruptible(&priv->donesem);
+  ret = nxsem_tickwait_uninterruptible(
+    &priv->donesem, MSEC2TICK(BK7258_MIC_STOP_TIMEOUT_MS));
+  if (ret < 0)
+    {
+      auderr("ERROR: capture thread stop timed out: pid=%d ret=%d\n",
+             priv->pid, ret);
+      return ret;
+    }
 
   priv->pid = -1;
+  return OK;
 }
 
 /****************************************************************************
@@ -1447,14 +1496,19 @@ static int bk7258_mic_start(struct audio_lowerhalf_s *dev)
 #endif
 {
   struct bk7258_mic_dev_s *priv = (struct bk7258_mic_dev_s *)dev;
+  int stop_ret;
   int ret;
 
   DEBUGASSERT(priv != NULL);
 
-  if (!priv->reserved || !priv->audio_session_owned)
+  if (!priv->reserved || !priv->frequency_voted ||
+      priv->frequency_uncertain || !priv->audio_session_owned)
     {
-      auderr("ERROR: start denied: reserved=%d audio_session=%d state=%d\n",
-             priv->reserved, priv->audio_session_owned, priv->state);
+      auderr("ERROR: start denied: reserved=%d frequency=%d/%d "
+             "audio_session=%d state=%d\n",
+             priv->reserved, priv->frequency_voted,
+             priv->frequency_uncertain, priv->audio_session_owned,
+             priv->state);
       return -EACCES;
     }
 
@@ -1500,11 +1554,21 @@ static int bk7258_mic_start(struct audio_lowerhalf_s *dev)
     }
 
   priv->pid = (pid_t)ret;
-
   ret = bk7258_mic_hw_start(priv);
   if (ret < 0)
     {
-      bk7258_mic_stop_thread(priv);
+      stop_ret = bk7258_mic_stop_thread(priv);
+      if (stop_ret < 0)
+        {
+          /* Retain the setup and expose an active state so RELEASE retries
+           * the bounded stop instead of tearing memory out from under a task
+           * that may still reference it.
+           */
+
+          priv->state = BK7258_MIC_STATE_RUNNING;
+          return stop_ret;
+        }
+
       bk7258_mic_hw_teardown(priv);
       return ret;
     }
@@ -1528,6 +1592,7 @@ static int bk7258_mic_stop(struct audio_lowerhalf_s *dev)
 {
   struct bk7258_mic_dev_s *priv = (struct bk7258_mic_dev_s *)dev;
   bool pending;
+  int ret;
 
   DEBUGASSERT(priv != NULL);
 
@@ -1558,20 +1623,29 @@ static int bk7258_mic_stop(struct audio_lowerhalf_s *dev)
    * registers.  Quiesce it before stopping those registers underneath it.
    */
 
-  nxmutex_lock(&priv->worker_lock);
+  ret = nxmutex_timedlock(&priv->worker_lock,
+                          BK7258_MIC_STOP_TIMEOUT_MS);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
   priv->streaming = false;
   bk7258_mic_hw_stop(priv);
   nxmutex_unlock(&priv->worker_lock);
-
   /* Join before teardown: the thread dereferences the ring and the scratch
    * frame that bk7258_mic_hw_teardown() is about to free.
    */
 
-  bk7258_mic_stop_thread(priv);
+  ret = bk7258_mic_stop_thread(priv);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
   bk7258_mic_hw_teardown(priv);
 
   priv->state = BK7258_MIC_STATE_CONFIGURED;
-
 #ifdef CONFIG_AUDIO_MULTI_SESSION
   priv->dev.upper(priv->dev.priv, AUDIO_CALLBACK_COMPLETE, NULL, OK, priv);
 #else
@@ -1823,6 +1897,71 @@ static int bk7258_mic_ioctl(struct audio_lowerhalf_s *dev, int cmd,
  * Name: bk7258_mic_reserve / bk7258_mic_release
  ****************************************************************************/
 
+/* The pinned v3.1.1.9 audio pipeline holds PM_DEV_ID_AUDIO at OPP480 while
+ * its DSP path is active.  DAC already mirrors that contract.  MIC must do
+ * the same once AEC/AGC runs synchronously in its capture worker; at the
+ * 120-MHz idle OPP, one 20-ms AEC frame takes about four frame periods.
+ */
+
+static int bk7258_mic_frequency_acquire(struct bk7258_mic_dev_s *priv)
+{
+  uint32_t active;
+  int ret;
+
+  ret = bk7258_pm_frequency_vote(BK7258_PM_FREQ_CLIENT_AUDIO,
+                                 BK7258_PM_OPP_480M);
+  if (ret < 0)
+    {
+      /* CP may have committed the vote before AP loses the reply.  Preserve
+       * uncertain ownership so cleanup always sends an idempotent DEFAULT.
+       */
+
+      nxmutex_lock(&priv->lock);
+      priv->frequency_uncertain = true;
+      nxmutex_unlock(&priv->lock);
+      return ret;
+    }
+
+  active = (uint32_t)perf_getfreq();
+  nxmutex_lock(&priv->lock);
+  priv->frequency_voted = true;
+  priv->frequency_uncertain = false;
+  nxmutex_unlock(&priv->lock);
+
+  if (active != BK7258_MIC_REQUIRED_CPU_HZ)
+    {
+      return -EIO;
+    }
+
+  return OK;
+}
+
+static int bk7258_mic_frequency_release(struct bk7258_mic_dev_s *priv)
+{
+  int ret;
+
+  nxmutex_lock(&priv->lock);
+  if (!priv->frequency_voted && !priv->frequency_uncertain)
+    {
+      nxmutex_unlock(&priv->lock);
+      return OK;
+    }
+
+  nxmutex_unlock(&priv->lock);
+  ret = bk7258_pm_frequency_vote(BK7258_PM_FREQ_CLIENT_AUDIO,
+                                 BK7258_PM_OPP_DEFAULT);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  nxmutex_lock(&priv->lock);
+  priv->frequency_voted = false;
+  priv->frequency_uncertain = false;
+  nxmutex_unlock(&priv->lock);
+  return OK;
+}
+
 #ifdef CONFIG_AUDIO_MULTI_SESSION
 static int bk7258_mic_reserve(struct audio_lowerhalf_s *dev,
                               void **psession)
@@ -1831,6 +1970,8 @@ static int bk7258_mic_reserve(struct audio_lowerhalf_s *dev)
 #endif
 {
   struct bk7258_mic_dev_s *priv = (struct bk7258_mic_dev_s *)dev;
+  int cleanup_ret;
+  int session_ret;
   int ret;
 
   DEBUGASSERT(priv != NULL);
@@ -1846,26 +1987,76 @@ static int bk7258_mic_reserve(struct audio_lowerhalf_s *dev)
     }
 #endif
 
+  /* Serialize the blocking AP/CP power and frequency transactions with every
+   * START/RELEASE transition.  Publish reserved only after both are proven.
+   */
+
+  nxmutex_lock(&priv->worker_lock);
   nxmutex_lock(&priv->lock);
 
-  if (priv->reserved)
+  if (priv->reserved || priv->audio_session_owned ||
+      priv->frequency_voted || priv->frequency_uncertain)
     {
       nxmutex_unlock(&priv->lock);
+      nxmutex_unlock(&priv->worker_lock);
       return -EBUSY;
     }
+
+  nxmutex_unlock(&priv->lock);
 
   ret = bk7258_media_audio_session_acquire(BK7258_MEDIA_AUDIO_MIC);
   if (ret < 0)
     {
-      nxmutex_unlock(&priv->lock);
+      nxmutex_unlock(&priv->worker_lock);
       return ret;
     }
 
-  priv->reserved = true;
+  nxmutex_lock(&priv->lock);
   priv->audio_session_owned = true;
   __atomic_store_n(&priv->close_safe, false, __ATOMIC_RELEASE);
+  nxmutex_unlock(&priv->lock);
+
+  ret = bk7258_mic_frequency_acquire(priv);
+  if (ret < 0)
+    {
+      cleanup_ret = bk7258_mic_frequency_release(priv);
+      session_ret = OK;
+      if (cleanup_ret == OK && !priv->frequency_voted &&
+          !priv->frequency_uncertain)
+        {
+          session_ret = bk7258_media_audio_session_release(
+            BK7258_MEDIA_AUDIO_MIC);
+          if (session_ret == OK)
+            {
+              priv->audio_session_owned = false;
+            }
+        }
+
+      nxmutex_lock(&priv->lock);
+      if (cleanup_ret < 0 || priv->frequency_voted ||
+          priv->frequency_uncertain || session_ret < 0)
+        {
+          /* Keep RELEASE admissible so a caller can retry convergence. */
+
+          priv->reserved = true;
+          __atomic_store_n(&priv->close_safe, false, __ATOMIC_RELEASE);
+        }
+      else
+        {
+          __atomic_store_n(&priv->close_safe, true, __ATOMIC_RELEASE);
+        }
+
+      nxmutex_unlock(&priv->lock);
+      nxmutex_unlock(&priv->worker_lock);
+      return cleanup_ret < 0 ? cleanup_ret :
+             session_ret < 0 ? session_ret : ret;
+    }
+
+  nxmutex_lock(&priv->lock);
+  priv->reserved = true;
   dq_init(&priv->pendq);
   nxmutex_unlock(&priv->lock);
+  nxmutex_unlock(&priv->worker_lock);
 
 #ifdef CONFIG_AUDIO_MULTI_SESSION
   if (psession != NULL)
@@ -1884,6 +2075,7 @@ static int bk7258_mic_release(struct audio_lowerhalf_s *dev)
 #endif
 {
   struct bk7258_mic_dev_s *priv = (struct bk7258_mic_dev_s *)dev;
+  int session_ret;
   int ret;
 
   DEBUGASSERT(priv != NULL);
@@ -1911,7 +2103,8 @@ static int bk7258_mic_release(struct audio_lowerhalf_s *dev)
 
   nxmutex_lock(&priv->lock);
 
-  if (!priv->reserved && !priv->audio_session_owned)
+  if (!priv->reserved && !priv->frequency_voted &&
+      !priv->frequency_uncertain && !priv->audio_session_owned)
     {
       nxmutex_unlock(&priv->lock);
       return OK;
@@ -1933,16 +2126,31 @@ static int bk7258_mic_release(struct audio_lowerhalf_s *dev)
 
   nxmutex_lock(&priv->worker_lock);
   bk7258_mic_flush_pending(priv);
-  nxmutex_unlock(&priv->worker_lock);
 
-  ret = bk7258_media_audio_session_release(BK7258_MEDIA_AUDIO_MIC);
-  if (ret == OK)
+  ret = bk7258_mic_frequency_release(priv);
+  if (ret == OK && priv->audio_session_owned)
     {
-      nxmutex_lock(&priv->lock);
-      priv->audio_session_owned = false;
-      __atomic_store_n(&priv->close_safe, true, __ATOMIC_RELEASE);
-      nxmutex_unlock(&priv->lock);
+      session_ret = bk7258_media_audio_session_release(
+        BK7258_MEDIA_AUDIO_MIC);
+      if (session_ret < 0)
+        {
+          ret = session_ret;
+        }
+      else
+        {
+          priv->audio_session_owned = false;
+        }
     }
+
+  nxmutex_lock(&priv->lock);
+  if (ret == OK && !priv->frequency_voted &&
+      !priv->frequency_uncertain && !priv->audio_session_owned)
+    {
+      __atomic_store_n(&priv->close_safe, true, __ATOMIC_RELEASE);
+    }
+
+  nxmutex_unlock(&priv->lock);
+  nxmutex_unlock(&priv->worker_lock);
 
   return ret;
 }
@@ -2028,22 +2236,8 @@ int bk7258_mic_initialize(
 
   g_bk7258_mic_registered = true;
 
-  syslog(LOG_INFO,
-         "BMIC BOOT PASS board=%s dev=/dev/audio/%s rate=%u max_ch=%u "
-         "dig=0x%02x ana=0x%02x/0x%02x\n",
-         priv->config->variant_name != NULL ? priv->config->variant_name :
-           "unknown",
-         CONFIG_BK7258_MIC_DEVNAME, (unsigned)priv->samplerate,
-         (unsigned)priv->channels, (unsigned)priv->dig_gain,
-         (unsigned)priv->mic1_ana_gain,
-         (unsigned)priv->mic2_ana_gain);
-
 #ifdef CONFIG_BK7258_MIC_LIFECYCLE_VALIDATION
   ret = bk7258_mic_validation_start(config);
-  if (ret < 0)
-    {
-      syslog(LOG_ERR, "BMICVAL FAIL stage=worker ret=%d\n", ret);
-    }
 #endif
 
   return OK;

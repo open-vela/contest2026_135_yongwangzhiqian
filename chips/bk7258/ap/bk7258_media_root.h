@@ -3,7 +3,8 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  *
- * Private AP-wide ownership boundary for immutable SDK media drivers.
+ * Private AP-wide ownership boundary for immutable SDK media drivers and the
+ * CP-owned composite AUDIO power/clock resource.
  ****************************************************************************/
 
 #ifndef __ARCH_ARM_SRC_BK7258_AP_BK7258_MEDIA_ROOT_H

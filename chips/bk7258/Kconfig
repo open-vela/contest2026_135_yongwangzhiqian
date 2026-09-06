@@ -1553,15 +1553,18 @@ config BK7258_AUD_WORKER_PRIORITY
 config BK7258_MIC
 	bool "On-board analog microphone capture"
 	default n
+	depends on BK7258_PM_CLOCK
+	select ARCH_PERF_EVENTS
 	select BK7258_SDK_IPC_RUNTIME
 	select AUDIO
 	select AUDIO_DRIVER_SPECIFIC_BUFFERS
 	help
 		Expose the board differential microphone through a NuttX capture
 		audio lower half.  The SDK DMA engine targets AP DTCM and the small
-		DMA ring is allocated from the NuttX kernel heap.  This wrapper owns
-		the AUD ADC block for the duration of a reserved capture session; a DAC
-		playback session cannot be reserved concurrently.
+		DMA ring is allocated from the NuttX kernel heap.  A reserved capture
+		session holds the CP-owned composite AUD power/clock resource through
+		the board RPMsg PM service, then owns the AUD ADC block until RELEASE;
+		a DAC playback session cannot be reserved concurrently.
 
 config BK7258_MIC_DEVNAME
 	string "Microphone device name"
@@ -1579,6 +1582,17 @@ config BK7258_MIC_RING_FRAMES
 	default 4
 	range 2 16
 	depends on BK7258_MIC
+
+config BK7258_MIC_STACKSIZE
+	int "Microphone capture worker stack size"
+	default 4096
+	range 2048 16384
+	depends on BK7258_MIC
+	help
+		Stack size in bytes for the task-context capture worker.  Raw DMA
+		capture needs little stack, but the optional pinned AEC/NS/AGC/VAD
+		pipeline executes synchronously in this worker and needs additional
+		headroom for its DSP and setjmp call chains.
 
 config BK7258_AUDIO_PREPROCESS
 	bool "AEC/NS/AGC/VAD microphone preprocessing"

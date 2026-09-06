@@ -17,9 +17,14 @@
 #include <nuttx/config.h>
 
 #include <errno.h>
+#include <stdbool.h>
 #include <stdint.h>
 
 #include <nuttx/mutex.h>
+
+#ifdef CONFIG_BK7258_PM_CLOCK
+#  include <arch/chip/bk7258_pm.h>
+#endif
 
 #include <common/bk_err.h>
 #include <driver/dma.h>
@@ -36,6 +41,11 @@
 static mutex_t g_bk7258_media_root_lock = NXMUTEX_INITIALIZER;
 static uint32_t g_bk7258_media_roots;
 static uint8_t g_bk7258_media_audio_owner;
+
+#ifdef CONFIG_BK7258_PM_CLOCK
+static bool g_bk7258_media_audio_pm_held;
+static bool g_bk7258_media_audio_pm_uncertain;
+#endif
 
 /****************************************************************************
  * Private Functions
@@ -67,6 +77,31 @@ static int bk7258_media_root_result(bk_err_t result)
         return -EIO;
     }
 }
+
+#ifdef CONFIG_BK7258_PM_CLOCK
+/* CLOCK_GET can be committed by CP even when AP loses the reply.  A following
+ * CLOCK_PUT first recovers that pending tuple in the PM client and then
+ * releases it; -EALREADY also proves that CP owns no AUDIO reference.  Keep an
+ * uncertain state only when that convergence operation itself cannot finish.
+ */
+
+static int bk7258_media_audio_pm_release(void)
+{
+  int ret;
+
+  ret = bk7258_pm_clock_put(BK7258_PM_CLOCK_AUDIO);
+  if (ret == OK || ret == -EALREADY)
+    {
+      g_bk7258_media_audio_pm_held = false;
+      g_bk7258_media_audio_pm_uncertain = false;
+      return OK;
+    }
+
+  g_bk7258_media_audio_pm_held = false;
+  g_bk7258_media_audio_pm_uncertain = true;
+  return ret;
+}
+#endif
 
 /****************************************************************************
  * Public Functions
@@ -164,6 +199,9 @@ out:
 
 int bk7258_media_audio_session_acquire(uint8_t owner)
 {
+#ifdef CONFIG_BK7258_PM_CLOCK
+  int cleanup_ret;
+#endif
   int ret;
 
   if (owner != BK7258_MEDIA_AUDIO_MIC &&
@@ -184,10 +222,47 @@ int bk7258_media_audio_session_acquire(uint8_t owner)
     }
   else
     {
+#ifdef CONFIG_BK7258_PM_CLOCK
+      /* A prior request may have timed out after CP committed it.  Converge
+       * that state before creating a new session so AP and CP start from the
+       * same zero-reference boundary.
+       */
+
+      if (g_bk7258_media_audio_pm_held ||
+          g_bk7258_media_audio_pm_uncertain)
+        {
+          cleanup_ret = bk7258_media_audio_pm_release();
+          if (cleanup_ret < 0)
+            {
+              ret = cleanup_ret;
+              goto out;
+            }
+        }
+
+      ret = bk7258_pm_clock_get(BK7258_PM_CLOCK_AUDIO);
+      if (ret < 0)
+        {
+          /* The request may have reached CP before its response was lost.
+           * Compensate immediately; a later acquire will retry convergence if
+           * this cleanup also times out.
+           */
+
+          g_bk7258_media_audio_pm_held = false;
+          g_bk7258_media_audio_pm_uncertain = true;
+          cleanup_ret = bk7258_media_audio_pm_release();
+          goto out;
+        }
+
+      g_bk7258_media_audio_pm_held = true;
+      g_bk7258_media_audio_pm_uncertain = false;
+#endif
       g_bk7258_media_audio_owner = owner;
       ret = 0;
     }
 
+#ifdef CONFIG_BK7258_PM_CLOCK
+out:
+#endif
   nxmutex_unlock(&g_bk7258_media_root_lock);
   return ret;
 }
@@ -214,10 +289,20 @@ int bk7258_media_audio_session_release(uint8_t owner)
     }
   else
     {
+#ifdef CONFIG_BK7258_PM_CLOCK
+      ret = bk7258_media_audio_pm_release();
+      if (ret < 0)
+        {
+          goto out;
+        }
+#endif
       g_bk7258_media_audio_owner = 0;
       ret = 0;
     }
 
+#ifdef CONFIG_BK7258_PM_CLOCK
+out:
+#endif
   nxmutex_unlock(&g_bk7258_media_root_lock);
   return ret;
 }

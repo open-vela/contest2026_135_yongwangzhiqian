@@ -563,6 +563,9 @@ if(CONFIG_BK7258_RPTUN)
          CONFIG_BK7258_YUV_H264 OR CONFIG_BK7258_DVP)
         bk7258_wrap_sdk_symbol(bk_pm_module_vote_power_ctrl)
       endif()
+      if(CONFIG_BK7258_AUD OR CONFIG_BK7258_MIC)
+        bk7258_wrap_sdk_symbol(sys_drv_aud_select_clock)
+      endif()
       if(CONFIG_BK7258_DVP_H264_COMPAT)
         bk7258_wrap_sdk_symbol(
           bk_yuv_buf_start

@@ -18,6 +18,7 @@ typedef int bk_err_t;
 
 #define GPIO_CTRL_LDO_MODULE_SDIO 0u
 #define GPIO_CTRL_LDO_MODULE_LCD  1u
+#define GPIO_CTRL_LDO_MODULE_MOTOR 4u
 #define GPIO_CTRL_LDO_MODULE_NFC  5u
 
 typedef enum

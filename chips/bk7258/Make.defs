@@ -558,6 +558,10 @@ ifneq ($(filter y,$(CONFIG_BK7258_AUD) $(CONFIG_BK7258_MIC) $(CONFIG_BK7258_DMA2
 LDFLAGS += --wrap=bk_pm_module_vote_power_ctrl
 endif
 
+ifneq ($(filter y,$(CONFIG_BK7258_AUD) $(CONFIG_BK7258_MIC)),)
+LDFLAGS += --wrap=sys_drv_aud_select_clock
+endif
+
 ifeq ($(CONFIG_BK7258_DVP_H264_COMPAT),y)
 LDFLAGS += --wrap=bk_yuv_buf_start
 LDFLAGS += --wrap=bk_h264_encode_enable
