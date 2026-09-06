@@ -20,6 +20,16 @@
 
 #ifdef CONFIG_BK7258_WDT
 
+/* Feeding serializes the SDK's two-key sequence with a mutex.  The NuttX
+ * automonitor must therefore call it from a worker task, not a timer ISR.
+ */
+
+#if defined(CONFIG_WATCHDOG_AUTOMONITOR) && \
+    !defined(CONFIG_WATCHDOG_AUTOMONITOR_BY_LPWORK) && \
+    !defined(CONFIG_WATCHDOG_AUTOMONITOR_BY_HPWORK)
+#  error "BK7258 watchdog automonitor requires LPWORK or HPWORK"
+#endif
+
 #include <stdint.h>
 #include <errno.h>
 #include <string.h>
