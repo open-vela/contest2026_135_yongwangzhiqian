@@ -51,6 +51,10 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     build.add_argument("--partition", type=Path)
+    build.add_argument(
+        "--workspace", type=Path,
+        help="use an isolated OpenVela root whose vendor/beken links resolve to this repository",
+    )
     build.add_argument("--jobs", type=int, default=min(os.cpu_count() or 1, 8))
     build.add_argument("--bl1-public-key", type=Path)
     build.add_argument("--mcuboot-public-key", type=Path)
@@ -772,6 +776,7 @@ def _build(args: argparse.Namespace) -> None:
         rollback_floor=args.rollback_floor,
         jobs=args.jobs,
         clean=args.clean,
+        workspace=args.workspace,
     )
     print(f"bk7258 build: PASS layout={result.partition_identity}")
     print(f"bl1 elf={result.bl1.elf} bin={result.bl1.binary} map={result.bl1.map_file}")

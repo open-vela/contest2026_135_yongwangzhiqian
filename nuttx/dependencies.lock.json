@@ -1,0 +1,24 @@
+{
+  "format": "bk7258.openvela-dependencies/1",
+  "nuttx_commit": "76354c637858ecb0aa4601629327acb6f44a26bb",
+  "projects": [
+    {
+      "path": "nuttx/openamp/open-amp",
+      "repository": "https://github.com/open-vela/nuttx_openamp_open-amp",
+      "commit": "8608b94c947e525dadd781ce6f169ed49b0f2a2b",
+      "tree": "5e4834b62da8bb69ed91c550fe893ea5c7105a96"
+    },
+    {
+      "path": "nuttx/openamp/libmetal",
+      "repository": "https://github.com/open-vela/nuttx_openamp_libmetal",
+      "commit": "fbd291502a1b4113febd0b6bc87e919247fc7b4d",
+      "tree": "e48eb7320f8bdeb9bd0a288e9de9cfd52d9e6a1d"
+    },
+    {
+      "path": "nuttx/fs/littlefs/littlefs",
+      "repository": "https://github.com/open-vela/nuttx_fs_littlefs_littlefs",
+      "commit": "b97ad1f437c3fa3128ca2d70b8317c1207c90ac9",
+      "tree": "d36b0ea8c981314a57f14d032ec37a272cbc0ee7"
+    }
+  ]
+}

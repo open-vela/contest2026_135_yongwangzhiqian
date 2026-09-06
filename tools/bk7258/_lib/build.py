@@ -192,6 +192,47 @@ def _official_entry(path: Path, workspace: Path) -> Path:
     return resolved
 
 
+def _build_workspace(repository: Path, requested: Path | None) -> Path:
+    """Resolve one OpenVela build root with canonical BK7258 source links."""
+
+    workspace = _directory(
+        repository.parent if requested is None else requested,
+        "OpenVela workspace",
+    )
+    _official_entry(workspace / "build.sh", workspace)
+    for relative in (Path("boards/bk7258"), Path("chips/bk7258"),
+                     Path("nuttx"), Path("prebuilt")):
+        canonical = _directory(repository / relative, f"canonical {relative}")
+        try:
+            mapped = (workspace / "vendor/beken" / relative).resolve(strict=True)
+        except OSError as error:
+            raise BuildError(f"workspace is missing vendor/beken/{relative}") from error
+        if mapped != canonical:
+            raise BuildError(
+                f"workspace vendor/beken/{relative} does not resolve to canonical source"
+            )
+    return workspace
+
+
+def _manifest_workspace(repository: Path, path: Path, source: Path) -> Path:
+    """Keep relative manifests on the default root; verify absolute handoffs."""
+
+    if not path.is_absolute():
+        return _directory(repository.parent, "OpenVela workspace")
+    try:
+        workspace = source.parents[7]
+        relative = source.relative_to(workspace)
+    except (IndexError, ValueError) as error:
+        raise BuildError("build manifest path has no OpenVela workspace root") from error
+    if len(relative.parts) != 8 \
+            or relative.parts[:2] != ("out", "bk7258") \
+            or relative.parts[5] != "releases" \
+            or relative.parts[6] not in {"direct", "mcuboot"} \
+            or relative.parts[7] != "build-manifest.json":
+        raise BuildError("build manifest path does not identify one release mode")
+    return _build_workspace(repository, workspace)
+
+
 def config_profile(repository: Path, path: Path, expected_role: str) -> ConfigProfile:
     root = _directory(path, f"{expected_role} config directory")
     allowed_root = (repository / BOARD_ROOT).resolve(strict=True)
@@ -1175,8 +1216,8 @@ def load_build_manifest(repository: Path, path: Path) -> BuildManifest:
     """Load and re-hash one build-owned release handoff."""
 
     repository = _directory(repository, "contest repository")
-    workspace = _directory(repository.parent, "OpenVela workspace")
     source = _regular(path, "build manifest")
+    workspace = _manifest_workspace(repository, path, source)
     out_root = _directory(workspace / "out/bk7258", "BK7258 output root")
     try:
         source.relative_to(out_root)
@@ -1443,13 +1484,14 @@ def load_build_manifest(repository: Path, path: Path) -> BuildManifest:
 def build(repository: Path, cp_config: Path, ap_config: Path, partition: Path,
           *, boot: str, bl1_public_key: Path | None,
           mcuboot_public_key: Path | None, openssl: Path | None,
-          rollback_floor: int | None, jobs: int, clean: bool) -> BuildResult:
+          rollback_floor: int | None, jobs: int, clean: bool,
+          workspace: Path | None = None) -> BuildResult:
     """Build CP then AP through the official OpenVela out-of-tree entry."""
 
     if jobs <= 0:
         raise BuildError("jobs must be positive")
     repository = _directory(repository, "contest repository")
-    workspace = _directory(repository.parent, "OpenVela workspace")
+    workspace = _build_workspace(repository, workspace)
     official_build = _official_entry(workspace / "build.sh", workspace)
     toolchain = resolve_toolchain(repository, workspace)
     cp = config_profile(repository, cp_config, "cp")
