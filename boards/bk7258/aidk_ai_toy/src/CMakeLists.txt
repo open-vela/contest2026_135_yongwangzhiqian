@@ -2,6 +2,10 @@
 
 target_sources(board PRIVATE bk7258_board_bringup.c)
 
+if(CONFIG_BK7258_AIDK_MOTOR)
+  target_sources(board PRIVATE bk7258_aidk_motor.c)
+endif()
+
 if(CONFIG_ETC_ROMFS)
   nuttx_add_romfs(
     NAME etc

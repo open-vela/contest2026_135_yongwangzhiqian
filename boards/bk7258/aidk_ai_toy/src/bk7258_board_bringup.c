@@ -54,6 +54,9 @@ static const struct bk7258_mic_config_s g_bk7258_aidk_mic_config =
   .mic1_ana_gain = BK7258_BOARD_MIC1_ANA_GAIN,
   .mic2_ana_gain = BK7258_BOARD_MIC2_ANA_GAIN,
   .variant_name = BK7258_BOARD_VARIANT_NAME,
+#ifdef CONFIG_BK7258_AIDK_MOTOR
+  .set_capture_quiet = bk7258_aidk_motor_capture_quiet,
+#endif
 };
 
 #ifdef CONFIG_BK7258_BOARD_DEFERRED_INIT
@@ -100,6 +103,14 @@ int bk7258_board_ap_initialize(void)
 
 #ifdef CONFIG_BK7258_AUD
   audio = &g_bk7258_board_audio;
+#endif
+
+#ifdef CONFIG_BK7258_AIDK_MOTOR
+  ret = bk7258_aidk_motor_initialize();
+  if (ret < 0)
+    {
+      return ret;
+    }
 #endif
 
   ret = bk7258_board_ap_controllers_initialize(

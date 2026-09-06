@@ -97,6 +97,13 @@ struct bk7258_mic_config_s
   uint8_t channels;
   uint8_t mic1_ana_gain;
   uint8_t mic2_ana_gain;
+
+  /* Optional board acoustic interlock.  quiet=true must synchronously stop
+   * interfering actuators and reject new actions before ADC/DMA start.
+   * Called in task context; release only follows a successful hardware stop.
+   */
+
+  CODE int (*set_capture_quiet)(bool quiet);
 };
 
 /****************************************************************************

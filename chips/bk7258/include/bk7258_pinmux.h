@@ -73,6 +73,7 @@ enum bk7258_shared_rail_client_e
   BK7258_SHARED_RAIL_SDIO = 0,
   BK7258_SHARED_RAIL_LCD,
   BK7258_SHARED_RAIL_NFC,
+  BK7258_SHARED_RAIL_MOTOR,
 };
 
 /****************************************************************************
@@ -100,7 +101,8 @@ int bk7258_gpio_read_output(uint8_t pin, FAR bool *high);
 
 /* Open-drain helpers keep the input path enabled and only switch the low
  * output driver.  fast_write is reserved for timing-sensitive board buses
- * after the pin has been configured once through the normal interface.
+ * and bounded actuator shutdown after the pin has been configured once
+ * through the normal interface.  fast_write is nonblocking and ISR-safe.
  */
 
 int bk7258_gpio_configure_open_drain(uint8_t pin,
