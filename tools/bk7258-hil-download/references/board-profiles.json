@@ -1,0 +1,122 @@
+{
+  "format": 1,
+  "profiles": {
+    "aidk_ai_toy": {
+      "label": "AIDK AI Toy",
+      "aliases": ["aidk", "aidk-ai-toy"],
+      "download": {
+        "allowed_transports": ["single"],
+        "default_transport": "single",
+        "allowed_artifact_kinds": ["direct-full", "device-bound-full"],
+        "single_image_size": 8388608,
+        "baud": 460800,
+        "start": "0x0",
+        "reset_command": "reset reboot",
+        "hard_reset": 0,
+        "reboot": 1,
+        "uart_type": "CH340",
+        "fast_link": 1,
+        "reset_strategy": "loader-software-reboot",
+        "port_role": "CH340 UART0 console and BK Loader control",
+        "entry": "BK Loader owns the atomic software reboot and Boot ROM window; K1 is the manual fallback"
+      },
+      "debug": {
+        "console_baud": 115200,
+        "port_topology": "same-console-and-download-port",
+        "default_action": "capture",
+        "allowed_actions": ["capture", "manual-reset"],
+        "rts_dtr_policy": "forbidden: CH340 RTS/CTS are not connected to CEN",
+        "reset_port_required": false,
+        "pulse_mode": null,
+        "pulse_active_level": null,
+        "pulse_ms": null,
+        "jlink_device": null,
+        "jlink_speed": null
+      },
+      "sources": [
+        "boards/bk7258/aidk_ai_toy/AUTOMATION.md:8-32",
+        "boards/bk7258/aidk_ai_toy/AUTOMATION.md:89-100"
+      ]
+    },
+    "t5ai_core": {
+      "label": "T5AI-Core V1.0.1",
+      "aliases": ["t5core", "t5-core", "t5ai-core"],
+      "download": {
+        "allowed_transports": ["multi", "single"],
+        "default_transport": "multi",
+        "allowed_artifact_kinds": ["direct-full", "direct-segments", "signed-full", "signed-segments"],
+        "single_image_size": null,
+        "baud": 6000000,
+        "start": "0x0",
+        "reset_command": null,
+        "hard_reset": null,
+        "reboot": 1,
+        "uart_type": "OTHER",
+        "fast_link": 1,
+        "reset_strategy": "loader-usb-uart-rts",
+        "port_role": "CH342F download/reset channel; console is the other UART0 channel",
+        "entry": "BK Loader owns the USB-UART RTS download window; keep console capture on the distinct UART0 COM port"
+      },
+      "debug": {
+        "console_baud": 460800,
+        "port_topology": "separate-console-and-reset-download-ports",
+        "default_action": "capture",
+        "allowed_actions": ["capture", "manual-reset", "serial-pulse", "jlink-reset"],
+        "rts_dtr_policy": "RTS reset is available on the USB-to-UART download channel; do not borrow this rule for AIDK",
+        "reset_port_required": true,
+        "pulse_mode": "RTS",
+        "pulse_active_level": "Asserted",
+        "pulse_ms": 150,
+        "jlink_device": "CORTEX-M33",
+        "jlink_speed": 1000
+      },
+      "sources": [
+        "docs/platforms/bk7258/hardware/t5ai-core/README.md:23-58",
+        "docs/platforms/bk7258/hardware/t5ai-core/README.md:91-98",
+        "docs/platforms/bk7258/hardware/t5ai-core/validation-2026-08-09.md:27-30",
+        "docs/platforms/bk7258/hardware/t5ai-core/validation-2026-08-09.md:45-64",
+        "operator-confirmed:2026-09-04 USB-to-UART download RTS reset"
+      ]
+    },
+    "t5_board": {
+      "label": "T5-Board V1.0.2",
+      "aliases": ["t5board", "t5-board"],
+      "download": {
+        "allowed_transports": ["multi", "single"],
+        "default_transport": "multi",
+        "allowed_artifact_kinds": ["direct-full", "direct-segments", "signed-full", "signed-segments"],
+        "single_image_size": null,
+        "baud": 6000000,
+        "start": "0x0",
+        "reset_command": null,
+        "hard_reset": null,
+        "reboot": 1,
+        "uart_type": "OTHER",
+        "fast_link": 1,
+        "reset_strategy": "loader-usb-uart-rts",
+        "port_role": "UART0 is both BK Loader download/control and runtime console",
+        "entry": "BK Loader owns the USB-UART RTS download window; post-flash capture may use inline RTS on the same UART0 COM"
+      },
+      "debug": {
+        "console_baud": 115200,
+        "port_topology": "same-console-and-download-port",
+        "default_action": "capture",
+        "allowed_actions": ["capture", "manual-reset", "serial-pulse"],
+        "rts_dtr_policy": "RTS reset is available on the USB-to-UART download/console channel; do not borrow this rule for AIDK",
+        "reset_port_required": false,
+        "pulse_mode": "RTS",
+        "pulse_active_level": "Asserted",
+        "pulse_ms": 150,
+        "jlink_device": null,
+        "jlink_speed": null
+      },
+      "sources": [
+        "docs/verification/bk7258/2026-08-20-bk7258-t5-board-signed-hardware.md:55-82",
+        "docs/verification/bk7258/2026-08-20-bk7258-t5-board-signed-hardware.md:107-118",
+        "docs/verification/bk7258/2026-08-24-bk7258-openvela-agent-ap.md:47-70",
+        "docs/verification/bk7258/2026-08-27-bk7258-p0-xts-completion.md:5-9",
+        "operator-confirmed:2026-09-04 USB-to-UART download RTS reset"
+      ]
+    }
+  }
+}
