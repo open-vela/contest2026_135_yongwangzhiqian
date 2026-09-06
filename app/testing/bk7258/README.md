@@ -21,3 +21,40 @@ tests use the public UART device and versioned AP lifecycle/supervisor APIs.
 They do not call Beken SDK functions and do not reach into AP-owned peripheral
 drivers.  Board-specific AP boot evidence is selected explicitly by the linked
 official pytest case under `tests/pytest/test_bk7258`.
+
+## AP standard driver tests over RPMsg
+
+The AIDK `drivercheck_cp` / `drivercheck_ap` pair enables the official
+`rexec` client on CP and `rexecd -r` on AP.  The AP still starts through
+`bk7258_ap_main`; its application lifecycle initializes NSH and starts the
+RPMsg server after board initialization.  No AP UART shell or IP rexec
+listener is started.  Tests run only when explicitly requested from CP.
+Build this pair with the common CLI's explicit `--cp-config`, `--ap-config`
+and `--partition` options described in `boards/bk7258/CONFIGS.md`.
+
+First check the command transport and audio device, then run only the input
+case with 16 kHz, 16-bit, mono PCM.  `/dev/null` discards captured audio:
+
+```text
+rexec -r -H ap echo AP_REXEC_READY
+rexec -r -H ap ls /dev/audio
+rexec -r -H ap "cmocka_driver_audio -a1 -t5 -p/dev/null -s16000 -c1"
+```
+
+The standard audio test's duration is checked after receiving buffers; it is
+not a hard timeout for a stalled driver.  Require the CMocka result and a
+subsequent responsive AP status before accepting a run.  This checks the raw
+capture lifecycle, not microphone sound quality or AEC performance.  Do not
+run all driver tests: some require physical loopback fixtures or writable GPIOs.
+
+The CP profile also provides the standard watchdog example.  The following
+command feeds for one second, then intentionally stops feeding a two-second
+hardware watchdog.  Run it only on an idle board with no active media write:
+
+```text
+wdog -i/dev/watchdog0 -shard -t2000 -d1000 -p200
+```
+
+After reboot, run `resetcause` and `apctl status`.  Acceptance requires the
+watchdog reset cause plus recovered AP/RPMsg health; a boot banner alone does
+not establish that the watchdog caused the reset.

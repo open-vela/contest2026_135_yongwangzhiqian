@@ -1,5 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 
+config TESTS_BK7258_RPMSG_EXEC
+	bool "BK7258 AP driver-check commands over RPMsg"
+	default n
+	depends on ARCH_CHIP_BK7258 && BK7258_AP_CORE && BK7258_RPTUN
+	select BK7258_AP_APPLICATION_LIFECYCLE
+	select NET
+	select NET_RPMSG
+	select NET_LOCAL
+	select NET_LOCAL_STREAM
+	select NETUTILS_REXECD
+	select NSH_LIBRARY
+	select NSH_CONSOLE
+	select SYSTEM_READLINE
+	select NSH_BUILTIN_APPS
+	select BUILTIN
+	select SYSTEM_POPEN
+	select PIPES
+	select LIBC_EXECFUNCS
+	help
+		Start the official rexecd application with AF_RPMSG after normal AP
+		startup.  CP can run selected standard driver tests without an AP
+		UART console.  This belongs only in explicit drivercheck profiles;
+		it does not start an IPv4/IPv6 listener or run tests automatically.
+
 config TESTS_BK7258_CMOCKA
 	tristate "BK7258 CP/AP lifecycle contract tests"
 	default n
