@@ -12,8 +12,9 @@ config BK7258_BOARD_AIDK_AI_TOY
 		SC7A20H accelerometer on SoC I2C0 (P20/P21), GC2145 SCCB on SoC
 		I2C1 map mode 1 (P42/P43), SD NAND, MIC1 plus MIC2
 		AEC-reference/PA audio, keys/LEDs, MFRC522 NFC and Type-C USB.  CN5's
-		single-screen module and CN10's motor are not connected on the current
-		board and are not initialized.  Hardware verification is still pending.
+		single-screen module is disconnected. CN10's motor is fitted and
+		P9 is reserved for its active-high control; fitting does not imply
+		that the motor driver has passed hardware verification.
 
 config BK7258_AIDK_SD_NAND
 	bool "AIDK SD NAND"
