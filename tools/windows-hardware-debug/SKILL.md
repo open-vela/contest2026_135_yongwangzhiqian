@@ -1,9 +1,25 @@
 ---
 name: windows-hardware-debug
-description: Capture and verify embedded-device UART logs, perform guarded SEGGER J-Link diagnostics, publish bounded Windows BLE test advertisements, and run bounded no-GUI Windows BLE Central/GATT probes from Windows or WSL2. Use for serial boot-log collection, reset-synchronized capture, DTR/RTS reset diagnosis, J-Link register or memory inspection, real-RF BLE scan validation, GATT read/write/notify validation, and reproducible hardware-debug evidence. Do not use it for flashing, erasing, fuse/security changes, unreviewed arbitrary J-Link commands, pairing-state changes, or treating host-side BLE status as complete target proof.
+description: Explicit-invocation-only Windows UART, guarded J-Link, and BLE evidence tools. Use this skill only when the user names windows-hardware-debug or explicitly asks to use this debug skill for an identified target. Do not auto-select it from generic debug, serial, COM, embedded, or BK7258 keywords. BK7258 work starts from its board-specific workflow. This skill does not flash, erase, write memory, or change security state.
 ---
 
 # Windows Hardware Debug
+
+## Invocation and target boundary
+
+- Load this skill only when the user explicitly names it. A request to debug,
+  flash, collect logs, or validate firmware does not by itself invoke this
+  generic skill. `agents/openai.yaml` disables implicit invocation.
+- BK7258 tasks start from `bk7258-hil-download` and the applicable board
+  instructions. That workflow may use these scripts as a reviewed transport
+  implementation after freezing the board, COM role, action, and artifact;
+  it does not authorize generic RTS/DTR or J-Link actions on the board.
+- A COM number in an example or an old session is not target identification.
+  Enumerate current ports and establish the requested device-to-port mapping
+  before opening a port. Never probe unrelated ports to find a familiar log.
+- `CaptureOnly` means no built-in reset action, not necessarily read-only:
+  `--command` sends bytes to the target. Review every console command under
+  the current task scope; do not use it to bypass reset/write boundaries.
 
 Use the scripts in `scripts/` to collect evidence without hard-coding a board,
 COM port, baud rate, CPU, address, or reset polarity.
@@ -46,6 +62,8 @@ only; retain the target's raw address, RSSI, and advertising bytes as RF proof.
   pulses. Keep the script's authorization switch intact.
 - Do not flash, erase, load an image, write memory, change option bytes/fuses,
   or alter security state with this skill.
+- For BK7258 downloads, use the sibling `bk7258-hil-download` skill for the
+  profile-aware BK Loader stage, then return here for post-flash evidence.
 - Do not use `jlink_debug.ps1 -Action CommandFile` unless the user explicitly
   requests the reviewed file and accepts its effects. Never run an untrusted
   command file.
@@ -60,10 +78,12 @@ only; retain the target's raw address, RSSI, and advertising bytes as RF proof.
 
 ## Resources
 
-- Read `AI_AGENT_SOP.md` for the evidence and authorization checklist before
-  controlling a target or diagnosing a failure.
-- Read `SOP.zh-CN.md` for installation, commands, output layout, and Windows/WSL2
-  troubleshooting.
+- Before target control, read the applicable authorization and evidence
+  checklist in `AI_AGENT_SOP.md`. For failure diagnosis, read only the
+  checklist relevant to the failing action.
+- Use the relevant section of `SOP.zh-CN.md` for installation, UART, J-Link or
+  Windows/WSL2 troubleshooting. A known capture command does not require
+  rereading the entire installation and debug guide.
 - Read `ble-advertiser/README.md` before generating a real BLE RF source; use
   its scripts rather than reimplementing Windows Runtime publication ad hoc.
 - Read `ble-gatt-client/README.md` before connecting to a target; use an exact

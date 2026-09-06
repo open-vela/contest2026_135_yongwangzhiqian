@@ -2,3 +2,6 @@ interface:
   display_name: "Windows Hardware Debug"
   short_description: "Capture UART, inspect J-Link, and validate BLE RF"
   default_prompt: "Use $windows-hardware-debug to capture target evidence or validate a bounded BLE RF scan safely."
+
+policy:
+  allow_implicit_invocation: false
