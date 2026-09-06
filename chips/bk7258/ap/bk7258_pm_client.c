@@ -299,7 +299,7 @@ static int bk7258_pm_send_bounded(struct bk7258_pm_client_s *priv,
           return OK;
         }
 
-      if (ret != -ENOMEM && ret != -EAGAIN)
+      if (ret != RPMSG_ERR_NO_BUFF && ret != -ENOMEM && ret != -EAGAIN)
         {
           return ret;
         }

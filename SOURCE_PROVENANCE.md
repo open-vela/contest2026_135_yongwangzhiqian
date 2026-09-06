@@ -45,3 +45,21 @@ Ethernet 公开头均声明 Apache-2.0。MCUboot 由 openvela 工作区的 `apps
 BK7258 主机测试的更细分类见
 [`tests/host/bk7258/PROVENANCE.md`](tests/host/bk7258/PROVENANCE.md)。第三方项目、预构建工具、
 生成输出及历史材料继续适用各自声明；SPDX 补齐不改变其版权归属。
+
+## 摄像头与 SDIO 录像适配
+
+- `nuttx/drivers/video/gc2145.c`、公开头文件及板级回调为本项目 Apache-2.0
+  实现。控制寄存器依据 GalaxyCore GC2145 CSP DataSheet V1.0
+  （2013-12-01）第 22、23、32、35 页；默认值参照固定 SDK 的
+  `ap/components/bk_peripheral/src/dvp/dvp_gc2145.c` 初始化表。
+- `chips/bk7258/bk_idk/sdk-profiles/v3.1.1.9/ap-sdio-tx-start.patch` 和
+  `ap-dvp-register-errors.patch` 派生自固定 Beken 提交
+  `cb080de1655d579c7593ecf504c440997c4c137b`（Apache-2.0），分别修复 SDIO
+  FIFO 中断掩码顺序/判定和 DVP/GC2145 寄存器错误传播。规范 rebuild 仅为
+  `ap-aidk` 在临时克隆应用，未修改固定 SDK checkout。
+- `nuttx/patches/{video,mmcsd,fs}` 是针对 OpenVela NuttX
+  `76354c637858ecb0aa4601629327acb6f44a26bb` 的 Apache-2.0 修复，涵盖
+  V4L2 scalar 控制初始化/编号、MMCSD 传输限制/完成与 FAT 错误传播。
+  保留为维护补丁，应用步骤见 [补丁说明](nuttx/patches/README.md)。
+- `app/bk7258/bk7258_vision_*`、`bk7258_media_volume.*`、I2C 资源引用计数和
+  配套宿主回归是本项目实现，使用 Apache-2.0。

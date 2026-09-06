@@ -46,6 +46,29 @@ config BK7258_APP_VOICE_STACKSIZE
 
 endif
 
+config BK7258_APP_VISION
+	bool "BK7258 camera command (bkvision)"
+	default n
+	depends on !BK7258_AP_CORE && BK7258_RPTUN && SYSTEM_NSH
+	select BUILTIN
+	select NSH_BUILTIN_APPS
+
+if BK7258_APP_VISION
+
+config BK7258_APP_VISION_PROGNAME
+	string "bkvision program name"
+	default "bkvision"
+
+config BK7258_APP_VISION_PRIORITY
+	int "bkvision priority"
+	default 100
+
+config BK7258_APP_VISION_STACKSIZE
+	int "bkvision stack size"
+	default 4096
+
+endif
+
 config BK7258_VOICE_SERVICE
 	bool "BK7258 AP authorized-voice service"
 	default n
@@ -74,6 +97,62 @@ config BK7258_VOICE_SERVICE_PRIORITY
 config BK7258_VOICE_SERVICE_STACKSIZE
 	int "BKVoice AP worker stack size"
 	default 8192
+
+endif
+
+config BK7258_VISION_SERVICE
+	bool "BK7258 AP camera recording service"
+	default n
+	depends on BK7258_AP_CORE && BK7258_RPTUN && BK7258_AIDK_CAMERA
+	depends on !SYSTEM_NXCAMERA && !EXAMPLES_CAMERA
+	select BK7258_AP_APPLICATION_LIFECYCLE
+
+if BK7258_VISION_SERVICE
+
+config BK7258_VISION_DEVPATH
+	string "BKVision V4L2 capture device"
+	default "/dev/video0"
+
+config BK7258_VISION_WIDTH
+	int "BKVision capture width"
+	default 640
+	range 1 4096
+
+config BK7258_VISION_HEIGHT
+	int "BKVision capture height"
+	default 480
+	range 1 4096
+
+config BK7258_VISION_FPS
+	int "BKVision requested capture frame rate"
+	default 30
+	range 1 30
+
+config BK7258_VISION_JPEG_BUFFER_BYTES
+	int "BKVision maximum JPEG buffer size"
+	default 102400
+	range 4096 1048576
+
+config BK7258_VISION_RECORD_BUFFERS
+	int "BKVision continuous capture buffer count"
+	default 8 if VIDEO_REQBUFS_COUNT_MAX >= 8
+	default 3
+	range 3 VIDEO_REQBUFS_COUNT_MAX
+
+config BK7258_VISION_CAPTURE_TIMEOUT_MS
+	int "BKVision capture timeout in milliseconds"
+	default 3000
+	range 100 30000
+
+config BK7258_VISION_RPC_PRIORITY
+	int "BKVision RPMsg worker priority"
+	default 80
+	range 1 255
+
+config BK7258_VISION_RPC_STACKSIZE
+	int "BKVision RPMsg worker stack size"
+	default 6144
+	range 2048 32768
 
 endif
 

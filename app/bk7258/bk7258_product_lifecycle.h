@@ -21,4 +21,9 @@ int bk7258_voice_service_prepare(void);
 int bk7258_voice_service_start(void);
 #endif
 
+#ifdef CONFIG_BK7258_VISION_SERVICE
+int bk7258_vision_service_prepare(void);
+int bk7258_vision_service_start(void);
+#endif
+
 #endif /* __APP_BK7258_BK7258_PRODUCT_LIFECYCLE_H */

@@ -44,7 +44,7 @@
 #define BK7258_BOARD_HAS_AUDIO                   1  /* HT6873 PA, AUDLP/AUDLN */
 #define BK7258_BOARD_HAS_BATTERY                 1  /* ETA4322 + 4.2V VBAT */
 #define BK7258_BOARD_HAS_TF_CARD                 0
-#define BK7258_BOARD_HAS_SD_NAND                 1  /* 1GB SD NAND, SDIO P14-P19 */
+#define BK7258_BOARD_HAS_SD_NAND                 1  /* SD NAND, SDIO P14-P19 */
 #define BK7258_BOARD_HAS_RGB_LCD_CONNECTOR       0
 #define BK7258_BOARD_HAS_SPI_LCD_CONNECTOR       0
 #define BK7258_BOARD_HAS_QSPI_LCD_CONNECTOR      1  /* CN5, QSPI P2-P7 */

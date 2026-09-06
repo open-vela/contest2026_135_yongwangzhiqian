@@ -4,8 +4,13 @@
 
 include $(APPDIR)/Make.defs
 
-ifneq ($(filter y,$(CONFIG_BK7258_APP_AGENT) $(CONFIG_BK7258_VOICE_SERVICE)),)
+ifneq ($(filter y,$(CONFIG_BK7258_APP_AGENT) $(CONFIG_BK7258_VOICE_SERVICE) $(CONFIG_BK7258_VISION_SERVICE)),)
 CSRCS += bk7258_product_lifecycle.c
+endif
+
+ifeq ($(CONFIG_BK7258_VISION_SERVICE),y)
+CSRCS += bk7258_vision_service.c bk7258_vision_core.c bk7258_vision_record.c
+CSRCS += bk7258_media_volume.c
 endif
 
 ifeq ($(CONFIG_BK7258_APP_AGENT),y)
@@ -42,6 +47,14 @@ PRIORITY  += $(CONFIG_BK7258_APP_VOICE_PRIORITY)
 STACKSIZE += $(CONFIG_BK7258_APP_VOICE_STACKSIZE)
 MAINSRC   += bk7258_voice_main.c
 CSRCS     += bk7258_voice_client.c
+endif
+
+ifeq ($(CONFIG_BK7258_APP_VISION),y)
+PROGNAME  += $(CONFIG_BK7258_APP_VISION_PROGNAME)
+PRIORITY  += $(CONFIG_BK7258_APP_VISION_PRIORITY)
+STACKSIZE += $(CONFIG_BK7258_APP_VISION_STACKSIZE)
+MAINSRC   += bk7258_vision_main.c
+CSRCS     += bk7258_vision_client.c bk7258_vision_core.c
 endif
 
 ifeq ($(CONFIG_BK7258_APP_OTA),y)

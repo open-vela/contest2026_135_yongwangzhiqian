@@ -62,6 +62,24 @@ extern "C"
  * Public Function Prototypes
  ****************************************************************************/
 
+#if defined(CONFIG_BK7258_AP_CORE) && \
+    (defined(CONFIG_BK7258_I2C) || defined(CONFIG_BK7258_DVP))
+
+/****************************************************************************
+ * Name: bk7258_i2c_driver_acquire / bk7258_i2c_driver_release
+ *
+ * Description:
+ *   Hold or release one AP client reference to the SDK-global I2C driver.
+ *   Controller-specific bk_i2c_init()/deinit() remains the client's
+ *   responsibility.  A failed final release retains the reference so the
+ *   owner can retry without exposing inconsistent global state.
+ ****************************************************************************/
+
+int bk7258_i2c_driver_acquire(void);
+int bk7258_i2c_driver_release(void);
+
+#endif
+
 #ifdef CONFIG_BK7258_I2C
 #ifdef CONFIG_BK7258_AP_CORE
 
@@ -74,9 +92,9 @@ extern "C"
  *   upper half calls setup(); this only constructs the lower-half and
  *   publishes the node.
  *
- *   The underlying Beken I2C driver (bk_i2c_driver_init) is reference counted
- *   so multiple buses could share it; this configured instance owns exactly
- *   one unit.
+ *   The underlying Beken I2C driver root is shared and reference counted;
+ *   this configured instance owns exactly one controller and one root
+ *   reference while the upper half is open.
  *
  * Returned Value:
  *   OK on success; a negated errno value on failure.  Calling it twice is

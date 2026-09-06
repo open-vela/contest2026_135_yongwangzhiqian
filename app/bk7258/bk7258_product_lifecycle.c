@@ -28,6 +28,14 @@ int bk7258_ap_application_prepare(void)
     }
 #endif
 
+#ifdef CONFIG_BK7258_VISION_SERVICE
+  ret = bk7258_vision_service_prepare();
+  if (ret < 0)
+    {
+      return ret;
+    }
+#endif
+
 #ifdef CONFIG_BK7258_VOICE_SERVICE
   ret = bk7258_voice_service_prepare();
   if (ret < 0)
@@ -42,6 +50,14 @@ int bk7258_ap_application_prepare(void)
 int bk7258_ap_application_start(void)
 {
   int ret;
+
+#ifdef CONFIG_BK7258_VISION_SERVICE
+  ret = bk7258_vision_service_start();
+  if (ret < 0)
+    {
+      return ret;
+    }
+#endif
 
 #ifdef CONFIG_BK7258_VOICE_SERVICE
   ret = bk7258_voice_service_start();

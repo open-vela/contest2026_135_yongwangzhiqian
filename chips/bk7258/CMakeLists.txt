@@ -338,6 +338,10 @@ foreach(BK7258_AP_PERIPHERAL AUD GPIOE I2C I2S)
   endif()
 endforeach()
 
+if(CONFIG_BK7258_I2C OR CONFIG_BK7258_DVP)
+  list(APPEND BK7258_AP_BASE_SRCS ap/bk7258_i2c_resource.c)
+endif()
+
 if(CONFIG_BK7258_AUDIO_PREPROCESS)
   list(APPEND BK7258_AP_BASE_SRCS ap/bk7258_audio_preprocess.c)
 endif()
@@ -360,6 +364,11 @@ endif()
 if(CONFIG_LCD_GC9D01)
   list(APPEND BK7258_AP_BASE_SRCS
        ${BK7258_NUTTX_OVERLAY_DIR}/drivers/lcd/gc9d01.c)
+endif()
+
+if(CONFIG_VIDEO_GC2145_CONTROLS)
+  list(APPEND BK7258_AP_BASE_SRCS
+       ${BK7258_NUTTX_OVERLAY_DIR}/drivers/video/gc2145.c)
 endif()
 
 if(CONFIG_SENSORS_SC7A20)
@@ -430,6 +439,12 @@ if(CONFIG_BK7258_DVP)
   list(APPEND BK7258_AP_BASE_SRCS ap/bk7258_dvp.c)
 endif()
 
+if(CONFIG_BK7258_DVP_SENSOR_GC2145)
+  # Retain the fitted sensor descriptor registered only through a section.
+  target_link_options(nuttx PRIVATE
+                      "LINKER:--undefined=gc2145_detect_sensor")
+endif()
+
 if(CONFIG_BK7258_DMA2D)
   list(APPEND BK7258_AP_BASE_SRCS ap/bk7258_dma2d.c)
   bk7258_wrap_sdk_symbol(sys_drv_dma2d_set)
@@ -469,6 +484,7 @@ if(CONFIG_BK7258_DVP_BOARD_GLUE)
     bk_i2c_deinit_v2
     bk_i2c_memory_read_v2
     bk_i2c_memory_write_v2
+    bk_pm_module_vote_psram_ctrl
     dvp_camera_mclk_enable)
 endif()
 

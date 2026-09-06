@@ -199,6 +199,17 @@ int bk7258_dvp_uninitialize(FAR struct bk7258_dvp_s *priv);
 /* Board PM integration helpers.  They map directly to the SDK suspend and
  * resume operations and must be called in normal thread context. */
 
+/* Internal sensor-driver transport. Hold sensor_lock across an entire
+ * page-select/read/write/restore transaction. These are not device ioctls.
+ */
+
+int bk7258_dvp_sensor_lock(FAR struct bk7258_dvp_s *priv);
+void bk7258_dvp_sensor_unlock(FAR struct bk7258_dvp_s *priv);
+int bk7258_dvp_sensor_read(FAR struct bk7258_dvp_s *priv, uint8_t reg,
+                           FAR uint8_t *value);
+int bk7258_dvp_sensor_write(FAR struct bk7258_dvp_s *priv, uint8_t reg,
+                            uint8_t value);
+
 int bk7258_dvp_suspend(FAR struct bk7258_dvp_s *priv);
 int bk7258_dvp_resume(FAR struct bk7258_dvp_s *priv);
 
