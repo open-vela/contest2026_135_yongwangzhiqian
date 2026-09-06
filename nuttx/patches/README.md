@@ -24,3 +24,37 @@ done
 `video/0001` 涉及控制编号 ABI，内核与客户端必须一起重建。
 AIDK 配置选择一个扇区读、16 个扇区写、禁用 ACMD23；其他板卡默认值不变。
 补丁不更改 CSD 容量、不格式化介质，也不把传输失败转换为成功。
+
+## OpenAMP / libmetal 依赖
+
+OpenAMP 和 libmetal **没有本项目维护的源码补丁**。它们是工作区 repo
+manifest 管理的依赖，T5 的 LittleFS 同样使用 manifest 项目。准确版本、提交和 tree ID 记录在
+`nuttx/dependencies.lock.json`。先按官方 OpenVela manifest 同步这三个项目，
+再由构建工作区以锁定 commit 的 clean Git archive 装配；不要用任意 upstream
+zip 替换，也不要从已有展开目录复制头文件。
+
+可在 host 上运行下列验证，它会从三个 clean Git checkout 的锁定 commit 创建
+临时 archive，检查 tree ID 与 OpenAMP ABI，并编译一个仅含头文件的 ABI 探针：
+
+```sh
+python3 tests/host/bk7258/test_bk7258_openamp_dependencies.py
+```
+
+隔离构建使用同一个公开入口：
+
+```sh
+python3 tools/bk7258/bk7258.py build --workspace /absolute/validation-workspace \
+  --board aidk_ai_toy --boot mcuboot --clean --jobs 8 \
+  --bl1-public-key "$BL1_PUBLIC" --mcuboot-public-key "$MCUBOOT_PUBLIC" \
+  --openssl /usr/bin/openssl --rollback-floor "$RELEASE_GENERATION"
+```
+
+`--workspace` 中的 NuttX 是固定基线加上表补丁；`build.sh` 必须指向该副本内部的
+官方入口。`apps`、`build`、`external`、`frameworks`、`prebuilts` 可链接到官方工作区；
+`vendor/beken/{boards/bk7258,chips/bk7258,nuttx,prebuilt}` 必须链接到当前团队仓库对应
+目录，工具会拒绝其他源码映射。依赖使用锁定提交的 `git archive` 重建给 CMake；
+使用 Make 时保留官方 manifest 的真实 Git checkout，以适配其 `.git` 探测。
+
+后续 `verify build-manifest`、签名和 release 命令传入生成 manifest 的绝对路径。
+全量发布版本的 generation 必须等于编译时的 rollback floor；私钥和设备绑定备份
+继续遵循板级 AUTOMATION，不写入这个依赖锁或源码提交。
