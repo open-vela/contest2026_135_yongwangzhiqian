@@ -103,3 +103,8 @@ bkvoice stress /mnt/voice/voicepack.ini greeting 100
 AIDK 的 SD NAND 只注册为 `/dev/mmcsd0`，App 不自动挂载，也不把 `/data`
 误认为 SD NAND。详细格式、挂载互斥、训练边界和验收步骤见
 [BKVoice 本地授权语音应用](../../docs/platforms/bk7258/bkvoice-authorized-voice-app.md)。
+
+## 摄像头与录像
+
+`bkvision` 提供 JPEG 采集、1–60 秒 AVI 录像和只读录像检查。
+配置、资源归属与验证范围见 [摄像头与录像说明](../../docs/platforms/bk7258/bkvision-camera-recording.md)。

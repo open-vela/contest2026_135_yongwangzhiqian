@@ -199,6 +199,9 @@ HEADER_CHECK_FLAGS := -Wall -Wextra -Werror -fsyntax-only \
 VOICE_PACK_TARGET := $(BUILD)/test_bk7258_voice_pack
 VOICE_PACK_ROOT := $(REPOSITORY_ROOT)/app/bk7258
 VOICE_PACK_CFLAGS := -std=gnu11 -Wall -Wextra -Werror -O2
+VISION_CORE_TARGET := $(BUILD)/test_bk7258_vision_core
+VISION_RECORD_TARGET := $(BUILD)/test_bk7258_vision_record
+MEDIA_VOLUME_TARGET := $(BUILD)/test_bk7258_media_volume
 VOICE_COMPANION_TARGET := $(BUILD)/test_bk7258_voice_companion
 VOICE_TURN_TARGET := $(BUILD)/test_bk7258_voice_turn
 VOICE_TURN_AUDIO_TARGET := $(BUILD)/test_bk7258_voice_turn_audio
@@ -206,11 +209,12 @@ MEDIA_INCLUDE := $(OPENVELA_ROOT)/apps/frameworks/multimedia/media/include
 
 .PHONY: all check check-layers check-package-tools clean bl1 bl2 ap headers platform storage-contract flash \
 	ota-contract reset-marker voice-pack voice-companion voice-turn \
-	voice-turn-audio run \
+	voice-turn-audio vision-core vision-record media-volume run \
 	run-core run-bl1 run-bl2 run-ap run-headers run-platform \
 	run-storage-contract run-ota-contract run-ota-confirmation \
 		run-reset-marker run-flash run-voice-pack run-voice-companion \
-		run-voice-turn run-voice-turn-audio \
+		run-voice-turn run-voice-turn-audio run-vision-core run-vision-record \
+		run-media-volume \
 		ota-confirmation
 
 check:
@@ -257,7 +261,7 @@ all: $(TARGET) $(POLICY_TARGET) $(PM_ACTIVITY_TARGET) \
 	$(VOICE_TURN_AUDIO_TARGET) \
 	bl1 bl2 ap
 
-run: run-headers run-core run-platform run-flash run-ota-confirmation \
+run: run-camera-storage run-vision-core run-vision-record run-media-volume run-headers run-core run-platform run-flash run-ota-confirmation \
 	run-bl1 run-bl2 run-ap run-voice-pack run-voice-companion \
 	run-voice-turn run-voice-turn-audio
 
@@ -312,6 +316,46 @@ voice-turn-audio: $(VOICE_TURN_AUDIO_TARGET)
 
 run-voice-turn-audio: voice-turn-audio
 	./$(VOICE_TURN_AUDIO_TARGET)
+
+$(VISION_CORE_TARGET): test_bk7258_vision_core.c \
+	$(VOICE_PACK_ROOT)/bk7258_vision_core.c \
+	$(VOICE_PACK_ROOT)/bk7258_vision_core.h \
+	$(VOICE_PACK_ROOT)/bk7258_vision_protocol.h | $(BUILD)
+	$(CC) $(VOICE_PACK_CFLAGS) test_bk7258_vision_core.c \
+		$(VOICE_PACK_ROOT)/bk7258_vision_core.c \
+		-I $(VOICE_PACK_ROOT) -o $@
+
+vision-core: $(VISION_CORE_TARGET)
+
+run-vision-core: vision-core
+	./$(VISION_CORE_TARGET)
+
+$(VISION_RECORD_TARGET): test_bk7258_vision_record.c \
+	$(VOICE_PACK_ROOT)/bk7258_vision_record.c \
+	$(VOICE_PACK_ROOT)/bk7258_vision_record.h | $(BUILD)
+	$(CC) $(VOICE_PACK_CFLAGS) test_bk7258_vision_record.c \
+		$(VOICE_PACK_ROOT)/bk7258_vision_record.c \
+		-Wl,--wrap=write \
+		-I $(VOICE_PACK_ROOT) -o $@
+
+vision-record: $(VISION_RECORD_TARGET)
+
+run-vision-record: vision-record
+	./$(VISION_RECORD_TARGET)
+
+$(MEDIA_VOLUME_TARGET): test_bk7258_media_volume.c \
+	$(VOICE_PACK_ROOT)/bk7258_media_volume.c \
+	$(VOICE_PACK_ROOT)/bk7258_media_volume.h | $(BUILD)
+	$(CC) $(VOICE_PACK_CFLAGS) -DCONFIG_BK7258_USBMODE -DCONFIG_BK7258_AP_CORE \
+		-I $(MOCKS) -I $(CHIP_ROOT)/include -I $(VOICE_PACK_ROOT) \
+		-include $(CHIP_ROOT)/include/bk7258_usbmode.h \
+		-include $(MOCKS)/bk7258_usbmode_lease.h \
+		test_bk7258_media_volume.c $(VOICE_PACK_ROOT)/bk7258_media_volume.c -o $@
+
+media-volume: $(MEDIA_VOLUME_TARGET)
+
+run-media-volume: media-volume
+	./$(MEDIA_VOLUME_TARGET)
 
 .PHONY: board-layers
 
@@ -1192,3 +1236,8 @@ run-ap: ap
 
 clean:
 	rm -rf $(BUILD)
+
+.PHONY: run-camera-storage
+run-camera-storage:
+	python3 test_gc2145_controls.py
+	python3 test_sdio_tx_sram.py

@@ -21,9 +21,10 @@
  * Notes on SDK behaviour that shaped this driver (verified against the
  * v3.1.1.9 headers, not assumed):
  *
- *  1. bk_i2c_driver_init() is a global one-time resource init shared by all
- *     units; we call it once on setup and deinit once on shutdown.  It is
- *     safe to call bk_i2c_init(id, cfg) only after driver_init().
+ *  1. bk_i2c_driver_init() is a global resource shared by all units.  The
+ *     AP-wide resource manager holds one reference for this lower-half from
+ *     setup through shutdown.  bk_i2c_init(id, cfg) is safe only while that
+ *     reference is held.
  *  2. The per-transfer SDK calls (bk_i2c_master_*) each issue their own
  *     START+STOP.  The SDK has no raw "hold bus / repeated-start" primitive
  *     exposed here, BUT bk_i2c_memory_read/write() performs the common
@@ -90,7 +91,7 @@ struct bk7258_i2c_priv_s
   i2c_id_t id;                    /* Configured BK7258 I2C unit */
   uint32_t baud;                  /* Last baud rate applied */
   bool initialized;               /* bk_i2c_init() done for this unit */
-  bool driver_init;               /* bk_i2c_driver_init() done */
+  bool driver_init;               /* SDK-global driver reference held */
   bool registered;                /* /dev/i2cN upper half registered */
 };
 
@@ -424,10 +425,9 @@ static int bk7258_i2c_setup(FAR struct i2c_master_s *dev)
 
   if (!priv->driver_init)
     {
-      err = bk_i2c_driver_init();
-      if (err != BK_OK)
+      ret = bk7258_i2c_driver_acquire();
+      if (ret < 0)
         {
-          ret = bk7258_i2c_map_err(err);
           nxmutex_unlock(&priv->lock);
           return ret;
         }
@@ -453,7 +453,7 @@ static int bk7258_i2c_setup(FAR struct i2c_master_s *dev)
 
       if (priv->driver_init)
         {
-          if (bk_i2c_driver_deinit() == BK_OK)
+          if (bk7258_i2c_driver_release() == 0)
             {
               priv->driver_init = false;
             }
@@ -497,10 +497,9 @@ static int bk7258_i2c_shutdown(FAR struct i2c_master_s *dev)
 
   if (priv->driver_init)
     {
-      err = bk_i2c_driver_deinit();
-      if (err != BK_OK)
+      ret = bk7258_i2c_driver_release();
+      if (ret < 0)
         {
-          ret = bk7258_i2c_map_err(err);
           nxmutex_unlock(&priv->lock);
           return ret;
         }

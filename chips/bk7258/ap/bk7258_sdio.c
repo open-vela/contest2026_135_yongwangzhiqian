@@ -49,7 +49,7 @@
  *  4. The SDK ISR remains the sole owner of command and data status.  Its
  *     public queue wait has a four-millisecond slice, so the lower half waits
  *     repeatedly for the same in-flight command up to the NuttX deadline; it
- *     never masks the SDK IRQ or reads/acknowledges controller status itself.
+ *     never acknowledges controller status itself.
  ****************************************************************************/
 
 /****************************************************************************
@@ -57,6 +57,7 @@
  ****************************************************************************/
 
 #include <nuttx/config.h>
+#include <nuttx/signal.h>
 
 #ifdef CONFIG_BK7258_SDIO
 
@@ -85,6 +86,12 @@
 #include <driver/sdio_host.h>
 #include <driver/sdio_host_types.h>
 #include <driver/gpio.h>
+#ifdef CONFIG_SDIO_V2P0
+#  include <soc/reg_base.h>
+#endif
+#ifdef CONFIG_SDIO_GDMA_EN
+#  include <driver/dma.h>
+#endif
 
 #if defined(CONFIG_BK7258_SDIO_4BIT) && \
     !defined(CONFIG_SDCARD_BUSWIDTH_4LINE)
@@ -147,6 +154,10 @@ struct bk7258_sdio_priv_s
   int last_width_error;             /* Most recent width re-init status */
   uint32_t cmd_timeout;            /* Controller clock-cycle timeout */
   uint32_t data_timeout;           /* Controller clock-cycle timeout */
+#ifdef CONFIG_SDIO_GDMA_EN
+  dma_id_t dma_tx_channel;
+#endif
+
 
   /* Cached data-transfer setup (used by recv/send setup). */
 
@@ -156,6 +167,9 @@ struct bk7258_sdio_priv_s
   size_t nblocks;
   bool xfer_is_read;
   bool xfer_pending;
+  bool single_write;              /* Outstanding NuttX CMD24 request */
+  bool single_read;               /* Outstanding NuttX CMD17 request */
+  uint32_t command_r1;            /* Original response before internal CMD12 */
 
   /* Cached completion status for the polling event shim. */
 
@@ -293,6 +307,8 @@ static int bk7258_sdio_map_err(bk_err_t err)
  * command status and queue delivery throughout the transaction.
  */
 
+
+
 static bk_err_t bk7258_sdio_wait_command(uint32_t cmd_index)
 {
   clock_t start;
@@ -318,6 +334,42 @@ static bk_err_t bk7258_sdio_wait_command(uint32_t cmd_index)
 
   return BK_ERR_SDIO_HOST_CMD_RSP_TIMEOUT;
 }
+
+static bk_err_t bk7258_sdio_retry_status(
+  FAR const sdio_host_cmd_cfg_t *command, bk_err_t err)
+{
+  unsigned int retries = 0;
+
+  /* The SDK's sd_card_driver.c:bk_sdcard_wait_busy_to_idle retries a
+   * command for up to one second while the card finishes programming.
+   * A consumed hardware response-timeout cannot recover by merely waiting
+   * on the now-empty SDK queue. Reissue only the read-only SEND_STATUS;
+   * never replay a data command or suppress CRC/other errors. Each command
+   * wait is bounded to 100 ms, with at most eight additional attempts.
+   */
+
+  while (command->cmd_index == 13u &&
+         err == BK_ERR_SDIO_HOST_CMD_RSP_TIMEOUT && retries < 8u)
+    {
+      retries++;
+      nxsig_usleep(1000);
+      err = bk_sdio_host_send_command(command);
+      if (err != BK_OK)
+        {
+          break;
+        }
+
+      err = bk7258_sdio_wait_command(command->cmd_index);
+    }
+
+  if (retries != 0)
+    {
+      syslog(LOG_WARNING, "BKSDIO STATUS retry=%u sdk=%d\n", retries, err);
+    }
+
+  return err;
+}
+
 
 static int bk7258_sdio_configure_pins(
   FAR const struct bk7258_sdio_pin_config_s *pins)
@@ -444,6 +496,80 @@ static void bk7258_sdio_finish_stop_transmission(void)
   bk_sdio_clk_gate_config(0);
   bk_sdio_host_reset_sd_state();
 }
+
+
+#endif
+
+static int bk7258_sdio_finish_single_transfer(
+  FAR struct bk7258_sdio_priv_s *priv, int result)
+{
+#ifdef CONFIG_SDIO_V2P0
+  sdio_host_cmd_cfg_t command = {0};
+  bk_err_t err;
+  uint32_t r1 = 0;
+  bool stop = (priv->single_write || priv->single_read) && result != OK;
+
+#ifdef CONFIG_SDIO_GDMA_EN
+  /* Only TX uses DMA. Its CMD24 translation needs a bounded STOP even on
+   * success. RX uses the CPU FIFO in both profiles and keeps native CMD17;
+   * abort an incomplete native single-block request only on error.
+   */
+
+  stop = stop || priv->single_write;
+#endif
+  priv->single_write = false;
+  priv->single_read = false;
+  if (stop)
+    {
+      command.cmd_index = 12u;
+      command.response = SDIO_HOST_CMD_RSP_SHORT;
+      command.wait_rsp_timeout = priv->cmd_timeout;
+      command.crc_check = true;
+
+      bk_sdio_host_reset_sd_state();
+      bk_sdio_clk_gate_config(1);
+      err = bk_sdio_host_send_command(&command);
+      if (err == BK_OK)
+        {
+          err = bk7258_sdio_wait_command(12u);
+        }
+
+      if (err == BK_OK)
+        {
+          r1 = bk_sdio_host_get_cmd_rsp_argument(SDIO_HOST_RSP0);
+        }
+
+      bk7258_sdio_finish_stop_transmission();
+      if (result == OK)
+        {
+          result = err != BK_OK ? bk7258_sdio_map_err(err) :
+                   (r1 & 0xfdffe088u) != 0 ? -EIO : OK;
+        }
+    }
+
+#endif
+
+  priv->xfer_result = result;
+  priv->xfer_pending = false;
+  priv->events = result == OK ? SDIOWAIT_TRANSFERDONE : SDIOWAIT_ERROR;
+  return result;
+}
+
+#ifdef CONFIG_SDIO_V2P0
+static void bk7258_sdio_select_single_block(void)
+{
+  /* The SDK's V2 config_data API always selects multiblock mode, matching
+   * its card driver's CMD18/CMD25-only policy. NuttX also issues CMD17/24.
+   * Match the BK7258 LL single-block helpers by changing SD_DATA_MUL_BLK
+   * only: sdio_reg.h word 0x07, bit 3, RW. No IRQ status is acknowledged.
+   * The caller runs before CMD17 or before the first CPU TX FIFO word.
+   */
+
+  FAR volatile uint32_t *control = (FAR volatile uint32_t *)
+    ((uintptr_t)SOC_SDIO_REG_BASE + 0x07u * 4u);
+
+  *control &= ~(1u << 3);
+}
 #endif
 
 /****************************************************************************
@@ -563,7 +689,17 @@ static int bk7258_sdio_host_init_locked(FAR struct bk7258_sdio_priv_s *priv,
 #endif
   cfg.bus_width = widebus ? SDIO_HOST_BUS_WIDTH_4LINE
                           : SDIO_HOST_BUS_WIDTH_1LINE;
+#ifdef CONFIG_SDIO_GDMA_EN
+  /* The selected SDK owns DMA allocation and the blocking completion. */
+  err = bk_dma_driver_init();
+  if (err != BK_OK)
+    {
+      return bk7258_sdio_map_err(err);
+    }
+  cfg.dma_tx_en = 1;
+#else
   cfg.dma_tx_en = 0;
+#endif
   cfg.dma_rx_en = 0;
 
 #ifdef CONFIG_SDIO_V2P0
@@ -585,6 +721,26 @@ static int bk7258_sdio_host_init_locked(FAR struct bk7258_sdio_priv_s *priv,
   err = bk_sdio_host_init(&cfg);
   if (err == BK_OK)
     {
+#ifdef CONFIG_SDIO_GDMA_EN
+      unsigned int channel;
+      for (channel = 0; channel < DMA_ID_MAX; channel++)
+        {
+          if ((bk_dma_user((dma_id_t)channel) & 0xffffu) == DMA_DEV_SDIO)
+            {
+              break;
+            }
+        }
+      /* The SDK returns BK_OK even if allocation failed.  Its GDMA ISR
+       * build cannot safely fall back to the CPU TX semaphore path. */
+      if (channel == DMA_ID_MAX)
+        {
+          (void)bk_sdio_host_deinit();
+          return -ENOMEM;
+        }
+      priv->dma_tx_channel = (dma_id_t)channel;
+      syslog(LOG_INFO, "BKSDIO TX DMA channel=%u RX=cpu-fifo\n", channel);
+#endif
+
       /* v3.1.1.9 sdio_host_init_common() trusts its SDK-application GPIO
        * default table when CONFIG_GPIO_DEFAULT_SET_SUPPORT is enabled.  That
        * table is not a board binding for NuttX, so re-apply the generated
@@ -632,6 +788,8 @@ static void bk7258_sdio_reset(FAR struct sdio_dev_s *dev)
       priv->initialized = false;
     }
 
+  priv->single_write = false;
+  priv->single_read = false;
   ret = bk7258_sdio_host_init_locked(priv, priv->widebus_enabled);
   if (ret < 0)
     {
@@ -815,6 +973,17 @@ static int bk7258_sdio_sendcmd(FAR struct sdio_dev_s *dev, uint32_t cmd,
     }
 
   host_cmd.cmd_index = cmd & 0x3f;
+#if defined(CONFIG_SDIO_V2P0) && defined(CONFIG_SDIO_GDMA_EN)
+  /* The V2 SDK configures every write data phase as multiblock. Match its
+   * wire command and bound a NuttX single-block request with CMD12 after
+   * sendsetup() completes. BLOCKSETUP follows CMD24 in the NuttX contract.
+   */
+
+  if (host_cmd.cmd_index == 24u)
+    {
+      host_cmd.cmd_index = 25u;
+    }
+#endif
   host_cmd.argument  = arg;
   host_cmd.wait_rsp_timeout = priv->cmd_timeout;
   host_cmd.crc_check = true;
@@ -868,13 +1037,18 @@ static int bk7258_sdio_sendcmd(FAR struct sdio_dev_s *dev, uint32_t cmd,
       bk_sdio_host_reset_sd_state();
     }
 
-  /* CMD12 deliberately leaves the controller in FIFO-controlled clock mode.
-   * Restore continuous clocking at the next command boundary; doing this
-   * here cannot race an active data phase and matches the SDK requirement
-   * that command/response traffic always has a card clock.
+  /* Restore continuous command clocking after the CMD12 gate sequence.
    */
 
   bk_sdio_clk_gate_config(1);
+#endif
+
+#ifdef CONFIG_SDIO_V2P0
+  if (host_cmd.cmd_index == 17u && priv->xfer_pending &&
+      priv->xfer_is_read && priv->blocklen == 512u && priv->nblocks == 1u)
+    {
+      bk7258_sdio_select_single_block();
+    }
 #endif
 
   err = bk_sdio_host_send_command(&host_cmd);
@@ -902,6 +1076,7 @@ static int bk7258_sdio_sendcmd(FAR struct sdio_dev_s *dev, uint32_t cmd,
     }
 
   err = bk7258_sdio_wait_command(host_cmd.cmd_index);
+  err = bk7258_sdio_retry_status(&host_cmd, err);
 #ifdef CONFIG_SDIO_V2P0
   if (stop_transmission)
     {
@@ -930,6 +1105,19 @@ static int bk7258_sdio_sendcmd(FAR struct sdio_dev_s *dev, uint32_t cmd,
     }
 
   priv->events |= SDIOWAIT_CMDDONE | SDIOWAIT_RESPONSEDONE;
+  priv->command_r1 = bk_sdio_host_get_cmd_rsp_argument(SDIO_HOST_RSP0);
+#ifdef CONFIG_SDIO_V2P0
+  if ((cmd & MMCSD_CMDIDX_MASK) == 24u &&
+      (priv->command_r1 & 0xfdffe088u) == 0)
+    {
+      priv->single_write = true;
+    }
+  else if ((cmd & MMCSD_CMDIDX_MASK) == 17u &&
+           (priv->command_r1 & 0xfdffe088u) == 0)
+    {
+      priv->single_read = true;
+    }
+#endif
 
   /* recvsetup() must precede the command in the NuttX contract.  Complete
    * only on the actual read-data command; an intervening CMD55 must leave
@@ -942,6 +1130,12 @@ static int bk7258_sdio_sendcmd(FAR struct sdio_dev_s *dev, uint32_t cmd,
     {
       priv->xfer_result =
         bk7258_sdio_complete_read(priv, host_cmd.cmd_index);
+      if (priv->single_read)
+        {
+          priv->xfer_result =
+            bk7258_sdio_finish_single_transfer(priv, priv->xfer_result);
+        }
+
       if (priv->xfer_result < 0)
         {
           priv->events |= SDIOWAIT_ERROR;
@@ -951,6 +1145,7 @@ static int bk7258_sdio_sendcmd(FAR struct sdio_dev_s *dev, uint32_t cmd,
           priv->events |= SDIOWAIT_TRANSFERDONE;
         }
     }
+
 
   return priv->xfer_result;
 }
@@ -1041,6 +1236,16 @@ static int bk7258_sdio_recvsetup(FAR struct sdio_dev_s *dev,
   return OK;
 }
 
+/* Give DMA an aligned internal-SRAM snapshot. The MMCSD lock serializes
+ * requests, and the existing DMA completion/error cleanup keeps this storage
+ * owned until the channel stops. The AIDK profile limits requests to 16
+ * sectors. Reject larger requests before arming the data path.
+ */
+
+#ifdef CONFIG_SDIO_GDMA_EN
+static uint32_t g_sdio_tx_sram[8192 / sizeof(uint32_t)];
+#endif
+
 static int bk7258_sdio_sendsetup(FAR struct sdio_dev_s *dev,
                                  FAR const uint8_t *buffer, size_t nbytes)
 {
@@ -1048,15 +1253,18 @@ static int bk7258_sdio_sendsetup(FAR struct sdio_dev_s *dev,
     (FAR struct bk7258_sdio_priv_s *)dev;
   sdio_host_data_config_t dcfg;
   bk_err_t err;
+#if defined(CONFIG_SDIO_V2P0) && !defined(CONFIG_SDIO_GDMA_EN)
+  uint32_t write_status;
+#endif
 
   if (!priv->initialized)
     {
-      return -EAGAIN;
+      return bk7258_sdio_finish_single_transfer(priv, -EAGAIN);
     }
 
   if (buffer == NULL || nbytes == 0 || nbytes > UINT32_MAX)
     {
-      return -EINVAL;
+      return bk7258_sdio_finish_single_transfer(priv, -EINVAL);
     }
 
 #ifdef CONFIG_SDIO_BLOCKSETUP
@@ -1065,7 +1273,7 @@ static int bk7258_sdio_sendsetup(FAR struct sdio_dev_s *dev,
       priv->blocklen * priv->nblocks != nbytes ||
       priv->blocklen > UINT32_MAX)
     {
-      return -EINVAL;
+      return bk7258_sdio_finish_single_transfer(priv, -EINVAL);
     }
 #else
   priv->blocklen = nbytes;
@@ -1080,13 +1288,25 @@ static int bk7258_sdio_sendsetup(FAR struct sdio_dev_s *dev,
 
   if (((uintptr_t)buffer & 3u) != 0)
     {
-      return -EFAULT;
+      return bk7258_sdio_finish_single_transfer(priv, -EFAULT);
     }
 
   if ((nbytes & 3u) != 0 || (nbytes % 512u) != 0)
     {
-      return -ENOTSUP;
+      return bk7258_sdio_finish_single_transfer(priv, -ENOTSUP);
     }
+
+  if (priv->single_write && nbytes != 512u)
+    {
+      return bk7258_sdio_finish_single_transfer(priv, -EINVAL);
+    }
+
+#ifdef CONFIG_SDIO_GDMA_EN
+  if (nbytes > sizeof(g_sdio_tx_sram))
+    {
+      return bk7258_sdio_finish_single_transfer(priv, -E2BIG);
+    }
+#endif
 
   priv->xfer_buf = (FAR uint8_t *)buffer;
   priv->xfer_nbytes = nbytes;
@@ -1101,21 +1321,71 @@ static int bk7258_sdio_sendsetup(FAR struct sdio_dev_s *dev,
   err = bk_sdio_host_config_data(&dcfg);
   if (err != BK_OK)
     {
-      priv->xfer_result = bk7258_sdio_map_err(err);
-      priv->events = SDIOWAIT_ERROR;
-      priv->xfer_pending = false;
-      return priv->xfer_result;
+      return bk7258_sdio_finish_single_transfer(priv, bk7258_sdio_map_err(err));
     }
+
+#if defined(CONFIG_SDIO_V2P0) && !defined(CONFIG_SDIO_GDMA_EN)
+  if (priv->single_write)
+    {
+      bk7258_sdio_select_single_block();
+    }
+#endif
 
   /* bk_sdio_host_write_fifo blocks internally until the FIFO accepts the
    * data; data_size must be 512-byte aligned per the SDK contract.
    */
 
+#ifdef CONFIG_SDIO_GDMA_EN
+  /* A previous failed transfer masked its completion before releasing the
+   * buffer.  The SDK resets transfer accounting when this write begins. */
+  (void)bk_dma_enable_finish_interrupt(priv->dma_tx_channel);
+#endif
+#ifdef CONFIG_SDIO_GDMA_EN
+  memcpy(g_sdio_tx_sram, buffer, nbytes);
+  err = bk_sdio_host_write_fifo((const uint8_t *)g_sdio_tx_sram,
+                                (uint32_t)nbytes);
+#else
   err = bk_sdio_host_write_fifo(buffer, (uint32_t)nbytes);
-  priv->xfer_result = bk7258_sdio_map_err(err);
-  priv->xfer_pending = false;
-  priv->events |= (err == BK_OK) ? SDIOWAIT_TRANSFERDONE : SDIOWAIT_ERROR;
-  return priv->xfer_result;
+#endif
+#if defined(CONFIG_SDIO_V2P0) && !defined(CONFIG_SDIO_GDMA_EN)
+  /* The pinned SDK's CPU ISR posts tx_sema on DATA_WR_END even when the
+   * card's write-response token is rejected. Its return value alone does
+   * not validate the write. Read the final token BEFORE CMD12/reset.
+   * BK7258 sdio_reg.h: CMD_RSP_INT_SEL word 0x0d, WR_STATUS[22:20] is RO;
+   * sdio_ll.h defines token 2 as accepted. IRQ W1C bits remain SDK-owned.
+   * This checks the final block; it cannot recover an earlier block error
+   * hidden by the SDK's multiblock CPU loop.
+   */
+
+  write_status = *(FAR volatile const uint32_t *)
+    ((uintptr_t)SOC_SDIO_REG_BASE + 0x0du * 4u);
+  if (err == BK_OK && ((write_status >> 20) & 7u) != 2u)
+    {
+      err = BK_FAIL;
+    }
+#endif
+#ifdef CONFIG_SDIO_GDMA_EN
+  if (err == BK_OK && bk_dma_get_enable_status(priv->dma_tx_channel) != 0)
+    {
+      /* Do not release the caller's source while DMA can still read it,
+       * even if the SDK's FIFO-completion semaphore has been posted.
+       */
+
+      err = BK_FAIL;
+    }
+
+  if (err != BK_OK)
+    {
+      /* The SDK's timeout path leaves DMA armed.  Stop before returning
+       * ownership of the source buffer to the MMCSD/FAT caller. */
+      irqstate_t flags = enter_critical_section();
+      (void)bk_dma_stop(priv->dma_tx_channel);
+      (void)bk_dma_disable_finish_interrupt(priv->dma_tx_channel);
+      leave_critical_section(flags);
+      bk_sdio_host_reset_sd_state();
+    }
+#endif
+  return bk7258_sdio_finish_single_transfer(priv, bk7258_sdio_map_err(err));
 }
 
 static int bk7258_sdio_cancel(FAR struct sdio_dev_s *dev)
@@ -1131,7 +1401,7 @@ static int bk7258_sdio_cancel(FAR struct sdio_dev_s *dev)
   priv->xfer_buf = NULL;
   priv->xfer_nbytes = 0;
 
-  return OK;
+  return bk7258_sdio_finish_single_transfer(priv, OK);
 }
 
 static int bk7258_sdio_waitresponse(FAR struct sdio_dev_s *dev,
@@ -1154,7 +1424,7 @@ static int bk7258_sdio_recv_r1(FAR struct sdio_dev_s *dev, uint32_t cmd,
   bk7258_sdio_waitresponse(dev, cmd);
   if (R1 != NULL)
     {
-      *R1 = bk_sdio_host_get_cmd_rsp_argument(SDIO_HOST_RSP0);
+      *R1 = ((FAR struct bk7258_sdio_priv_s *)dev)->command_r1;
     }
 
   return ((FAR struct bk7258_sdio_priv_s *)dev)->xfer_result;
@@ -1175,6 +1445,7 @@ static int bk7258_sdio_recv_r2(FAR struct sdio_dev_s *dev, uint32_t cmd,
       R2[1] = bk_sdio_host_get_cmd_rsp_argument(SDIO_HOST_RSP1);
       R2[2] = bk_sdio_host_get_cmd_rsp_argument(SDIO_HOST_RSP2);
       R2[3] = bk_sdio_host_get_cmd_rsp_argument(SDIO_HOST_RSP3);
+
     }
 
   return ((FAR struct bk7258_sdio_priv_s *)dev)->xfer_result;
@@ -1497,6 +1768,7 @@ int bk7258_sdio_initialize(
       syslog(LOG_INFO, "BKSDIO INIT stage=driver-pass elapsed=%lu ms\n",
              (unsigned long)TICK2MSEC(clock_systime_ticks() - started));
     }
+
 
   /* Every SD card powers up in one-bit mode.  The four-bit profile maps
    * D1-D3 at the board layer and advertises SDIO_CAPS_4BIT_ONLY, but the

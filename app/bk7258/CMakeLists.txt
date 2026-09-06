@@ -1,4 +1,5 @@
-if(CONFIG_BK7258_APP_AGENT OR CONFIG_BK7258_VOICE_SERVICE)
+if(CONFIG_BK7258_APP_AGENT OR CONFIG_BK7258_VOICE_SERVICE OR
+   CONFIG_BK7258_VISION_SERVICE)
   target_sources(apps PRIVATE bk7258_product_lifecycle.c)
 endif()
 
@@ -29,12 +30,25 @@ if(CONFIG_BK7258_VOICE_SERVICE)
                               bk7258_voice_turn_audio.c)
 endif()
 
+if(CONFIG_BK7258_VISION_SERVICE)
+  target_sources(apps PRIVATE bk7258_vision_service.c bk7258_vision_core.c
+                              bk7258_vision_record.c bk7258_media_volume.c)
+endif()
+
 if(CONFIG_BK7258_APP_VOICE)
   nuttx_add_application(
     NAME ${CONFIG_BK7258_APP_VOICE_PROGNAME}
     SRCS bk7258_voice_main.c bk7258_voice_client.c
     STACKSIZE ${CONFIG_BK7258_APP_VOICE_STACKSIZE}
     PRIORITY ${CONFIG_BK7258_APP_VOICE_PRIORITY})
+endif()
+
+if(CONFIG_BK7258_APP_VISION)
+  nuttx_add_application(
+    NAME ${CONFIG_BK7258_APP_VISION_PROGNAME}
+    SRCS bk7258_vision_main.c bk7258_vision_client.c bk7258_vision_core.c
+    STACKSIZE ${CONFIG_BK7258_APP_VISION_STACKSIZE}
+    PRIORITY ${CONFIG_BK7258_APP_VISION_PRIORITY})
 endif()
 
 if(CONFIG_BK7258_APP_OTA)

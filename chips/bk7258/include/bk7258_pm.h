@@ -91,6 +91,7 @@ enum bk7258_pm_freq_client_e
   BK7258_PM_FREQ_CLIENT_SECURE,
   BK7258_PM_FREQ_CLIENT_CPU1,
   BK7258_PM_FREQ_CLIENT_APP,
+  BK7258_PM_FREQ_CLIENT_CAMERA, /* DVP lifetime, independent of SDK codec votes */
   BK7258_PM_FREQ_CLIENT_COUNT
 };
 

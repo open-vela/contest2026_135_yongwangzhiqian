@@ -1718,6 +1718,16 @@ config BK7258_DVP_BOARD_GLUE
 		lower half owns all immutable-SDK wrappers; boards only register typed
 		callbacks through bk7258_dvp_binding_s.
 
+config BK7258_DVP_SENSOR_GC2145
+	bool
+	depends on BK7258_DVP
+	help
+		Retain the immutable SDK GC2145 descriptor and its camera auto-detect
+		section entry in the final AP image.  The SDK archives sensor objects
+		whose only root is registered through a linker section; a fitted-board
+		binding must select the exact sensor so archive extraction cannot leave
+		the auto-detect range empty or probe unrelated sensor models.
+
 config BK7258_DVP_H264_COMPAT
 	bool
 	depends on BK7258_DVP
@@ -2410,3 +2420,5 @@ config BK7258_LCD_8080
 		A selected board supplies the SDK panel descriptor and geometry.
 
 endmenu
+
+source "../vendor/beken/nuttx/drivers/video/Kconfig.gc2145"

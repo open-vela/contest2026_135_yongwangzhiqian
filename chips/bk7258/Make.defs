@@ -33,6 +33,7 @@ BK7258_NUTTX_OVERLAY := $(TOPDIR)$(DELIM)..$(DELIM)vendor$(DELIM)beken$(DELIM)nu
 VPATH += $(BK7258_NUTTX_OVERLAY)$(DELIM)drivers$(DELIM)lcd
 VPATH += $(BK7258_NUTTX_OVERLAY)$(DELIM)drivers$(DELIM)input
 VPATH += $(BK7258_NUTTX_OVERLAY)$(DELIM)drivers$(DELIM)sensors
+VPATH += $(BK7258_NUTTX_OVERLAY)$(DELIM)drivers$(DELIM)video
 
 ifeq ($(CONFIG_INPUT_GT9XX_STANDARD_IOCTL)$(CONFIG_INPUT_GT9XX),yy)
 $(error select exactly one GT9xx implementation)
@@ -384,6 +385,9 @@ endif
 ifeq ($(CONFIG_BK7258_I2C),y)
 BK7258_AP_BASE_CSRCS += bk7258_i2c.c
 endif
+ifneq ($(filter y,$(CONFIG_BK7258_I2C) $(CONFIG_BK7258_DVP)),)
+BK7258_AP_BASE_CSRCS += bk7258_i2c_resource.c
+endif
 ifeq ($(CONFIG_BK7258_I2S),y)
 BK7258_AP_BASE_CSRCS += bk7258_i2s.c
 endif
@@ -398,6 +402,9 @@ BK7258_AP_BASE_CSRCS += bk7258_lcd_spi.c
 endif
 ifeq ($(CONFIG_LCD_GC9D01),y)
 BK7258_AP_BASE_CSRCS += gc9d01.c
+endif
+ifeq ($(CONFIG_VIDEO_GC2145_CONTROLS),y)
+BK7258_AP_BASE_CSRCS += gc2145.c
 endif
 ifeq ($(CONFIG_SENSORS_SC7A20),y)
 BK7258_AP_BASE_CSRCS += sc7a20.c
@@ -444,6 +451,9 @@ endif
 ifeq ($(CONFIG_BK7258_DVP),y)
 BK7258_AP_BASE_CSRCS += bk7258_dvp.c
 endif
+ifeq ($(CONFIG_BK7258_DVP_SENSOR_GC2145),y)
+LDFLAGS += -Wl,--undefined=gc2145_detect_sensor
+endif
 ifeq ($(CONFIG_BK7258_DMA2D),y)
 BK7258_AP_BASE_CSRCS += bk7258_dma2d.c
 LDFLAGS += --wrap=sys_drv_dma2d_set
@@ -472,6 +482,7 @@ endif
 ifeq ($(CONFIG_BK7258_DVP_BOARD_GLUE),y)
 LDFLAGS += --wrap=bk_i2c_init_v2 --wrap=bk_i2c_deinit_v2
 LDFLAGS += --wrap=bk_i2c_memory_read_v2 --wrap=bk_i2c_memory_write_v2
+LDFLAGS += --wrap=bk_pm_module_vote_psram_ctrl
 LDFLAGS += --wrap=dvp_camera_mclk_enable
 endif
 ifeq ($(CONFIG_BK7258_MIC),y)
