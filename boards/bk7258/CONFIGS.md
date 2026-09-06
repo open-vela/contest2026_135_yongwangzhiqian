@@ -59,7 +59,7 @@ logical base pair, not two product variants.
 |---|---|---|---|
 | T5-Board | `openvela_cp` | `openvela_ap` | `xts`, `perf` |
 | T5AI-Core | `openvela_cp` | `openvela_ap` | `xts`; paired `drivercheck_cp` / `drivercheck_ap` |
-| AIDK AI Toy | `openvela_cp` | `openvela_ap` | `xts` CP paired with `openvela_ap` |
+| AIDK AI Toy | `openvela_cp` | `openvela_ap` | `xts` CP paired with `openvela_ap`; paired `drivercheck_cp` / `drivercheck_ap` |
 
 The three normal pairs expose the fitted board capabilities and openvela
 system services but do not select Vela Claw, AI Agent, UIKit/LVGL UI or another

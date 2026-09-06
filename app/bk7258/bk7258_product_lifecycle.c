@@ -55,6 +55,14 @@ int bk7258_ap_application_start(void)
 {
   int ret;
 
+#ifdef CONFIG_TESTS_BK7258_RPMSG_EXEC
+  ret = bk7258_drivercheck_initialize();
+  if (ret < 0)
+    {
+      return ret;
+    }
+#endif
+
 #ifdef CONFIG_BK7258_HAPTIC_SERVICE
   ret = bkhaptic_service_initialize();
   if (ret < 0)

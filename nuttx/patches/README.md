@@ -5,7 +5,7 @@
 以下命令在本项目根目录执行，`../nuttx` 应为该隔离副本：
 
 ```sh
-for patch in "$PWD"/nuttx/patches/{video,mmcsd,fs,input}/*.patch; do
+for patch in "$PWD"/nuttx/patches/{video,mmcsd,fs,input,netdb}/*.patch; do
   git -C ../nuttx apply --check "$patch" || exit 1
   git -C ../nuttx apply "$patch" || exit 1
 done
@@ -21,6 +21,7 @@ done
 | `mmcsd/0004` | 同时检查 TRAN 状态与 READY_FOR_DATA，等待有超时限制 |
 | `fs/0001` | 保留 FAT 扩展链的底层错误并区分空间不足、损坏链 |
 | `input/0001` | FF 文件关闭时停止并回收其效果，校验写事件与 owner，避免注销时访问已销毁 lower half |
+| `netdb/0001` | 允许只有 RPMsg 套接字的配置启用已有 AF_RPMSG netdb/rexec 实现 |
 
 `video/0001` 涉及控制编号 ABI，内核与客户端必须一起重建。
 AIDK 配置选择一个扇区读、16 个扇区写、禁用 ACMD23；其他板卡默认值不变。

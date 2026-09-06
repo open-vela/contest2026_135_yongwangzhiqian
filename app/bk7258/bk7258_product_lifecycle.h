@@ -11,6 +11,10 @@
 
 #include <nuttx/config.h>
 
+#ifdef CONFIG_TESTS_BK7258_RPMSG_EXEC
+int bk7258_drivercheck_initialize(void);
+#endif
+
 #ifdef CONFIG_BK7258_APP_AGENT
 int bk7258_agent_product_prepare(void);
 int bk7258_agent_product_start(void);
