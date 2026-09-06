@@ -412,6 +412,9 @@ endif
 ifeq ($(CONFIG_INPUT_GT9XX_STANDARD_IOCTL),y)
 BK7258_AP_BASE_CSRCS += gt9xx.c
 endif
+ifeq ($(CONFIG_INPUT_GPIO_FF),y)
+BK7258_AP_BASE_CSRCS += gpio_ff.c
+endif
 ifeq ($(CONFIG_BK7258_LIN),y)
 BK7258_AP_BASE_CSRCS += bk7258_lin.c
 endif

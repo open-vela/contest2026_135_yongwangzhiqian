@@ -381,6 +381,11 @@ if(CONFIG_INPUT_GT9XX_STANDARD_IOCTL)
        ${BK7258_NUTTX_OVERLAY_DIR}/drivers/input/gt9xx.c)
 endif()
 
+if(CONFIG_INPUT_GPIO_FF)
+  list(APPEND BK7258_AP_BASE_SRCS
+       ${BK7258_NUTTX_OVERLAY_DIR}/drivers/input/gpio_ff.c)
+endif()
+
 if(CONFIG_BK7258_LIN)
   list(APPEND BK7258_AP_BASE_SRCS ap/bk7258_lin.c)
 endif()

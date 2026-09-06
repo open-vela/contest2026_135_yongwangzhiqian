@@ -2204,6 +2204,7 @@ config BK7258_TRNG
 source "../vendor/beken/nuttx/drivers/lcd/Kconfig.gc9d01"
 source "../vendor/beken/nuttx/drivers/lcd/Kconfig.ili9488_rgb"
 source "../vendor/beken/nuttx/drivers/input/Kconfig.gt9xx"
+source "../vendor/beken/nuttx/drivers/input/Kconfig.gpio_ff"
 source "../vendor/beken/nuttx/drivers/sensors/Kconfig.sc7a20"
 
 config BK7258_LCD_RGB
