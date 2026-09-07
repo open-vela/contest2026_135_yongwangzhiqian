@@ -25,6 +25,7 @@ from shaniu_gateway.server import (
     SUBPROTOCOL,
     GatewayConfig,
     GatewayServer,
+    _bind_scope,
     build_tls_context,
     deterministic_pcm_frame,
     start_gateway_server,
@@ -90,6 +91,67 @@ class GatewayIntegrationTest(unittest.IsolatedAsyncioTestCase):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        cls.ca_path = Path(cls.temp_dir.name) / "client-ca.pem"
+        cls.ca_key_path = Path(cls.temp_dir.name) / "client-ca.key"
+        cls.mtls_cert_path = Path(cls.temp_dir.name) / "mtls-server.pem"
+        cls.mtls_key_path = Path(cls.temp_dir.name) / "mtls-server.key"
+        cls.trusted_client_cert = Path(cls.temp_dir.name) / "trusted-client.pem"
+        cls.trusted_client_key = Path(cls.temp_dir.name) / "trusted-client.key"
+        cls.untrusted_client_cert = Path(cls.temp_dir.name) / "untrusted-client.pem"
+        cls.untrusted_client_key = Path(cls.temp_dir.name) / "untrusted-client.key"
+        subprocess.run(
+            [
+                "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                "-keyout", str(cls.ca_key_path), "-out", str(cls.ca_path),
+                "-days", "1", "-subj", "/CN=shaniu-test-client-ca",
+            ],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        cls._issue_certificate(
+            cls.mtls_cert_path, cls.mtls_key_path, "localhost",
+            "subjectAltName=DNS:localhost",
+        )
+        cls._issue_certificate(
+            cls.trusted_client_cert, cls.trusted_client_key, "trusted-client"
+        )
+        subprocess.run(
+            [
+                "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                "-keyout", str(cls.untrusted_client_key),
+                "-out", str(cls.untrusted_client_cert), "-days", "1",
+                "-subj", "/CN=untrusted-client",
+            ],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
+    @classmethod
+    def _issue_certificate(
+        cls, certificate: Path, key: Path, common_name: str,
+        extension: str | None = None,
+    ) -> None:
+        request = certificate.with_suffix(".csr")
+        command = [
+            "openssl", "req", "-newkey", "rsa:2048", "-nodes",
+            "-keyout", str(key), "-out", str(request),
+            "-subj", f"/CN={common_name}",
+        ]
+        subprocess.run(
+            command, check=True, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        command = [
+            "openssl", "x509", "-req", "-in", str(request), "-CA",
+            str(cls.ca_path), "-CAkey", str(cls.ca_key_path),
+            "-CAcreateserial", "-out", str(certificate), "-days", "1",
+        ]
+        if extension is not None:
+            extfile = certificate.with_suffix(".ext")
+            extfile.write_text(extension + "\n")
+            command += ["-extfile", str(extfile)]
+        subprocess.run(
+            command, check=True, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -129,6 +191,14 @@ class GatewayIntegrationTest(unittest.IsolatedAsyncioTestCase):
             context
             for context in self.loop_errors
             if not isinstance(context.get("exception"), ConnectionResetError)
+            and not (
+                getattr(self, "expect_tls_handshake_rejection", False)
+                and isinstance(context.get("exception"), ssl.SSLError)
+                and context["exception"].reason in {
+                    "PEER_DID_NOT_RETURN_A_CERTIFICATE",
+                    "CERTIFICATE_VERIFY_FAILED",
+                }
+            )
         ]
         if unexpected:
             self.fail("unexpected asyncio loop error")
@@ -141,6 +211,27 @@ class GatewayIntegrationTest(unittest.IsolatedAsyncioTestCase):
             compression=None,
             max_size=64 * 1024 + 40,
         )
+
+    async def start_mtls_server(self):
+        server = await start_gateway_server(
+            self.gateway, "127.0.0.1", 0,
+            build_tls_context(
+                self.mtls_cert_path, self.mtls_key_path, self.ca_path
+            ),
+            self.ca_path,
+        )
+        self.addAsyncCleanup(server.wait_closed)
+        self.addAsyncCleanup(server.close)
+        return server
+
+    def mtls_client_context(
+        self, certificate: Path | None = None, key: Path | None = None
+    ) -> ssl.SSLContext:
+        context = ssl.create_default_context(cafile=self.ca_path)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        if certificate is not None:
+            context.load_cert_chain(certificate, key)
+        return context
 
     async def handshake(self, websocket, client: ClientWire) -> tuple[Frame, Frame]:
         await websocket.send(client.frame(MessageType.HELLO).encode())
@@ -339,6 +430,64 @@ class GatewayIntegrationTest(unittest.IsolatedAsyncioTestCase):
                 0,
                 build_tls_context(self.cert_path, self.key_path),
             )
+
+    async def test_mtls_trusted_client_connects(self) -> None:
+        server = await self.start_mtls_server()
+        port = server.sockets[0].getsockname()[1]
+        async with websockets.connect(
+            f"wss://localhost:{port}{DEFAULT_PATH}",
+            ssl=self.mtls_client_context(
+                self.trusted_client_cert, self.trusted_client_key
+            ),
+            subprotocols=[SUBPROTOCOL],
+        ) as websocket:
+            await self.handshake(websocket, ClientWire())
+
+    async def test_bind_checks_actual_tls_context(self) -> None:
+        context = build_tls_context(self.cert_path, self.key_path)
+        with self.assertRaisesRegex(ValueError, "require client certificates"):
+            await start_gateway_server(
+                self.gateway, "192.168.1.7", 0, context, self.ca_path
+            )
+        context.minimum_version = ssl.TLSVersion.MINIMUM_SUPPORTED
+        with self.assertRaisesRegex(ValueError, "TLS 1.2"):
+            await start_gateway_server(self.gateway, "127.0.0.1", 0, context)
+
+    async def test_mtls_rejects_missing_or_untrusted_client_certificate(self) -> None:
+        server = await self.start_mtls_server()
+        port = server.sockets[0].getsockname()[1]
+        self.expect_tls_handshake_rejection = True
+        for context in (
+            self.mtls_client_context(),
+            self.mtls_client_context(
+                self.untrusted_client_cert, self.untrusted_client_key
+            ),
+        ):
+            with self.assertRaises((OSError, ssl.SSLError, websockets.InvalidMessage)):
+                async with websockets.connect(
+                    f"wss://localhost:{port}{DEFAULT_PATH}",
+                    ssl=context, subprotocols=[SUBPROTOCOL],
+                ):
+                    pass
+
+    def test_bind_scope_gate_table(self) -> None:
+        cases = (
+            ("127.0.0.1", None, "loopback"),
+            ("::1", None, "loopback"),
+            ("localhost", None, "loopback"),
+            ("192.168.1.7", self.ca_path, "mtls_unicast"),
+            ("2001:db8::7", self.ca_path, "mtls_unicast"),
+        )
+        for host, client_ca, expected in cases:
+            self.assertEqual(_bind_scope(host, client_ca), expected)
+
+        for host, client_ca in (
+            ("192.168.1.7", None), ("0.0.0.0", self.ca_path),
+            ("::", self.ca_path), ("255.255.255.255", self.ca_path),
+            ("224.0.0.1", self.ca_path), ("gateway.example", self.ca_path),
+        ):
+            with self.assertRaises(ValueError):
+                _bind_scope(host, client_ca)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import ipaddress
 import json
 import logging
 import ssl
@@ -329,11 +330,36 @@ def deterministic_pcm_frame(frame_index: int) -> bytes:
     return bytes(payload)
 
 
-def build_tls_context(cert_path: Path, key_path: Path) -> ssl.SSLContext:
+def build_tls_context(
+    cert_path: Path, key_path: Path, client_ca: Path | None = None
+) -> ssl.SSLContext:
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(certfile=cert_path, keyfile=key_path)
+    if client_ca is not None:
+        context.load_verify_locations(cafile=client_ca)
+        context.verify_mode = ssl.CERT_REQUIRED
     return context
+
+
+def _bind_scope(host: str, client_ca: Path | None) -> str:
+    if host in _LOOPBACK_HOSTS:
+        return "loopback"
+
+    if client_ca is None:
+        raise ValueError("non-loopback binds require a client CA")
+
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError as error:
+        raise ValueError("non-loopback bind must be a literal IP address") from error
+
+    if (address.is_loopback or address.is_unspecified or address.is_multicast
+            or address.is_reserved or address == ipaddress.ip_address(
+                "255.255.255.255")):
+        raise ValueError("bind must be a unicast non-loopback IP address")
+
+    return "mtls_unicast"
 
 
 async def start_gateway_server(
@@ -341,11 +367,15 @@ async def start_gateway_server(
     host: str,
     port: int,
     tls_context: ssl.SSLContext,
+    client_ca: Path | None = None,
 ) -> WebSocketServer:
-    if host not in _LOOPBACK_HOSTS:
-        raise ValueError("the S2 endpoint is restricted to a loopback bind")
     if tls_context is None:
         raise ValueError("TLS context is required")
+    scope = _bind_scope(host, client_ca)
+    if tls_context.minimum_version < ssl.TLSVersion.TLSv1_2:
+        raise ValueError("TLS 1.2 or newer is required")
+    if scope != "loopback" and tls_context.verify_mode != ssl.CERT_REQUIRED:
+        raise ValueError("non-loopback TLS context must require client certificates")
 
     quiet_logger = logging.getLogger("shaniu_gateway.websocket")
     quiet_logger.setLevel(logging.CRITICAL)
@@ -373,13 +403,16 @@ async def _run(args: argparse.Namespace) -> None:
         downlink_window_timeout_ms=args.window_timeout_ms,
     )
     gateway = GatewayServer(config)
-    tls_context = build_tls_context(args.cert, args.key)
-    server = await start_gateway_server(gateway, args.host, args.port, tls_context)
+    tls_context = build_tls_context(args.cert, args.key, args.client_ca)
+    scope = _bind_scope(args.host, args.client_ca)
+    server = await start_gateway_server(
+        gateway, args.host, args.port, tls_context, args.client_ca
+    )
     gateway.event_sink(
         {
             "event": "server_started",
             "transport": "wss",
-            "scope": "loopback",
+            "scope": scope,
             "port": args.port,
         }
     )
@@ -399,6 +432,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--path", default=DEFAULT_PATH)
     parser.add_argument("--cert", type=Path, required=True)
     parser.add_argument("--key", type=Path, required=True)
+    parser.add_argument("--client-ca", type=Path)
     parser.add_argument("--reply-frames", type=int, default=10)
     parser.add_argument("--reply-interval-ms", type=int, default=20)
     parser.add_argument("--window-timeout-ms", type=int, default=2_000)

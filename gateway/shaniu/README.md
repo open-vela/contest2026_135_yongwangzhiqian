@@ -1,15 +1,17 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # 傻妞 companion-v1 最小 Gateway
 
-这是 `P2-A/S2` 的确定性固定回复服务，只用于在桌面 loopback 上验证
-`companion-v1` 的 WSS、状态机、双向窗口和流式下行。它不是公网服务，也不包含
-ASR、LLM、TTS、鉴权、设备注册或私有音色。
+这是确定性固定回复服务，用于验证 `companion-v1` 的 WSS、状态机、双向窗口和
+流式下行。默认监听桌面 loopback；受控网络接入需双向 TLS 认证。它不包含
+ASR、LLM、TTS、设备注册或私有音色。
 
 ## 当前行为
 
-- 只接受 `wss://127.0.0.1`、`wss://[::1]` 或 `wss://localhost` 上的
-  `/companion/v1`，并要求 WebSocket subprotocol `companion-v1`；
+- 只接受 WSS 的 `/companion/v1`，并要求 WebSocket subprotocol `companion-v1`；
 - TLS 最低版本为 1.2，不提供明文 `ws://` 或跳过证书校验的服务端选项；
+- 默认仍只绑定 loopback，且不要求客户端证书。显式提供 `--client-ca`
+  时，服务端要求 TLS 客户端证书由该 CA 验证；这也是唯一允许绑定非
+  loopback 地址的模式；
 - 逐帧校验 40-byte network-order header、身份、turn、sequence、payload、状态和
   `WINDOW_UPDATE`；
 - WSS 映射固定为“一条 binary WebSocket message 承载一个完整 `companion-v1` frame”，
@@ -43,8 +45,10 @@ openssl req -x509 -newkey rsa:2048 -nodes \
   --cert cert.pem --key key.pem --host 127.0.0.1 --port 8765
 ```
 
-服务不会接受 `0.0.0.0`、LAN 或公网地址。后续实板接入需要先增加受审计的鉴权、凭据、
-部署和证书策略，不能通过放宽本切片的绑定限制完成。
+默认服务不会接受 `0.0.0.0`、LAN 或公网地址。受控 LAN 验证必须显式传入
+`--client-ca <CA-file>`；此时只接受单播字面 IPv4/IPv6 绑定，仍拒绝
+`0.0.0.0`、`::`、有限广播 `255.255.255.255`、组播和域名绑定，并强制客户端证书验证。该选项不提供
+部署凭据、设备注册或身份日志；证书和端点由受控部署流程提供。
 
 ## 验证
 
@@ -53,7 +57,8 @@ make test
 ```
 
 测试用例在临时目录生成并销毁自签证书，实际建立 loopback WSS 连接，覆盖正常回复、
-取消、sequence gap、turn 中断连、下行背压、证书 hostname 失败和非 loopback 绑定拒绝。
+取消、sequence gap、turn 中断连、下行背压、证书 hostname 失败、绑定限制，以及
+mTLS 的可信客户端成功、缺失客户端证书和不可信客户端证书拒绝。
 成功标记为 `SHANIU_GATEWAY_TEST_PASS`。
 
 协议对应实现是 `app/bk7258/bk7258_voice_companion.[ch]`。两端改动协议常量或状态规则时，
