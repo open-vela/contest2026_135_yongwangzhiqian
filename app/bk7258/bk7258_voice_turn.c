@@ -46,6 +46,21 @@ static void bkvoice_turn_clear_session(struct bkvoice_turn_s *turn)
   turn->last_downlink_sequence = 0;
 }
 
+static void bkvoice_turn_set_state(struct bkvoice_turn_s *turn,
+                                   enum bkvoice_turn_state_e state)
+{
+  if (turn->state == state)
+    {
+      return;
+    }
+
+  turn->state = state;
+  if (turn->state_observer != NULL)
+    {
+      turn->state_observer(turn->state_observer_context, state);
+    }
+}
+
 static void bkvoice_turn_finish_cleanup(struct bkvoice_turn_s *turn,
                                         int error)
 {
@@ -53,11 +68,11 @@ static void bkvoice_turn_finish_cleanup(struct bkvoice_turn_s *turn,
   if (bkvoice_turn_resources_free(turn))
     {
       bkvoice_turn_clear_active(turn);
-      turn->state = BKVOICE_TURN_IDLE;
+      bkvoice_turn_set_state(turn, BKVOICE_TURN_IDLE);
     }
   else
     {
-      turn->state = BKVOICE_TURN_FAULTED;
+      bkvoice_turn_set_state(turn, BKVOICE_TURN_FAULTED);
       turn->deadline_ms = 0;
     }
 }
@@ -102,12 +117,6 @@ static int bkvoice_turn_cleanup_dac(struct bkvoice_turn_s *turn)
 {
   int first = 0;
   int ret;
-
-  if (turn->dac_prepared)
-    {
-      ret = turn->ops.dac_drain(turn->audio_context);
-      bkvoice_turn_first_error(&first, ret);
-    }
 
   if (turn->dac_started)
     {
@@ -296,6 +305,27 @@ int bkvoice_turn_initialize(
   return 0;
 }
 
+int bkvoice_turn_set_state_observer(
+  struct bkvoice_turn_s *turn,
+  bkvoice_turn_state_observer_t observer,
+  void *observer_context)
+{
+  if (turn == NULL)
+    {
+      return -EINVAL;
+    }
+
+  if (turn->state != BKVOICE_TURN_IDLE || turn->session_id != 0 ||
+      !bkvoice_turn_resources_free(turn))
+    {
+      return turn->state == BKVOICE_TURN_FAULTED ? -EIO : -EBUSY;
+    }
+
+  turn->state_observer = observer;
+  turn->state_observer_context = observer != NULL ? observer_context : NULL;
+  return 0;
+}
+
 int bkvoice_turn_session_open(struct bkvoice_turn_s *turn,
                               uint32_t session_id)
 {
@@ -322,6 +352,11 @@ int bkvoice_turn_session_open(struct bkvoice_turn_s *turn,
 
   turn->session_id = session_id;
   turn->last_session_id = session_id;
+  /* Companion turn IDs restart within each new session.  The monotonic
+   * session ID still rejects callbacks from earlier connections.
+   */
+
+  turn->last_turn_id = 0;
   turn->last_control_sequence = 0;
   turn->last_downlink_sequence = 0;
   turn->last_error = 0;
@@ -428,7 +463,7 @@ int bkvoice_turn_ptt_down(
     }
 
   turn->mic_started = true;
-  turn->state = BKVOICE_TURN_CAPTURING;
+  bkvoice_turn_set_state(turn, BKVOICE_TURN_CAPTURING);
   memcpy(token, &turn->active, sizeof(*token));
   return 0;
 
@@ -469,7 +504,7 @@ int bkvoice_turn_ptt_up(
       return ret;
     }
 
-  turn->state = BKVOICE_TURN_WAITING_TTS;
+  bkvoice_turn_set_state(turn, BKVOICE_TURN_WAITING_TTS);
   turn->deadline_ms = bkvoice_turn_deadline(
     now_ms, turn->limits.waiting_tts_timeout_ms);
   return 0;
@@ -522,7 +557,7 @@ int bkvoice_turn_tts_start(
     }
 
   turn->dac_started = true;
-  turn->state = BKVOICE_TURN_PLAYING;
+  bkvoice_turn_set_state(turn, BKVOICE_TURN_PLAYING);
   turn->deadline_ms = bkvoice_turn_deadline(
     now_ms, turn->limits.playback_timeout_ms);
   return 0;
@@ -605,7 +640,39 @@ int bkvoice_turn_tts_end(
       return -EPERM;
     }
 
-  ret = bkvoice_turn_cleanup_dac(turn);
+  ret = turn->ops.dac_drain(turn->audio_context);
+  if (ret == -EINPROGRESS && turn->ops.dac_result != NULL)
+    {
+      bkvoice_turn_set_state(turn, BKVOICE_TURN_DRAINING);
+      return 0;
+    }
+
+  bkvoice_turn_first_error(&ret, bkvoice_turn_cleanup_dac(turn));
+  bkvoice_turn_finish_cleanup(turn, ret);
+  return ret;
+}
+
+int bkvoice_turn_poll(struct bkvoice_turn_s *turn)
+{
+  int ret;
+
+  if (turn == NULL)
+    {
+      return -EINVAL;
+    }
+
+  if (turn->state != BKVOICE_TURN_DRAINING)
+    {
+      return 0;
+    }
+
+  ret = turn->ops.dac_result(turn->audio_context);
+  if (ret == -EAGAIN)
+    {
+      return 0;
+    }
+
+  bkvoice_turn_first_error(&ret, bkvoice_turn_cleanup_dac(turn));
   bkvoice_turn_finish_cleanup(turn, ret);
   return ret;
 }
@@ -752,6 +819,8 @@ const char *bkvoice_turn_state_name(enum bkvoice_turn_state_e state)
         return "waiting-tts";
       case BKVOICE_TURN_PLAYING:
         return "playing";
+      case BKVOICE_TURN_DRAINING:
+        return "draining";
       case BKVOICE_TURN_FAULTED:
         return "faulted";
       default:

@@ -34,6 +34,11 @@ VPATH += $(BK7258_NUTTX_OVERLAY)$(DELIM)drivers$(DELIM)lcd
 VPATH += $(BK7258_NUTTX_OVERLAY)$(DELIM)drivers$(DELIM)input
 VPATH += $(BK7258_NUTTX_OVERLAY)$(DELIM)drivers$(DELIM)sensors
 VPATH += $(BK7258_NUTTX_OVERLAY)$(DELIM)drivers$(DELIM)video
+VPATH += $(BK7258_NUTTX_OVERLAY)$(DELIM)drivers$(DELIM)contactless
+
+ifeq ($(CONFIG_CL_MFRC522_FRAME)$(CONFIG_CL_MFRC522),yy)
+$(error select exactly one MFRC522 implementation)
+endif
 
 ifeq ($(CONFIG_INPUT_GT9XX_STANDARD_IOCTL)$(CONFIG_INPUT_GT9XX),yy)
 $(error select exactly one GT9xx implementation)
@@ -173,6 +178,9 @@ BK7258_CP_CSRCS += bk7258_rptun.c
 ifeq ($(CONFIG_BK7258_OTA_RPMSG),y)
 BK7258_CP_CSRCS += bk7258_ota_rpmsg.c
 endif
+ifeq ($(CONFIG_BK7258_USBMODE_RPMSG),y)
+BK7258_CP_CSRCS += bk7258_usbmode_rpmsg.c
+endif
 ifeq ($(CONFIG_BK7258_PM_CLOCK),y)
 BK7258_CP_CSRCS += bk7258_pm_server.c
 endif
@@ -222,6 +230,10 @@ BK7258_CP_CSRCS += bk7258_gpio_cp_irq.c
 BK7258_CP_CSRCS += bk7258_gpio_lowerhalf.c
 endif
 
+ifeq ($(CONFIG_BK7258_CP_GPIO_INPUT),y)
+BK7258_CP_CSRCS += bk7258_gpio_input.c
+endif
+
 # SDK-aligned CP performance startup: physical CPU0 at 240 MHz.
 
 ifeq ($(CONFIG_BK7258_CLOCK_240M),y)
@@ -244,6 +256,10 @@ endif
 
 ifeq ($(CONFIG_BK7258_DVFS),y)
 BK7258_CP_CSRCS += bk7258_dvfs.c
+endif
+
+ifeq ($(CONFIG_BK7258_PM_SOFT_OFF),y)
+BK7258_CP_CSRCS += bk7258_pm_soft_off.c
 endif
 
 ifeq ($(CONFIG_BK7258_PM_POLICY),y)
@@ -340,6 +356,7 @@ ifeq ($(wildcard $(BK7258_OTA_CATALOG_PUBLIC_SOURCE)),)
 $(error BK7258_OTA_MANAGER requires the generated catalog public root)
 endif
 endif
+BK7258_AP_BASE_CSRCS += bk7258_active_image.c
 BK7258_AP_BASE_CSRCS += bk7258_ota_manager.c
 BK7258_AP_BASE_CSRCS += bk7258_ota_catalog.c
 BK7258_AP_BASE_CSRCS += $(BK7258_OTA_CATALOG_PUBLIC_SOURCE)
@@ -405,6 +422,13 @@ BK7258_AP_BASE_CSRCS += gc9d01.c
 endif
 ifeq ($(CONFIG_VIDEO_GC2145_CONTROLS),y)
 BK7258_AP_BASE_CSRCS += gc2145.c
+endif
+
+ifeq ($(CONFIG_CL_MFRC522_FRAME),y)
+BK7258_AP_BASE_CSRCS += mfrc522.c
+endif
+ifeq ($(CONFIG_CL_ISODEP),y)
+BK7258_AP_BASE_CSRCS += isodep.c
 endif
 ifeq ($(CONFIG_SENSORS_SC7A20),y)
 BK7258_AP_BASE_CSRCS += sc7a20.c
@@ -549,6 +573,9 @@ BK7258_AP_BASE_CSRCS += bk7258_rptun.c
 ifeq ($(CONFIG_BK7258_OTA_RPMSG),y)
 BK7258_AP_BASE_CSRCS += bk7258_ota_rpmsg.c
 endif
+ifeq ($(CONFIG_BK7258_USBMODE_RPMSG),y)
+BK7258_AP_BASE_CSRCS += bk7258_usbmode_rpmsg.c
+endif
 ifeq ($(CONFIG_BK7258_PM_CLOCK),y)
 BK7258_AP_BASE_CSRCS += bk7258_pm_client.c
 ifeq ($(CONFIG_BK7258_AP_CORE),y)
@@ -557,15 +584,13 @@ LDFLAGS += --wrap=bk_pm_module_vote_cpu_freq
 ifneq ($(filter y,$(CONFIG_BK7258_AUD) $(CONFIG_BK7258_MIC) $(CONFIG_BK7258_DMA2D) $(CONFIG_BK7258_SCALE_ROTATE) $(CONFIG_BK7258_JPEG_DECODER) $(CONFIG_BK7258_JPEG_ENCODER) $(CONFIG_BK7258_YUV_H264) $(CONFIG_BK7258_DVP)),)
 LDFLAGS += --wrap=bk_pm_module_vote_power_ctrl
 endif
-
 ifneq ($(filter y,$(CONFIG_BK7258_AUD) $(CONFIG_BK7258_MIC)),)
 LDFLAGS += --wrap=sys_drv_aud_select_clock
 endif
 
 ifeq ($(CONFIG_BK7258_DVP_H264_COMPAT),y)
-LDFLAGS += --wrap=bk_yuv_buf_start
+LDFLAGS += --wrap=bk_yuv_buf_start --wrap=sys_drv_int_group2_enable
 LDFLAGS += --wrap=bk_h264_encode_enable
-LDFLAGS += --wrap=sys_drv_int_group2_enable
 LDFLAGS += --wrap=sys_drv_core_intr_group2_enable
 LDFLAGS += --wrap=dvp_camera_i2c_write_uint8
 LDFLAGS += --wrap=video_register

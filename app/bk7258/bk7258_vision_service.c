@@ -17,6 +17,11 @@
 #include "bk7258_vision_record.h"
 #include "bk7258_media_volume.h"
 
+#ifdef CONFIG_BK7258_DISPLAY_SERVICE
+#include "bk7258_display_service.h"
+#include "bk7258_vision_feedback.h"
+#endif
+
 #include <errno.h>
 #include <fcntl.h>
 #include <stdbool.h>
@@ -49,6 +54,36 @@
 static bool g_record_mounted;
 static bool g_record_leased;
 
+#ifdef CONFIG_BK7258_DISPLAY_SERVICE
+static int bkvision_feedback_set_expression(void *arg,
+                                            const char *expression)
+{
+  (void)arg;
+  return bk7258_display_set_expression(expression);
+}
+
+static int bkvision_feedback_replace_expression(void *arg,
+                                                const char *expected,
+                                                const char *replacement)
+{
+  (void)arg;
+  return bk7258_display_replace_expression(expected, replacement);
+}
+
+static void bkvision_feedback_wait(void *arg, unsigned int milliseconds)
+{
+  (void)arg;
+  nxsig_usleep(milliseconds * 1000u);
+}
+
+static const struct bkvision_feedback_ops_s g_bkvision_feedback_ops =
+{
+  .set_expression = bkvision_feedback_set_expression,
+  .replace_expression = bkvision_feedback_replace_expression,
+  .wait_ms = bkvision_feedback_wait,
+};
+#endif
+
 struct bkvision_server_s
 {
   struct rpmsg_endpoint endpoint;
@@ -71,6 +106,9 @@ static struct bkvision_server_s g_bkvision_server =
   .endpoint_lock = NXMUTEX_INITIALIZER,
   .request_lock = SP_UNLOCKED,
 };
+
+/* The V4L2 node accepts one capture or recording operation at a time. */
+static mutex_t g_bkvision_capture_lock = NXMUTEX_INITIALIZER;
 
 static int bkvision_errno(void)
 {
@@ -271,7 +309,9 @@ static int bkvision_set_frame_interval(int fd)
 
 static int bkvision_capture(
   FAR const struct bkvision_rpc_request_s *request,
-  FAR struct bkvision_rpc_response_s *response)
+  FAR struct bkvision_rpc_response_s *response,
+  FAR uint8_t *destination, size_t destination_capacity,
+  FAR size_t *destination_size)
 {
   struct v4l2_requestbuffers request_buffers;
   enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -294,6 +334,24 @@ static int bkvision_capture(
   int fd = -1;
   int result;
   int cleanup;
+
+  if (destination_size != NULL)
+    {
+      *destination_size = 0;
+    }
+
+  if ((destination == NULL) != (destination_size == NULL))
+    {
+      bkvision_operation_failed(response, -EINVAL);
+      return -EINVAL;
+    }
+
+  result = nxmutex_trylock(&g_bkvision_capture_lock);
+  if (result < 0)
+    {
+      bkvision_operation_failed(response, result == -EBUSY ? -EBUSY : result);
+      return result == -EBUSY ? -EBUSY : result;
+    }
 
   for (i = 0; i < count; i++)
     {
@@ -451,11 +509,23 @@ static int bkvision_capture(
           result = -EPROTO;
           goto out;
         }
-      result = bkvision_rpc_validate_frame(
-        response, mapping[buffer.index], mapping_length[buffer.index],
-        buffer.bytesused, buffer.flags & V4L2_BUF_FLAG_ERROR,
-        format.fmt.pix.width, format.fmt.pix.height, format.fmt.pix.pixelformat,
-        buffer.sequence);
+      if (destination != NULL)
+        {
+          result = bkvision_copy_jpeg_frame(
+            response, destination, destination_capacity, destination_size,
+            mapping[buffer.index], mapping_length[buffer.index],
+            buffer.bytesused, buffer.flags & V4L2_BUF_FLAG_ERROR,
+            format.fmt.pix.width, format.fmt.pix.height,
+            format.fmt.pix.pixelformat, buffer.sequence);
+        }
+      else
+        {
+          result = bkvision_rpc_validate_frame(
+            response, mapping[buffer.index], mapping_length[buffer.index],
+            buffer.bytesused, buffer.flags & V4L2_BUF_FLAG_ERROR,
+            format.fmt.pix.width, format.fmt.pix.height,
+            format.fmt.pix.pixelformat, buffer.sequence);
+        }
       if (result < 0 || !recording)
         {
           break;
@@ -552,10 +622,54 @@ out:
 
   if (result < 0)
     {
+      if (destination != NULL && destination_size != NULL &&
+          *destination_size != 0)
+        {
+          memset(destination, 0, *destination_size);
+          *destination_size = 0;
+        }
       bkvision_operation_failed(response, result);
     }
 
+  nxmutex_unlock(&g_bkvision_capture_lock);
   return result;
+}
+
+int bk7258_vision_capture_jpeg(uint8_t *destination,
+                                size_t destination_capacity,
+                                size_t *destination_size)
+{
+  struct bkvision_rpc_request_s request;
+  struct bkvision_rpc_response_s response;
+  int ret;
+#ifdef CONFIG_BK7258_DISPLAY_SERVICE
+  struct bkvision_feedback_s feedback;
+#endif
+
+  if (destination_size != NULL)
+    {
+      *destination_size = 0;
+    }
+
+  if (destination == NULL || destination_size == NULL ||
+      destination_capacity == 0)
+    {
+      return -EINVAL;
+    }
+
+  memset(&request, 0, sizeof(request));
+  memset(&response, 0, sizeof(response));
+  request.command = BKVISION_RPC_SNAPSHOT;
+#ifdef CONFIG_BK7258_DISPLAY_SERVICE
+  bkvision_feedback_initialize(&feedback, &g_bkvision_feedback_ops);
+  bkvision_feedback_snapshot_begin(&feedback);
+#endif
+  ret = bkvision_capture(&request, &response, destination,
+                         destination_capacity, destination_size);
+#ifdef CONFIG_BK7258_DISPLAY_SERVICE
+  bkvision_feedback_snapshot_finish(&feedback, ret == 0);
+#endif
+  return ret;
 }
 
 static int bkvision_send(
@@ -595,6 +709,11 @@ static int bkvision_worker(int argc, FAR char **argv)
       struct bkvision_rpc_response_s response;
       irqstate_t flags;
 
+#ifdef CONFIG_BK7258_DISPLAY_SERVICE
+      struct bkvision_feedback_s feedback;
+      bool snapshot;
+#endif
+
       if (nxsem_wait_uninterruptible(&server->request_sem) < 0)
         {
           continue;
@@ -605,13 +724,22 @@ static int bkvision_worker(int argc, FAR char **argv)
       spin_unlock_irqrestore(&server->request_lock, flags);
 
       bkvision_rpc_make_response(&response, &request, 0);
+#ifdef CONFIG_BK7258_DISPLAY_SERVICE
+      snapshot = request.command == BKVISION_RPC_SNAPSHOT;
+      if (snapshot)
+        {
+          bkvision_feedback_initialize(&feedback,
+                                       &g_bkvision_feedback_ops);
+          bkvision_feedback_snapshot_begin(&feedback);
+        }
+#endif
       if (request.command == BKVISION_RPC_CHECK_RECORD)
         {
           (void)bkvision_check_record(&request, &response);
         }
       else
         {
-          (void)bkvision_capture(&request, &response);
+          (void)bkvision_capture(&request, &response, NULL, 0, NULL);
         }
 
       flags = spin_lock_irqsave(&server->request_lock);
@@ -622,6 +750,13 @@ static int bkvision_worker(int argc, FAR char **argv)
       spin_unlock_irqrestore(&server->request_lock, flags);
 
       (void)bkvision_send(server, &response);
+#ifdef CONFIG_BK7258_DISPLAY_SERVICE
+      if (snapshot)
+        {
+          bkvision_feedback_snapshot_finish(
+            &feedback, response.operation_status == 0);
+        }
+#endif
     }
 
   return 0;

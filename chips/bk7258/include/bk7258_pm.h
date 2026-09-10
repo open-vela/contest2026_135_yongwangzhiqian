@@ -137,6 +137,20 @@ struct bk7258_pm_frequency_status_s
  ****************************************************************************/
 
 int bk7258_pm_initialize(void);
+
+#ifdef CONFIG_BK7258_PM_SOFT_OFF
+/* Caller must stop new work, drain users and sync storage before requesting.
+ * Success means accepted for reboot-to-sleep, not physical power removal.
+ */
+
+int bk7258_pm_soft_off_request(void);
+/* 0: no queued reset, 1: pending; negative: status not known. */
+int bk7258_pm_soft_off_status(void);
+#ifndef CONFIG_BK7258_AP_CORE
+struct bk7258_gpio_config_s;
+void bk7258_pm_soft_off_boot(const struct bk7258_gpio_config_s *config);
+#endif
+#endif
 int bk7258_pm_frequency_vote(enum bk7258_pm_freq_client_e client,
                              bk7258_pm_opp_t opp);
 int bk7258_pm_frequency_get_status(

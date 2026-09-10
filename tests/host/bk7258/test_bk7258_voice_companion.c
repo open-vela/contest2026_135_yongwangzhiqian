@@ -41,6 +41,12 @@ static void put_be32(uint8_t *data, uint32_t value)
   data[3] = (uint8_t)value;
 }
 
+static void put_be16(uint8_t *data, uint16_t value)
+{
+  data[0] = (uint8_t)(value >> 8);
+  data[1] = (uint8_t)value;
+}
+
 static void test_codec(void)
 {
   uint8_t frame[BKVOICE_COMPANION_HEADER_BYTES +
@@ -323,11 +329,265 @@ static void test_connection_error(void)
   assert(session.session_id == first_session + 1u);
 }
 
+static void test_late_remote_cancel(void)
+{
+  struct bkvoice_companion_session_s session;
+  struct bkvoice_companion_header_s header;
+
+  assert(bkvoice_companion_session_init(&session, 7) == 0);
+  assert(bkvoice_companion_session_connect(&session) == 0);
+  assert(bkvoice_companion_session_tx(&session, BKVOICE_COMPANION_HELLO,
+                                      0, NULL, 0, 1, &header) == 0);
+  header = fake_rx(BKVOICE_COMPANION_WELCOME, 0, 0, session.session_id, 0, 1);
+  assert(bkvoice_companion_session_rx(&session, &header, NULL) == 0);
+  header = fake_rx(BKVOICE_COMPANION_CANCEL, 0, 0, session.session_id, 0, 2);
+  assert(bkvoice_companion_session_rx(&session, &header, NULL) < 0);
+  assert(bkvoice_companion_session_tx(&session, BKVOICE_COMPANION_TURN_START,
+                                      0, NULL, 0, 2, &header) == 0);
+  assert(bkvoice_companion_session_tx(&session, BKVOICE_COMPANION_TURN_END,
+                                      0, NULL, 0, 3, &header) == 0);
+  header = fake_rx(BKVOICE_COMPANION_TTS_START,
+                   BKVOICE_COMPANION_FLAG_SYNTHETIC, 0, session.session_id, 1, 2);
+  assert(bkvoice_companion_session_rx(&session, &header, NULL) == 0);
+  header.type = BKVOICE_COMPANION_TTS_END;
+  header.sequence++;
+  assert(bkvoice_companion_session_rx(&session, &header, NULL) == 0);
+  header.type = BKVOICE_COMPANION_CANCEL;
+  header.flags = 0;
+  header.sequence++;
+  assert(bkvoice_companion_session_rx(&session, &header, NULL) == 0);
+  assert(session.state == BKVOICE_COMPANION_IDLE);
+  assert(bkvoice_companion_session_rx(&session, &header, NULL) == -EALREADY);
+  assert(bkvoice_companion_session_tx(&session, BKVOICE_COMPANION_TURN_START,
+                                      0, NULL, 0, 4, &header) == 0);
+  header = fake_rx(BKVOICE_COMPANION_CANCEL, 0, 0, session.session_id, 1, 5);
+  assert(bkvoice_companion_session_rx(&session, &header, NULL) == -ESTALE);
+  assert(session.state == BKVOICE_COMPANION_UPLINK);
+  assert(session.rx_sequence == 4);
+  assert(bkvoice_companion_session_tx(&session, BKVOICE_COMPANION_CANCEL,
+                                      0, NULL, 0, 5, &header) == 0);
+  header = fake_rx(BKVOICE_COMPANION_CANCEL, 0, 0, session.session_id, 2, 5);
+  assert(bkvoice_companion_session_rx(&session, &header, NULL) == 0);
+}
+
+static void test_volume_contract(void)
+{
+  struct bkvoice_companion_session_s session;
+  struct bkvoice_companion_header_s header;
+  struct bkvoice_companion_header_s decoded;
+  uint8_t value[4];
+  uint8_t report[12];
+  uint8_t wire[64];
+  const uint8_t *payload;
+  size_t size;
+
+  assert(bkvoice_companion_session_init(&session, 7) == 0);
+  assert(bkvoice_companion_session_connect(&session) == 0);
+  assert(bkvoice_companion_session_tx(&session, BKVOICE_COMPANION_HELLO,
+                                     0, NULL, 0, 1, &header) == 0);
+  header = fake_rx(BKVOICE_COMPANION_WELCOME, 0, 0, session.session_id, 0, 1);
+  assert(bkvoice_companion_session_rx(&session, &header, NULL) == 0);
+  header = fake_rx(BKVOICE_COMPANION_VOLUME_GET, 0, 0, session.session_id, 0, 2);
+  assert(bkvoice_companion_session_rx(&session, &header, NULL) == -ENOTSUP);
+  assert(session.rx_sequence == 1);
+
+  bkvoice_companion_session_disconnect(&session);
+  assert(bkvoice_companion_session_connect(&session) == 0);
+  put_be32(value, BKVOICE_COMPANION_CAP_VOLUME);
+  assert(bkvoice_companion_session_tx(&session, BKVOICE_COMPANION_HELLO,
+                                     0, value, 4, 1, &header) == 0);
+  header = fake_rx(BKVOICE_COMPANION_WELCOME, 0, 0, session.session_id, 0, 1);
+  assert(bkvoice_companion_session_rx(&session, &header, NULL) == 0);
+  header = fake_rx(BKVOICE_COMPANION_VOLUME_SET, 0, 4, session.session_id, 0, 2);
+  put_be32(value, 101);
+  assert(bkvoice_companion_session_rx(&session, &header, value) == -ERANGE);
+  assert(session.rx_sequence == 1);
+  put_be32(value, 65);
+  assert(bkvoice_companion_session_rx(&session, &header, value) == 0);
+  assert(bkvoice_companion_session_rx(&session, &header, value) == -EALREADY);
+  put_be32(report, 2);
+  put_be32(report + 4, 0);
+  put_be32(report + 8, 65);
+  assert(bkvoice_companion_session_tx(&session, BKVOICE_COMPANION_VOLUME_REPORT,
+                                     0, report, 12, 2, &header) == 0);
+  assert(header.turn_id == 0);
+  assert(bkvoice_companion_encode(&header, report, wire, sizeof(wire), &size) == 0);
+  assert(bkvoice_companion_decode(wire, size, &decoded, &payload) == 0);
+  assert(memcmp(payload, report, 12) == 0);
+  wire[BKVOICE_COMPANION_HEADER_BYTES + 11] = 101;
+  assert(bkvoice_companion_decode(wire, size, &decoded, &payload) == -ERANGE);
+  put_be32(report + 4, (uint32_t)-EIO);
+  assert(bkvoice_companion_encode(&header, report, wire, sizeof(wire), &size) == -ERANGE);
+  put_be32(report + 8, UINT32_MAX);
+  assert(bkvoice_companion_encode(&header, report, wire, sizeof(wire), &size) == 0);
+  bkvoice_companion_session_disconnect(&session);
+  assert(bkvoice_companion_session_connect(&session) == 0);
+  assert(session.capabilities == 0);
+}
+
+static void test_status_report_contract(void)
+{
+  struct bkvoice_companion_session_s session;
+  struct bkvoice_companion_header_s header;
+  struct bkvoice_companion_header_s decoded;
+  uint8_t capabilities[4];
+  uint8_t report[BKVOICE_COMPANION_STATUS_REPORT_BYTES] = {0};
+  uint8_t report_v2[BKVOICE_COMPANION_STATUS_REPORT_V2_BYTES] = {0};
+  uint8_t wire[96];
+  const uint8_t *payload;
+  size_t size;
+
+  report[0] = 1;
+  report[1] = 73;
+  report[2] = 1;
+  report[3] = BKVOICE_COMPANION_BATTERY_STATE_CHARGING;
+  put_be32(report + 4, 3800);
+  put_be16(report + 8, 1);
+  put_be16(report + 10, 2);
+  put_be16(report + 12, 3);
+  put_be16(report + 14, 0);
+  put_be32(report + 16, 4);
+
+  assert(bkvoice_companion_session_init(&session, 7) == 0);
+  assert(bkvoice_companion_session_connect(&session) == 0);
+  assert(bkvoice_companion_session_tx(&session, BKVOICE_COMPANION_HELLO,
+                                     0, NULL, 0, 1, &header) == 0);
+  header = fake_rx(BKVOICE_COMPANION_WELCOME, 0, 0, session.session_id, 0, 1);
+  assert(bkvoice_companion_session_rx(&session, &header, NULL) == 0);
+  assert(bkvoice_companion_session_tx(&session, BKVOICE_COMPANION_STATUS_REPORT,
+                                     0, report, sizeof(report), 2, &header) == -ENOTSUP);
+
+  bkvoice_companion_session_disconnect(&session);
+  assert(bkvoice_companion_session_connect(&session) == 0);
+  put_be32(capabilities, BKVOICE_COMPANION_CAP_STATUS_REPORT);
+  assert(bkvoice_companion_session_tx(&session, BKVOICE_COMPANION_HELLO,
+                                     0, capabilities, sizeof(capabilities), 1, &header) == 0);
+  header = fake_rx(BKVOICE_COMPANION_WELCOME, 0, 0, session.session_id, 0, 1);
+  assert(bkvoice_companion_session_rx(&session, &header, NULL) == 0);
+  assert(bkvoice_companion_session_tx(&session, BKVOICE_COMPANION_STATUS_REPORT,
+                                     0, report, sizeof(report), 2, &header) == 0);
+  assert(header.turn_id == 0);
+  assert(bkvoice_companion_encode(&header, report, wire, sizeof(wire), &size) == 0);
+  assert(size == BKVOICE_COMPANION_HEADER_BYTES + sizeof(report));
+  assert(bkvoice_companion_decode(wire, size, &decoded, &payload) == 0);
+  assert(memcmp(payload, report, sizeof(report)) == 0);
+  wire[BKVOICE_COMPANION_HEADER_BYTES + 2] = 0;
+  assert(bkvoice_companion_decode(wire, size, &decoded, &payload) == -ERANGE);
+  put_be16(report + 8, UINT16_MAX);
+  assert(bkvoice_companion_encode(&header, report, wire, sizeof(wire), &size) == -ERANGE);
+  put_be16(report + 8, 1);
+  header.flags = BKVOICE_COMPANION_FLAG_SYNTHETIC;
+  assert(bkvoice_companion_encode(&header, report, wire, sizeof(wire), &size) == -EPROTO);
+
+  memcpy(report_v2, report, sizeof(report));
+  report_v2[0] = 2;
+  for (size_t index = BKVOICE_COMPANION_STATUS_REPORT_BYTES;
+       index < sizeof(report_v2); index++)
+    {
+      report_v2[index] = (uint8_t)(index + 1u);
+    }
+  assert(bkvoice_companion_session_tx(&session, BKVOICE_COMPANION_STATUS_REPORT,
+                                     0, report_v2, sizeof(report_v2), 3,
+                                     &header) == 0);
+  assert(bkvoice_companion_encode(&header, report_v2, wire, sizeof(wire), &size) == 0);
+  assert(size == BKVOICE_COMPANION_HEADER_BYTES + sizeof(report_v2));
+  assert(bkvoice_companion_decode(wire, size, &decoded, &payload) == 0);
+  assert(memcmp(payload, report_v2, sizeof(report_v2)) == 0);
+  memset(report_v2 + BKVOICE_COMPANION_STATUS_REPORT_BYTES, 0,
+         BKVOICE_COMPANION_FIRMWARE_ROOT_BYTES);
+  assert(bkvoice_companion_encode(&header, report_v2, wire, sizeof(wire), &size) == -ERANGE);
+
+  header = fake_rx(BKVOICE_COMPANION_STATUS_REPORT, 0, sizeof(report),
+                   session.session_id, 0, 2);
+  assert(bkvoice_companion_session_rx(&session, &header, report) == -EPERM);
+}
+
+static void test_ota_contract(void)
+{
+  struct bkvoice_companion_session_s session;
+  struct bkvoice_companion_header_s header;
+  struct bkvoice_companion_header_s decoded;
+  uint8_t capabilities[4];
+  uint8_t digest[BKVOICE_COMPANION_OTA_MANIFEST_SHA256_BYTES];
+  uint8_t report[BKVOICE_COMPANION_OTA_REPORT_BYTES];
+  uint8_t wire[96];
+  const uint8_t *payload;
+  size_t size;
+
+  memset(digest, 0x42, sizeof(digest));
+  memset(report, 0, sizeof(report));
+  put_be32(report, 2);
+  report[8] = BKVOICE_COMPANION_OTA_DOWNLOADING;
+  memcpy(report + 12, digest, sizeof(digest));
+
+  assert(bkvoice_companion_session_init(&session, 7) == 0);
+  assert(bkvoice_companion_session_connect(&session) == 0);
+  assert(bkvoice_companion_session_tx(&session, BKVOICE_COMPANION_HELLO,
+                                      0, NULL, 0, 1, &header) == 0);
+  header = fake_rx(BKVOICE_COMPANION_WELCOME, 0, 0, session.session_id, 0, 1);
+  assert(bkvoice_companion_session_rx(&session, &header, NULL) == 0);
+  header = fake_rx(BKVOICE_COMPANION_OTA_REQUEST, 0, sizeof(digest),
+                   session.session_id, 0, 2);
+  assert(bkvoice_companion_session_rx(&session, &header, digest) == -ENOTSUP);
+
+  bkvoice_companion_session_disconnect(&session);
+  assert(bkvoice_companion_session_connect(&session) == 0);
+  put_be32(capabilities, BKVOICE_COMPANION_CAP_OTA);
+  assert(bkvoice_companion_session_tx(&session, BKVOICE_COMPANION_HELLO,
+                                      0, capabilities, sizeof(capabilities),
+                                      1, &header) == 0);
+  header = fake_rx(BKVOICE_COMPANION_WELCOME, 0, 0, session.session_id, 0, 1);
+  assert(bkvoice_companion_session_rx(&session, &header, NULL) == 0);
+  header = fake_rx(BKVOICE_COMPANION_OTA_REQUEST, 0, sizeof(digest),
+                   session.session_id, 0, 2);
+  memset(digest, 0, sizeof(digest));
+  assert(bkvoice_companion_session_rx(&session, &header, digest) == -ERANGE);
+  memset(digest, 0x42, sizeof(digest));
+  assert(bkvoice_companion_session_rx(&session, &header, digest) == 0);
+  assert(bkvoice_companion_session_tx(&session, BKVOICE_COMPANION_OTA_REPORT,
+                                      0, report, sizeof(report), 2,
+                                      &header) == 0);
+  assert(bkvoice_companion_encode(&header, report, wire, sizeof(wire),
+                                  &size) == 0);
+  assert(bkvoice_companion_decode(wire, size, &decoded, &payload) == 0);
+  assert(memcmp(payload, report, sizeof(report)) == 0);
+
+  report[9] = 101;
+  assert(bkvoice_companion_encode(&header, report, wire, sizeof(wire),
+                                  &size) == -ERANGE);
+  report[9] = 0;
+  report[8] = BKVOICE_COMPANION_OTA_FAILED;
+  assert(bkvoice_companion_encode(&header, report, wire, sizeof(wire),
+                                  &size) == -ERANGE);
+  put_be32(report + 4, (uint32_t)-EIO);
+  assert(bkvoice_companion_encode(&header, report, wire, sizeof(wire),
+                                  &size) == 0);
+  header = fake_rx(BKVOICE_COMPANION_OTA_REQUEST, 0, sizeof(digest),
+                   session.session_id, 1, 3);
+  assert(bkvoice_companion_session_rx(&session, &header, digest) == -EPROTO);
+  header.turn_id = 0;
+  header.flags = BKVOICE_COMPANION_FLAG_SYNTHETIC;
+  assert(bkvoice_companion_session_rx(&session, &header, digest) == -EPROTO);
+  header = fake_rx(BKVOICE_COMPANION_OTA_REQUEST, 0, sizeof(digest),
+                   session.session_id, 0, 3);
+  assert(bkvoice_companion_session_tx(&session, BKVOICE_COMPANION_TURN_START,
+                                      0, NULL, 0, 3, &decoded) == 0);
+  assert(bkvoice_companion_session_rx(&session, &header, digest) == 0);
+  assert(bkvoice_companion_session_tx(&session, BKVOICE_COMPANION_OTA_REPORT,
+                                      0, report, sizeof(report), 4,
+                                      &decoded) == 0);
+  assert(decoded.turn_id == 0);
+}
+
 int main(void)
 {
   test_codec();
   test_fake_server();
   test_connection_error();
+  test_late_remote_cancel();
+  test_volume_contract();
+  test_status_report_contract();
+  test_ota_contract();
   printf("BKVOICE_COMPANION_HOST_PASS\n");
   return 0;
 }

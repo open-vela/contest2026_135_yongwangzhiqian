@@ -25,6 +25,7 @@
 struct bk7258_ota_manager_s
 {
   mutex_t apply_lock;
+  mutex_t source_lock;
   spinlock_t status_lock;
   bool initialized;
   bool active;
@@ -43,6 +44,8 @@ struct bk7258_ota_manager_source_s
 static struct bk7258_ota_manager_s g_bk7258_ota_manager =
 {
   .apply_lock = NXMUTEX_INITIALIZER,
+  .source_lock = NXMUTEX_INITIALIZER,
+  .status_lock = SP_UNLOCKED,
 };
 
 static void bk7258_ota_manager_status(
@@ -147,10 +150,26 @@ static void bk7258_ota_manager_close(void *context)
 {
   struct bk7258_ota_manager_source_s *wrapper = context;
 
+  /* cancel() is allowed from a different task while stage() owns the source.
+   * Withdraw the published source and close it under one lock so cancel can
+   * never retain a context that close is about to release.
+   */
+
+  while (nxmutex_lock(&wrapper->manager->source_lock) < 0)
+    {
+    }
+
+  __atomic_store_n(&wrapper->manager->active, false, __ATOMIC_RELEASE);
+  __atomic_store_n(&wrapper->manager->source, NULL, __ATOMIC_RELAXED);
+  __atomic_store_n(&wrapper->manager->source_context, NULL,
+                   __ATOMIC_RELAXED);
+
   if (wrapper->source->close != NULL)
     {
       wrapper->source->close(wrapper->context);
     }
+
+  nxmutex_unlock(&wrapper->manager->source_lock);
 }
 
 static const struct bk7258_ota_source_ops_s g_bk7258_ota_manager_ops =
@@ -198,9 +217,17 @@ int bk7258_ota_manager_apply(const struct bk7258_ota_source_ops_s *source,
       return ret;
     }
 
+  ret = nxmutex_lock(&manager->source_lock);
+  if (ret < 0)
+    {
+      nxmutex_unlock(&manager->apply_lock);
+      return ret;
+    }
+
   __atomic_store_n(&manager->source, source, __ATOMIC_RELAXED);
   __atomic_store_n(&manager->source_context, context, __ATOMIC_RELAXED);
   __atomic_store_n(&manager->active, true, __ATOMIC_RELEASE);
+  nxmutex_unlock(&manager->source_lock);
   wrapper.manager = manager;
   wrapper.source = source;
   wrapper.context = context;
@@ -229,23 +256,32 @@ int bk7258_ota_manager_apply(const struct bk7258_ota_source_ops_s *source,
 
 int bk7258_ota_manager_cancel(void)
 {
+  struct bk7258_ota_manager_s *manager = &g_bk7258_ota_manager;
   const struct bk7258_ota_source_ops_s *source;
   void *context;
+  bool active;
+  int ret;
   int source_ret = 0;
   int stage_ret;
 
-  if (!__atomic_load_n(&g_bk7258_ota_manager.active, __ATOMIC_ACQUIRE))
+  ret = nxmutex_lock(&manager->source_lock);
+  if (ret < 0)
     {
-      return -ENOENT;
+      return ret;
     }
 
-  source = __atomic_load_n(&g_bk7258_ota_manager.source,
-                           __ATOMIC_ACQUIRE);
-  context = __atomic_load_n(&g_bk7258_ota_manager.source_context,
-                            __ATOMIC_ACQUIRE);
-  if (source != NULL && source->cancel != NULL)
+  active = __atomic_load_n(&manager->active, __ATOMIC_ACQUIRE);
+  source = __atomic_load_n(&manager->source, __ATOMIC_RELAXED);
+  context = __atomic_load_n(&manager->source_context, __ATOMIC_RELAXED);
+  if (active && source != NULL && source->cancel != NULL)
     {
       source_ret = source->cancel(context);
+    }
+  nxmutex_unlock(&manager->source_lock);
+
+  if (!active)
+    {
+      return -ENOENT;
     }
 
   stage_ret = bk7258_ota_rpmsg_cancel();

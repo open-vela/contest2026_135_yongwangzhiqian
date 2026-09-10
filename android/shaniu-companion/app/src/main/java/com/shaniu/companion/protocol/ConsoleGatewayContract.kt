@@ -2,6 +2,9 @@
 
 package com.shaniu.companion.protocol
 
+private const val MAX_FIRMWARE_RELEASES = 32
+private const val MAX_FIRMWARE_PACKAGE_BYTES = 64L * 1024L * 1024L
+
 /** Gateway-projected, read-only summary of one verified product release. */
 data class FirmwareRelease(
     val manifestSha256: String,
@@ -26,7 +29,7 @@ data class FirmwareRelease(
         require(layoutIdentity.isNotBlank() && layoutIdentity.length <= 128)
         require(SHA256.matches(layoutSha256))
         require(SHA256.matches(packageSha256))
-        require(packageSizeBytes > 0)
+        require(packageSizeBytes in 1..MAX_FIRMWARE_PACKAGE_BYTES)
     }
 }
 
@@ -39,7 +42,9 @@ data class FirmwareReleaseCatalog(
     init {
         requireDeviceId(deviceId)
         require(generation > 0)
+        require(releases.size <= MAX_FIRMWARE_RELEASES)
         require(releases.map { it.manifestSha256 }.distinct().size == releases.size)
+        require(releases.map { it.targetVersion }.distinct().size == releases.size)
     }
 }
 

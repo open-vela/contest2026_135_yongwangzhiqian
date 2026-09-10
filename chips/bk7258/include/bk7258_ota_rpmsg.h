@@ -35,6 +35,13 @@ int bk7258_ota_rpmsg_initialize(void);
 int bk7258_ota_rpmsg_stage(const struct bk7258_ota_source_ops_s *source,
                            void *context, uint32_t timeout_ms);
 int bk7258_ota_rpmsg_cancel(void);
+/* CP owns the boot state and whole-device reset mechanism.  These AP calls
+ * use the same session-bound control reply path as the maintenance commands.
+ */
+
+int bk7258_ota_rpmsg_pair_status(
+  struct bk7258_ota_pair_snapshot_s *snapshot, uint32_t timeout_ms);
+int bk7258_ota_rpmsg_reboot(uint32_t timeout_ms);
 #else
 /* CP maintenance/control adapter.  These calls never open files or perform
  * source I/O on CP; they ask the AP OTA Manager to do so and wait for its

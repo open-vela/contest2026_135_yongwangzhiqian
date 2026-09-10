@@ -54,6 +54,11 @@ int main(void)
 
   /* Explicit hardware WDT evidence is corroborated, not replaced. */
 
+  g_bk7258_test_reset_reg = BK7258_RESET_SOURCE_HARD_FAULT << 4;
+  assert(bk7258_reset_cause_read(&raw) == 0);
+  assert(raw.source == BK7258_RESET_SOURCE_HARD_FAULT);
+  assert(!raw.from_persistent_flag);
+
   g_bk7258_test_reset_reg = BK7258_RESET_SOURCE_NMI_WDT << 4;
   assert(bk7258_reset_cause_read(&raw) == 0);
   assert(raw.source == BK7258_RESET_SOURCE_NMI_WDT);

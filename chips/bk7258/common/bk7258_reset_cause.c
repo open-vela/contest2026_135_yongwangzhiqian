@@ -37,6 +37,13 @@ _Static_assert((int)BK7258_RESET_SOURCE_WATCHDOG ==
 _Static_assert((int)BK7258_RESET_SOURCE_NMI_WDT ==
                (int)RESET_SOURCE_NMI_WDT,
                "SDK NMI watchdog reset ABI changed");
+_Static_assert((int)BK7258_RESET_SOURCE_HARD_FAULT ==
+               (int)RESET_SOURCE_HARD_FAULT,
+               "SDK HardFault reset ABI changed");
+
+_Static_assert((int)BK7258_RESET_SOURCE_FORCE_DEEPSLEEP ==
+               (int)RESET_SOURCE_FORCE_DEEPSLEEP,
+               "SDK force-deep-sleep reset ABI changed");
 
 int bk7258_reset_cause_read(FAR struct bk7258_reset_cause_raw_s *raw)
 {
@@ -81,7 +88,8 @@ int bk7258_reset_cause_read(FAR struct bk7258_reset_cause_raw_s *raw)
             raw->from_persistent_flag = true;
           }
         else if (raw->source != BK7258_RESET_SOURCE_POWERON &&
-                 raw->source != BK7258_RESET_SOURCE_REBOOT)
+                 raw->source != BK7258_RESET_SOURCE_REBOOT &&
+                 raw->source != BK7258_RESET_SOURCE_HARD_FAULT)
           {
             raw->source = marker_source;
             raw->from_persistent_flag = true;

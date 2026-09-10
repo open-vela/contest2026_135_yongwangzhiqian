@@ -33,6 +33,9 @@
 #include <arch/chip/bk7258_amp.h>
 #include <arch/chip/bk7258_ota_rpmsg.h>
 #include <arch/chip/bk7258_rptun.h>
+#ifdef CONFIG_BK7258_USBMODE_RPMSG
+#  include <arch/chip/bk7258_usbmode_rpmsg.h>
+#endif
 
 #include "bk7258_rptun.h"
 #ifdef CONFIG_BK7258_AP_SUPERVISOR
@@ -839,6 +842,19 @@ int bk7258_rptun_initialize(uint32_t generation)
 
 #ifdef CONFIG_BK7258_OTA_RPMSG
   ret = bk7258_ota_rpmsg_initialize();
+  if (ret < 0)
+    {
+      bk7258_rptun_proof_unregister(priv);
+      __atomic_store_n(&priv->initialized, false, __ATOMIC_RELEASE);
+      control->error = (uint32_t)-ret;
+      control->state = BK7258_RPTUN_STATE_FAULTED;
+      __asm volatile ("dmb sy" ::: "memory");
+      return ret;
+    }
+#endif
+
+#ifdef CONFIG_BK7258_USBMODE_RPMSG
+  ret = bk7258_usbmode_rpmsg_initialize();
   if (ret < 0)
     {
       bk7258_rptun_proof_unregister(priv);

@@ -527,6 +527,7 @@ int bk7258_temperature_read(
     }
 
   memset(&request, 0, sizeof(request));
+  memset(&reply, 0, sizeof(reply));
   request.magic = BK7258_TEMPERATURE_MAGIC;
   request.version = BK7258_TEMPERATURE_VERSION;
   request.command = BK7258_TEMPERATURE_COMMAND_READ;

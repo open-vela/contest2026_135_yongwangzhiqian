@@ -5,6 +5,7 @@ package com.shaniu.companion
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.Context
+import android.content.Intent
 import android.content.SharedPreferences
 import android.graphics.Color
 import android.os.Bundle
@@ -21,13 +22,18 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
+import com.shaniu.companion.provision.DeviceControlConnection
+import com.shaniu.companion.provision.DeviceControlProtocol
+import com.shaniu.companion.provision.DeviceControlScanner
 import com.shaniu.companion.gateway.AndroidKeystoreTokenStore
 import com.shaniu.companion.gateway.ConsoleGatewayClient
+import com.shaniu.companion.gateway.ConsoleEnrollment
 import com.shaniu.companion.gateway.GatewayCallResult
 import com.shaniu.companion.gateway.GatewayEventConnection
 import com.shaniu.companion.gateway.GatewayEventObserver
 import com.shaniu.companion.gateway.GatewayFailureReason
 import com.shaniu.companion.gateway.GatewayTokenPolicy
+import com.shaniu.companion.gateway.GatewayTransportException
 import com.shaniu.companion.gateway.GatewayTransportConfiguration
 import com.shaniu.companion.gateway.OkHttpConsoleGatewaySession
 import com.shaniu.companion.protocol.CompanionState
@@ -36,19 +42,33 @@ import com.shaniu.companion.protocol.ConsoleEventEnvelope
 import com.shaniu.companion.protocol.ConsoleMutation
 import com.shaniu.companion.protocol.ConsoleMutationArguments
 import com.shaniu.companion.protocol.ConsoleOperation
+import com.shaniu.companion.protocol.ConsoleErrorCode
 import com.shaniu.companion.protocol.ConsolePolicy
 import com.shaniu.companion.protocol.EventDisposition
+import com.shaniu.companion.protocol.Emotion
+import com.shaniu.companion.protocol.TurnPhase
 import com.shaniu.companion.protocol.FirmwareRelease
 import com.shaniu.companion.protocol.FirmwareReleaseCatalog
 import com.shaniu.companion.protocol.GatewayConnection
 import com.shaniu.companion.protocol.MutationContext
 import com.shaniu.companion.protocol.MutationDecision
 import com.shaniu.companion.protocol.MutationReceiptStatus
+import com.shaniu.companion.protocol.MemoryDeleteScope
 import com.shaniu.companion.protocol.PermissionLevel
 import com.shaniu.companion.protocol.PermissionState
 import com.shaniu.companion.protocol.PersonaMode
 import com.shaniu.companion.protocol.PrivacyCapability
+import com.shaniu.companion.protocol.UpdatePhase
+import com.shaniu.companion.provision.ProvisionActivity
+import com.shaniu.companion.provision.ProvisionBindingStore
+import com.shaniu.companion.provision.ProvisionBootstrap
+import com.shaniu.companion.ota.BkpackInspector
+import com.shaniu.companion.ota.OtaControlUpload
+import com.shaniu.companion.ota.OtaPackageServer
+import com.shaniu.companion.ota.OtaStartGate
+import com.shaniu.companion.ota.OtaUpdatePolicy
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -69,11 +89,22 @@ class MainActivity : Activity() {
 
     private lateinit var preferences: SharedPreferences
     private lateinit var tokenStore: AndroidKeystoreTokenStore
+    private lateinit var provisionBindingStore: ProvisionBindingStore
     private lateinit var content: LinearLayout
 
     private val ioExecutor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val requestCounter = AtomicLong()
+    private var inspectedFirmware: BkpackInspector.Metadata? = null
+    private var selectedFirmwareFile: java.io.File? = null
+    private var firmwareInspectionPending = false
+    private var firmwareInspectionMessage: String? = null
+    private var otaServer: OtaPackageServer? = null
+    private var otaUpload: OtaControlUpload? = null
+    private var otaStatus: DeviceControlProtocol.OtaStatus? = null
+    private var otaMessage = ""
+    private var otaVerificationPending = false
+    private val otaStartGate = OtaStartGate()
 
     private var runtime: GatewayRuntime? = null
     private var eventConnection: GatewayEventConnection? = null
@@ -84,30 +115,216 @@ class MainActivity : Activity() {
     private var currentTab = TAB_OVERVIEW
     private var busy = false
     private var eventConnected = false
+    private var foreground = false
+    private var autoReconnectAllowed = true
+    private var reconnectAttempt = 0
+    private var reconnectTicket = 0L
     private var destroyed = false
+    private var developerPanel = false
+    private var legacyConsoleMode = false
+    private var directConnection: DeviceControlConnection? = null
+    private var directScanner: DeviceControlScanner? = null
+    private var directDialog: AlertDialog? = null
+    private var directSnapshot: DeviceControlProtocol.Snapshot? = null
+    private var directFirmwareInfo: DeviceControlProtocol.FirmwareInfo? = null
+    private var directEpoch = 0L
+    private var directPending = false
+    private var memoryResultMessage: String? = null
+    private var memoryDesiredEnabled: Boolean? = null
+    private var memoryRequestAccepted = false
+    private var directConnecting = false
+    private var directMessage = "尚未连接设备"
+    private val directPoll = object : Runnable {
+        override fun run() {
+            if (!foreground || directConnection == null) return
+            if (!directPending) {
+                if (otaUpload != null || otaVerificationPending || otaStatus?.state in 1L..2L)
+                    directOtaRequest(DeviceControlProtocol.Command.OTA_STATUS)
+                else directRequest(DeviceControlProtocol.Command.STATUS)
+            }
+            mainHandler.postDelayed(this, 2000)
+        }
+    }
+    private val navigation = mutableMapOf<Int, TextView>()
     private var lastAction = "请配置 HTTPS Gateway、设备 ID 和访问令牌"
 
     private var draftOrigin = ""
     private var draftDeviceId = ""
     private var draftPins = ""
+    private var provisionedDeviceId = ""
+    private var controlCredentialRequired = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.statusBarColor = BACKGROUND
+        window.navigationBarColor = Color.WHITE
+        window.isStatusBarContrastEnforced = false
+        window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or
+            View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
         preferences = getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
         tokenStore = AndroidKeystoreTokenStore(applicationContext)
-        draftOrigin = preferences.getString(KEY_ORIGIN, "").orEmpty()
-        draftDeviceId = preferences.getString(KEY_DEVICE_ID, "").orEmpty()
-        draftPins = preferences.getString(KEY_PINS, "").orEmpty()
-        setContentView(buildRoot())
+        provisionBindingStore = ProvisionBindingStore(applicationContext)
+        legacyConsoleMode = (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0 &&
+            intent.getBooleanExtra("legacy_console", false)
+        reloadLocalConfiguration()
+        setContentView(buildRoot().apply { applySystemInsets() })
+        installSystemBack { navigateBack() }
         render()
+    }
+
+    private fun navigateBack() {
+        when {
+            developerPanel -> developerPanel = false
+            currentTab == TAB_PRIVACY || currentTab == TAB_UPDATE -> currentTab = TAB_SETTINGS
+            currentTab != TAB_OVERVIEW -> currentTab = TAB_OVERVIEW
+            else -> { finish(); return }
+        }
+        render()
+    }
+
+    @Deprecated("Platform back callback")
+    override fun onBackPressed() = navigateBack()
+
+    override fun onStart() {
+        super.onStart()
+        foreground = true
+        reloadLocalConfiguration()
+        if (legacyConsoleMode && autoReconnectAllowed && !busy && runtime == null && !controlCredentialRequired &&
+            draftOrigin.isNotBlank() && draftDeviceId.isNotBlank()) {
+            connect(draftOrigin, draftDeviceId, draftPins, "", automatic = true)
+        } else render()
+    }
+
+    override fun onStop() {
+        // Device speech remains board-owned. Only the phone's observer and
+        // pending local connection generation end when its UI is hidden.
+        foreground = false
+        closeDirect()
+        closeRuntime(clearReportedState = true)
+        super.onStop()
+    }
+
+    @Deprecated("Platform activity result callback")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (resultCode != RESULT_OK) return
+        when (requestCode) {
+            FIRMWARE_PACKAGE_REQUEST -> inspectFirmwarePackage(data?.data)
+            PROVISION_REQUEST -> {
+                val deviceId = ProvisionBootstrap.validDeviceId(
+                    data?.getStringExtra(ProvisionActivity.EXTRA_PROVISIONED_DEVICE_ID),
+                ) ?: return
+                val durableDeviceId = try {
+                    provisionBindingStore.boundDeviceId()
+                } catch (_: Exception) {
+                    null
+                }
+                if (durableDeviceId != deviceId) {
+                    provisionedDeviceId = ""
+                    controlCredentialRequired = true
+                    lastAction = "设备已返回认领结果，但本机没有对应的持久化回执；请重新打开认领核对结果"
+                    currentTab = TAB_OVERVIEW
+                    render()
+                    return
+                }
+                provisionedDeviceId = durableDeviceId
+                if (!legacyConsoleMode) {
+                    lastAction = "设备已确认保存设置，可在首页查看连接和语音服务状态。"
+                    currentTab = TAB_OVERVIEW
+                    render()
+                    return
+                }
+                controlCredentialRequired = true
+                if (preferences.edit()
+                        .putString(KEY_PROVISIONED_DEVICE_ID, deviceId)
+                        .putBoolean(KEY_CONTROL_CREDENTIAL_REQUIRED, true)
+                        .commit()) {
+                    lastAction = "傻妞已保存网络设置；请绑定 App 控制凭据"
+                } else {
+                    // The canonical binding is already durable. Reopening the App
+                    // restores it even if this compatibility mirror could not be saved.
+                    lastAction = "傻妞已保存网络设置；本机状态将在重新打开后恢复，请再绑定 App 控制凭据"
+                }
+                currentTab = TAB_OVERVIEW
+                render()
+            }
+            CONSOLE_ENROLLMENT_REQUEST -> importConsoleEnrollment(data)
+        }
     }
 
     override fun onDestroy() {
         destroyed = true
+        closeDirect()
         closeRuntime(clearReportedState = true)
-        ioExecutor.shutdownNow()
+        // Let the queued TLS/session close finish off the main thread.
+        ioExecutor.shutdown()
         mainHandler.removeCallbacksAndMessages(null)
         super.onDestroy()
+    }
+
+    /**
+     * Restores the canonical provisioning outcome before deciding whether an
+     * existing console credential may reconnect. The old App preference is a
+     * compatibility mirror only; new commits come from ProvisionBindingStore.
+     */
+    private fun reloadLocalConfiguration() {
+        if (!legacyConsoleMode) {
+            try {
+                provisionedDeviceId = provisionBindingStore.boundDeviceId().orEmpty()
+                lastAction = ""
+            } catch (_: Exception) {
+                provisionedDeviceId = ""
+                lastAction = "读取设备资料失败，请重新核对认领结果。"
+            }
+            return
+        }
+        try {
+            draftOrigin = preferences.getString(KEY_ORIGIN, "").orEmpty()
+            draftDeviceId = preferences.getString(KEY_DEVICE_ID, "").orEmpty()
+            draftPins = preferences.getString(KEY_PINS, "").orEmpty()
+            val legacyDeviceId = ProvisionBootstrap.validDeviceId(
+                preferences.getString(KEY_PROVISIONED_DEVICE_ID, ""),
+            )
+            val durableDeviceId = provisionBindingStore.boundDeviceId()
+            // The old preference was written after the receipt had already
+            // been removed, so it cannot prove the atomic durable outcome.
+            // Keep it only as a migration warning, never as a bound locator.
+            provisionedDeviceId = durableDeviceId.orEmpty()
+            controlCredentialRequired = preferences.getBoolean(
+                KEY_CONTROL_CREDENTIAL_REQUIRED,
+                false,
+            )
+            if (durableDeviceId != null) {
+                val needsFreshCredential = draftDeviceId != durableDeviceId
+                controlCredentialRequired = controlCredentialRequired || needsFreshCredential
+                if (legacyDeviceId != durableDeviceId || needsFreshCredential) {
+                    val mirrored = preferences.edit()
+                        .putString(KEY_PROVISIONED_DEVICE_ID, durableDeviceId)
+                        .putBoolean(KEY_CONTROL_CREDENTIAL_REQUIRED, controlCredentialRequired)
+                        .commit()
+                    if (!mirrored) {
+                        lastAction = "已恢复设备认领结果，但本机控制状态未能持久化"
+                    }
+                }
+            } else if (legacyDeviceId != null) {
+                controlCredentialRequired = true
+                val blocked = preferences.edit()
+                    .putBoolean(KEY_CONTROL_CREDENTIAL_REQUIRED, true)
+                    .commit()
+                lastAction = if (blocked) {
+                    "检测到旧版认领记录；请重新核对设备，或导入 App 控制凭据"
+                } else {
+                    "旧版认领记录无法核对；已停止自动连接"
+                }
+            }
+        } catch (_: Exception) {
+            draftOrigin = ""
+            draftDeviceId = ""
+            draftPins = ""
+            provisionedDeviceId = ""
+            controlCredentialRequired = true
+            lastAction = "本机认领状态无法读取；已停止自动连接以避免绑定错误"
+        }
     }
 
     private fun buildRoot(): View {
@@ -117,10 +334,12 @@ class MainActivity : Activity() {
         }
         root.addView(
             TextView(this).apply {
-                text = "傻妞 Companion"
-                textSize = 23f
+                text = "傻妞  /  SHANIU"
+                textSize = 18f
+                letterSpacing = 0.06f
+                typeface = android.graphics.Typeface.create("sans-serif-medium", 0)
                 setTextColor(INK)
-                setPadding(dp(20), dp(18), dp(20), dp(12))
+                setPadding(dp(26), dp(18), dp(26), dp(16))
             },
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -129,7 +348,7 @@ class MainActivity : Activity() {
         )
         content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(18), dp(8), dp(18), dp(24))
+            setPadding(dp(26), dp(8), dp(26), dp(24))
         }
         root.addView(
             ScrollView(this).apply { addView(content) },
@@ -144,38 +363,669 @@ class MainActivity : Activity() {
             setBackgroundColor(Color.WHITE)
             setPadding(dp(8), dp(6), dp(8), dp(8))
         }
-        TABS.forEachIndexed { index, title ->
+        TABS.forEach { (tab, title) ->
             tabRow.addView(
-                Button(this).apply {
+                TextView(this).apply {
                     text = title
-                    isAllCaps = false
+                    textSize = 12f
+                    compoundDrawablePadding = dp(5)
+                    setCompoundDrawablesWithIntrinsicBounds(null, navigationIcon(tab), null, null)
+                    gravity = Gravity.CENTER
+                    isClickable = true
+                    isFocusable = true
+                    navigation[tab] = this
                     setOnClickListener {
-                        currentTab = index
+                        currentTab = tab
+                        developerPanel = false
                         render()
                     }
                 },
-                LinearLayout.LayoutParams(dp(104), ViewGroup.LayoutParams.WRAP_CONTENT),
+                LinearLayout.LayoutParams(0, dp(60), 1f),
             )
         }
         root.addView(
-            HorizontalScrollView(this).apply {
-                isHorizontalScrollBarEnabled = false
-                addView(tabRow)
-            },
+            tabRow,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
         )
         return root
     }
 
     private fun render() {
         if (destroyed) return
+        val selectedTab = when (currentTab) {
+            TAB_INTERACTION -> TAB_OVERVIEW
+            TAB_PRIVACY, TAB_UPDATE -> TAB_SETTINGS
+            else -> currentTab
+        }
+        navigation.forEach { (tab, label) ->
+            label.isSelected = tab == selectedTab
+            label.setTextColor(if (tab == selectedTab) INK else MUTED)
+            label.background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(if (tab == selectedTab) Color.rgb(232, 240, 233) else Color.TRANSPARENT)
+                cornerRadius = dp(18).toFloat()
+            }
+        }
         content.removeAllViews()
-        statusStrip()
+        if (!legacyConsoleMode) {
+            renderDirectCompanion()
+            if (lastAction.isNotBlank()) addMuted(lastAction)
+            return
+        }
+        if (developerPanel) statusStrip()
         when (currentTab) {
             TAB_OVERVIEW -> renderOverview()
             TAB_INTERACTION -> renderInteraction()
             TAB_PERSONALITY -> renderPersonality()
             TAB_PRIVACY -> renderPrivacy()
             TAB_UPDATE -> renderUpdate()
+            TAB_SETTINGS -> renderSettings()
+        }
+        if (!developerPanel && lastAction.contains("失败")) addMuted(lastAction)
+    }
+
+    private val directPersonas = listOf("温柔陪伴", "活泼俏皮", "安静倾听", "认真交流", "轻轻嘴硬")
+    private val directPersonaDescriptions = listOf("慢慢聊，温柔回应", "轻松一点，多一点趣味",
+        "留些空间，听你说完", "一起理清思路", "带一点俏皮的小别扭")
+
+    private fun directStatus(): String = directSnapshot?.statusText() ?: directMessage
+
+    private fun closeDirect() {
+        directEpoch++
+        directScanner?.close(); directScanner = null
+        directDialog?.dismiss(); directDialog = null
+        directConnection?.close(); directConnection = null
+        directSnapshot = null; directFirmwareInfo = null; directPending = false; directConnecting = false
+        memoryResultMessage = null; memoryDesiredEnabled = null; memoryRequestAccepted = false
+        otaUpload?.close(); otaUpload = null; otaStatus = null
+        otaVerificationPending = false
+        otaStartGate.release()
+        setOtaKeepAwake(false)
+        closeOtaServer("升级传输已中断；重新连接后会核对设备状态。")
+        directMessage = "手机未连接；设备可继续独立对话。"
+        mainHandler.removeCallbacks(directPoll)
+    }
+
+    private fun closeOtaServer(message: String? = null) {
+        val server = otaServer ?: return
+        otaServer = null
+        ioExecutor.execute { server.close() }
+        if (message != null) otaMessage = message
+    }
+
+    private fun setOtaKeepAwake(keep: Boolean) {
+        if (keep) window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        else window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+    }
+
+    private fun directRequest(command: DeviceControlProtocol.Command, value: Int = 0): Boolean {
+        val connection = directConnection ?: return false
+        if (directPending || !foreground) return false
+        val epoch = directEpoch
+        directPending = true
+        connection.request(command, value) { accepted ->
+            if (!accepted) mainHandler.post {
+                if (epoch == directEpoch && !destroyed) {
+                    directPending = false
+                    if (command == DeviceControlProtocol.Command.MEMORY_SET || command == DeviceControlProtocol.Command.MEMORY_DELETE) {
+                        memoryResultMessage = null; memoryDesiredEnabled = null; memoryRequestAccepted = false
+                    }
+                    render()
+                }
+            }
+        }
+        if (command != DeviceControlProtocol.Command.STATUS) render()
+        return true
+    }
+
+    private fun directOtaRequest(command: DeviceControlProtocol.Command,
+                                 payload: ByteArray = ByteArray(0)): Boolean {
+        val connection = directConnection ?: return false
+        if (directPending || !foreground) return false
+        val epoch = directEpoch
+        directPending = true
+        connection.requestOta(command, payload) { accepted ->
+            if (!accepted) mainHandler.post {
+                if (epoch == directEpoch && !destroyed) {
+                    directPending = false
+                    handleOtaResult(command, otaErrorSnapshot(-11), epoch)
+                }
+            }
+        }
+        return true
+    }
+
+    private fun otaErrorSnapshot(error: Int) = DeviceControlProtocol.Snapshot(
+        error, false, false, null, null, null, null)
+
+    private fun handleOtaResult(command: DeviceControlProtocol.Command,
+                                snapshot: DeviceControlProtocol.Snapshot, epoch: Long) {
+        if (epoch != directEpoch || !foreground || destroyed) return
+        directPending = false
+        if (command == DeviceControlProtocol.Command.OTA_STATUS) {
+            otaStatus = snapshot.otaStatus
+            if (snapshot.error != 0) otaMessage = "无法读取升级状态（${snapshot.error}）。"
+            confirmExpectedOta()
+            render()
+            return
+        }
+
+        if (command == DeviceControlProtocol.Command.OTA_CANCEL && snapshot.error == -114) {
+            otaUpload?.close(); otaUpload = null
+            otaVerificationPending = true
+            closeOtaServer()
+            otaMessage = "设备已进入后续升级阶段，取消未被接受；正在保留设备状态供重新核对。"
+            render()
+            return
+        }
+        if (command == DeviceControlProtocol.Command.OTA_CANCEL &&
+            otaUpload?.state != OtaControlUpload.State.WAITING) {
+            if (snapshot.error == 0) {
+                otaUpload?.close()
+                otaUpload = null
+                otaVerificationPending = false
+                closeOtaServer()
+                otaStartGate.release()
+                setOtaKeepAwake(false)
+                otaMessage = "设备已确认取消升级请求。"
+            } else {
+                otaMessage = "设备拒绝取消升级请求（${snapshot.error}）。"
+            }
+            render()
+            return
+        }
+        otaUpload?.response(command, snapshot)
+        otaMessage = when {
+            snapshot.error != 0 -> "设备拒绝升级请求（${snapshot.error}）。"
+            otaUpload?.state == OtaControlUpload.State.ACCEPTED -> {
+                otaVerificationPending = true
+                "设备已接受升级来源，正在等待设备报告升级状态。"
+            }
+            otaUpload?.state == OtaControlUpload.State.CANCELED -> "设备已确认取消升级请求。"
+            otaUpload?.state == OtaControlUpload.State.FAILED -> {
+                otaUpload = null
+                closeOtaServer()
+                otaStartGate.release()
+                setOtaKeepAwake(false)
+                "升级传输未完成，请重新连接后核对设备状态。"
+            }
+            else -> "正在向设备发送升级来源…"
+        }
+        render()
+    }
+
+    private fun startLocalOta() {
+        val file = selectedFirmwareFile ?: return
+        val pack = inspectedFirmware ?: return
+        val snapshot = directSnapshot
+        val connection = directConnection
+        val info = directFirmwareInfo
+        if (connection == null || snapshot?.otaSupported != true || directPending || otaUpload != null) return
+        if (info == null) { otaMessage = "正在读取设备版本，暂不能开始升级。"; render(); return }
+        if (!OtaUpdatePolicy.mayStart(pack.board, DEVICE_BOARD, info.securityCounter, pack.securityCounter)) {
+            otaMessage = if (pack.board != DEVICE_BOARD) "固件包不适用于当前设备。"
+                else "设备安全计数不低于目标固件，不能降级或重复升级。"
+            render(); return
+        }
+        if (!otaStartGate.acquire()) return
+        val epoch = directEpoch
+        otaMessage = "正在准备本机升级来源…"
+        setOtaKeepAwake(true)
+        render()
+        ioExecutor.execute {
+            val opened = runCatching { OtaPackageServer.open(applicationContext, file) }
+            mainHandler.post {
+                if (epoch != directEpoch || !foreground || destroyed) {
+                    opened.getOrNull()?.let { server -> ioExecutor.execute { server.close() } }
+                    return@post
+                }
+                val server = opened.getOrNull()
+                if (server == null) {
+                    otaMessage = "无法建立本机升级来源，请检查 Wi‑Fi 和已验证的固件包。"
+                    otaStartGate.release(); setOtaKeepAwake(false)
+                    render()
+                    return@post
+                }
+                if (server.metadata.catalogSha256 != pack.catalogSha256 || !persistExpected(server.metadata)) {
+                    ioExecutor.execute { server.close() }
+                    otaStartGate.release(); setOtaKeepAwake(false)
+                    otaMessage = "无法保存本次升级核验目标，未向设备发送升级请求。"
+                    render()
+                    return@post
+                }
+                otaServer = server
+                lateinit var upload: OtaControlUpload
+                upload = OtaControlUpload(server.requestRecord) { command, payload ->
+                    if (epoch != directEpoch || !foreground || directConnection == null) false
+                    else directOtaRequest(command, payload)
+                }
+                otaUpload = upload
+                if (!upload.start()) {
+                    otaUpload = null; closeOtaServer(); otaStartGate.release(); setOtaKeepAwake(false)
+                    otaMessage = "设备控制通道不可用，未开始升级。"
+                }
+                render()
+            }
+        }
+    }
+
+    private fun cancelLocalOta() {
+        val upload = otaUpload
+        if (upload?.state == OtaControlUpload.State.WAITING) {
+            upload.cancel()
+            otaMessage = "正在请求取消升级…"
+        } else if (upload?.state == OtaControlUpload.State.ACCEPTED || otaStatus?.state in 1L..2L) {
+            if (!directOtaRequest(DeviceControlProtocol.Command.OTA_CANCEL))
+                otaMessage = "控制通道不可用；请重新连接后核对设备升级状态。"
+            else otaMessage = "正在请求设备取消升级…"
+        }
+        render()
+    }
+
+    private fun confirmExpectedOta() {
+        val info = directFirmwareInfo ?: return
+        val expectedVersion = preferences.getString(KEY_OTA_EXPECTED_VERSION, null) ?: return
+        val expectedCounter = preferences.getLong(KEY_OTA_EXPECTED_COUNTER, -1L)
+        val expectedDeviceId = preferences.getString(KEY_OTA_EXPECTED_DEVICE, null) ?: return
+        val version = "${info.major}.${info.minor}.${info.revision}+${info.build}"
+        val status = otaStatus ?: return
+        val confirmed = OtaUpdatePolicy.confirmed(expectedDeviceId, provisionedDeviceId,
+            expectedVersion, expectedCounter, version, info.securityCounter,
+            status.state, status.phase, status.result)
+        if (confirmed) {
+            otaMessage = "设备已确认完成升级：$version。"
+            otaUpload = null
+            otaVerificationPending = false
+            closeOtaServer()
+            otaStartGate.release(); setOtaKeepAwake(false)
+        } else if (status.state == 3L) {
+            otaMessage = "设备未确认本次升级完成，请根据设备状态重试或恢复。"
+            otaUpload?.close(); otaUpload = null; otaVerificationPending = false
+            closeOtaServer(); otaStartGate.release(); setOtaKeepAwake(false)
+        }
+    }
+
+    private fun persistExpected(pack: BkpackInspector.Metadata): Boolean {
+        if (provisionedDeviceId.isBlank()) return false
+        return preferences.edit()
+            .putString(KEY_OTA_EXPECTED_VERSION, pack.version)
+            .putLong(KEY_OTA_EXPECTED_COUNTER, pack.securityCounter)
+            .putString(KEY_OTA_EXPECTED_CATALOG, pack.catalogSha256)
+            .putString(KEY_OTA_EXPECTED_DEVICE, provisionedDeviceId)
+            .commit() && preferences.getString(KEY_OTA_EXPECTED_CATALOG, null) == pack.catalogSha256
+    }
+
+    private fun editDirectVolume() {
+        var volume = directSnapshot?.volume ?: return
+        val label = TextView(this).apply { text = "音量 $volume%"; setPadding(dp(24), dp(12), dp(24), 0) }
+        val slider = SeekBar(this).apply {
+            max = 100; progress = volume
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(bar: SeekBar?, value: Int, user: Boolean) {
+                    if (user) { volume = value; label.text = "音量 $value%" }
+                }
+                override fun onStartTrackingTouch(bar: SeekBar?) { }
+                override fun onStopTrackingTouch(bar: SeekBar?) { }
+            })
+        }
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; addView(label); addView(slider) }
+        directDialog = AlertDialog.Builder(this).setTitle("扬声器音量").setView(box)
+            .setNegativeButton("取消", null).setPositiveButton("设置") { _, _ ->
+                directRequest(DeviceControlProtocol.Command.VOLUME, volume)
+            }.show()
+    }
+
+    @Suppress("MissingPermission")
+    private fun scanDirect() {
+        if (!foreground || provisionedDeviceId.isBlank()) return
+        val permissions = if (android.os.Build.VERSION.SDK_INT >= 31)
+            arrayOf(android.Manifest.permission.BLUETOOTH_SCAN, android.Manifest.permission.BLUETOOTH_CONNECT)
+        else arrayOf(android.Manifest.permission.ACCESS_FINE_LOCATION)
+        if (permissions.any { checkSelfPermission(it) != android.content.pm.PackageManager.PERMISSION_GRANTED }) {
+            requestPermissions(permissions, 6042); return
+        }
+        closeDirect()
+        val epoch = directEpoch
+        val found = mutableListOf<android.bluetooth.BluetoothDevice>()
+        val labels = android.widget.ArrayAdapter<String>(this, android.R.layout.simple_list_item_1)
+        directConnecting = true; directMessage = "正在寻找附近的傻妞…"
+        directDialog = AlertDialog.Builder(this).setTitle("选择附近的傻妞")
+            .setAdapter(labels) { _, index ->
+                if (epoch == directEpoch) connectDirect(found[index], epoch)
+            }.setNegativeButton("取消") { _, _ -> closeDirect(); render() }
+            .setOnCancelListener { closeDirect(); render() }.show()
+        directScanner = DeviceControlScanner(this, { device, name ->
+            if (epoch == directEpoch && foreground) {
+                found += device
+                labels.add("$name · ${device.address.takeLast(5)}")
+            }
+        }, { failed ->
+            if (epoch == directEpoch && foreground) {
+                directConnecting = false
+                directMessage = if (failed) "无法扫描，请检查蓝牙和附近设备权限。"
+                    else if (found.isEmpty()) "未发现设备，请确认傻妞已开机并在附近。" else "请选择附近的设备。"
+                if (found.isEmpty()) { directDialog?.dismiss(); directDialog = null }
+                render()
+            }
+        })
+        directScanner!!.start()
+        render()
+    }
+
+    private fun connectDirect(device: android.bluetooth.BluetoothDevice, epoch: Long) {
+        directScanner?.close(); directScanner = null
+        directDialog?.dismiss(); directDialog = null
+        directConnecting = true; directMessage = "正在验证并连接傻妞…"; render()
+        val deviceId = provisionedDeviceId
+        ioExecutor.execute {
+            val connection = runCatching { DeviceControlConnection(applicationContext, device, deviceId,
+                { command, snapshot -> mainHandler.post {
+                    if (epoch == directEpoch && foreground && !destroyed) {
+                        if (command.wire in DeviceControlProtocol.Command.OTA_BEGIN.wire..
+                            DeviceControlProtocol.Command.OTA_CANCEL.wire) {
+                            handleOtaResult(command, snapshot, epoch)
+                            return@post
+                        }
+                        directConnecting = false; directPending = false
+                        if (command == DeviceControlProtocol.Command.INFO) {
+                            directFirmwareInfo = snapshot.firmwareInfo
+                            confirmExpectedOta()
+                            if (snapshot.error == 0 && snapshot.firmwareInfo != null &&
+                                preferences.contains(KEY_OTA_EXPECTED_VERSION) && otaStatus == null) {
+                                directOtaRequest(DeviceControlProtocol.Command.OTA_STATUS)
+                            }
+                        } else directSnapshot = snapshot.takeIf { it.error == 0 }
+                        directMessage = if (snapshot.error != 0) "设备未完成操作，请稍后重试。"
+                            else if (command == DeviceControlProtocol.Command.CLEAR_HISTORY) "设备上的近期对话已清空"
+                            else "设备状态已更新"
+                        if (command == DeviceControlProtocol.Command.MEMORY_SET || command == DeviceControlProtocol.Command.MEMORY_DELETE) {
+                            if (snapshot.error != 0) {
+                                memoryResultMessage = null; memoryDesiredEnabled = null; memoryRequestAccepted = false
+                            } else { memoryRequestAccepted = true; directMessage = "正在保存记忆设置…" }
+                        }
+                        if (memoryRequestAccepted && memoryResultMessage != null && snapshot.error == 0 && !snapshot.memoryPending) {
+                            val completed = snapshot.memoryEnabled != null && snapshot.memoryEnabled == memoryDesiredEnabled
+                            if (snapshot.memoryFailed || completed) {
+                                directMessage = if (snapshot.memoryFailed) "记忆操作未确认，请重新连接核对；重启前不要视为已完成。" else memoryResultMessage!!
+                                android.widget.Toast.makeText(this, directMessage, android.widget.Toast.LENGTH_LONG).show()
+                                memoryResultMessage = null; memoryDesiredEnabled = null; memoryRequestAccepted = false
+                            }
+                        }
+                        if (command == DeviceControlProtocol.Command.CLEAR_HISTORY && snapshot.error == 0)
+                            android.widget.Toast.makeText(this, directMessage, android.widget.Toast.LENGTH_SHORT).show()
+                        if (command != DeviceControlProtocol.Command.STATUS && snapshot.error != 0)
+                            android.widget.Toast.makeText(this, directMessage, android.widget.Toast.LENGTH_SHORT).show()
+                        render()
+                    }
+                } },
+                { _ -> mainHandler.post {
+                    if (epoch == directEpoch && !destroyed) {
+                        closeDirect(); directMessage = "连接已断开，请靠近设备后重试。"; render()
+                    }
+                } }) }
+            mainHandler.post {
+                if (epoch != directEpoch || !foreground || destroyed) connection.getOrNull()?.close()
+                else connection.fold(onSuccess = {
+                    directConnection = it
+                    mainHandler.removeCallbacks(directPoll)
+                    mainHandler.postDelayed(directPoll, 2000)
+                }, onFailure = {
+                    closeDirect(); directMessage = "无法读取设备控制凭据，请核对认领结果。"; render()
+                })
+            }
+        }
+    }
+
+    override fun onRequestPermissionsResult(code: Int, permissions: Array<out String>, results: IntArray) {
+        super.onRequestPermissionsResult(code, permissions, results)
+        if (code == 6042 && foreground && !destroyed) {
+            if (results.isNotEmpty() && results.all { it == android.content.pm.PackageManager.PERMISSION_GRANTED }) scanDirect()
+            else { directMessage = "连接需要附近设备权限，可在系统设置中开启。"; render() }
+        }
+    }
+
+    private fun renderDirectCompanion() {
+        val bound = provisionedDeviceId.isNotBlank()
+        when (currentTab) {
+            TAB_OVERVIEW, TAB_INTERACTION -> {
+                content.addView(TextView(this).apply {
+                    text = if (bound) "今天，也在你身边。" else "嗨，我是傻妞。"
+                    textSize = 29f
+                    typeface = android.graphics.Typeface.create("sans-serif-medium", 0)
+                    setTextColor(INK)
+                    setPadding(0, dp(14), 0, dp(8))
+                })
+                addMuted("把日常，说给我听。")
+                // Reserve space for copy, the primary action and persistent navigation.
+                // Large accessibility text can still use the enclosing scroll view.
+                val portraitHeight = (resources.configuration.screenHeightDp - 520).coerceIn(120, 290)
+                content.addView(CompanionPortraitView(this), LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(portraitHeight)).apply { bottomMargin = dp(12) })
+                if (bound) {
+                    addCard(if (directSnapshot != null) "已连接傻妞" else "已保存认领结果", directStatus())
+                    if (directSnapshot == null)
+                        primaryButton(if (directConnecting) "正在连接…" else "连接我的傻妞", !directConnecting) { scanDirect() }
+                    if (directSnapshot?.busy == true && directSnapshot?.memoryPending != true)
+                        actionButton("停止这次对话", !directPending) { directRequest(DeviceControlProtocol.Command.CANCEL) }
+                    actionButton("使用与设置") { currentTab = TAB_SETTINGS; render() }
+                } else {
+                    addCard("从第一次对话开始", "连上网络，设置语音服务。\n然后，聊聊今天发生的小事。")
+                    primaryButton("添加我的傻妞  →", !busy) { startProvisioning() }
+                    content.addView(TextView(this).apply {
+                        text = "AI 伴侣 · 由你决定如何陪伴"
+                        textSize = 11f; gravity = Gravity.CENTER; setTextColor(MUTED)
+                        setPadding(0, dp(16), 0, dp(8))
+                    })
+                }
+                settingsRow("固件更新", "查看设备版本与固件包") {
+                    currentTab = TAB_UPDATE; render()
+                }
+            }
+            TAB_PERSONALITY -> {
+                sectionTitle("今天，想怎样陪你？")
+                addMuted("傻妞是 AI 伴侣，声音由模型合成。")
+                addCard("每一种心情，都值得被听见", "选择聊天的语气，让陪伴更合心意。")
+                addCard("人物设置", directSnapshot?.persona?.let { directPersonas[it] } ?: "连接设备后查看和设置人物风格。")
+                if (directSnapshot != null) {
+                    directPersonas.forEachIndexed { index, name ->
+                        settingsRow(name, directPersonaDescriptions[index],
+                            enabled = !directPending && directSnapshot?.busy == false,
+                            selected = directSnapshot?.persona == index) {
+                            directRequest(DeviceControlProtocol.Command.PERSONA, index)
+                        }
+                    }
+                } else if (bound) primaryButton("连接傻妞", !directConnecting) { scanDirect() }
+                else primaryButton("先添加我的傻妞", !busy) { startProvisioning() }
+            }
+            TAB_PRIVACY -> {
+                sectionTitle("隐私与权限")
+                addCard("云端语音", "开始对话后，设备采集的语音会发送到你配置的服务，用于识别、回答和合成声音。")
+                addCard("服务凭据", "由手机配置到设备。App 不提供密钥明文回读。")
+                addCard("对话记忆", "默认只保留本次开机的近期上下文。开启跨重启记忆后，设备会加密保存最近三轮对话；关闭会停止读取和保存，已保存内容可单独删除。")
+                if (directSnapshot != null) {
+                    val memory = directSnapshot!!
+                    val canManage = !directPending && memoryResultMessage == null && memory.ready && !memory.busy && memory.memoryEnabled != null
+                    settingsRow("跨重启记忆", when {
+                        !memory.memorySupported -> "设备固件尚未提供此功能"
+                        memory.memoryPending -> "正在处理，请稍候"
+                        memory.memoryFailed -> "上次操作未确认，请核对设备状态"
+                        memory.memoryEnabled == true -> "已开启 · 加密保存最近三轮对话"
+                        memory.memoryEnabled == false -> "已关闭 · 不读取或新增保存"
+                        else -> "正在读取设备设置"
+                    }, enabled = canManage) {
+                        val enable = memory.memoryEnabled != true
+                        confirm(if (enable) "开启跨重启记忆" else "关闭跨重启记忆",
+                            if (enable) "允许设备加密保存最近三轮对话，并在下次启动后继续使用。" else "停止读取和保存跨重启记忆。已保存的内容会保留，可通过下方入口删除。") {
+                            memoryResultMessage = if (enable) "跨重启记忆已开启" else "跨重启记忆已关闭"
+                            memoryDesiredEnabled = enable
+                            memoryRequestAccepted = false
+                            if (!directRequest(DeviceControlProtocol.Command.MEMORY_SET, if (enable) 1 else 0)) {
+                                memoryResultMessage = null; memoryDesiredEnabled = null
+                            }
+                        }
+                    }
+                    settingsRow("删除已保存的记忆", "清除本地记忆和近期上下文，并关闭跨重启记忆", enabled = canManage) {
+                        confirm("删除设备记忆", "此操作无法撤销：设备将使旧的加密记忆失效，清空近期上下文，并关闭跨重启记忆。云端服务保留的记录不在此范围内。") {
+                            memoryResultMessage = "设备记忆已删除，跨重启记忆已关闭"
+                            memoryDesiredEnabled = false
+                            memoryRequestAccepted = false
+                            if (!directRequest(DeviceControlProtocol.Command.MEMORY_DELETE)) {
+                                memoryResultMessage = null; memoryDesiredEnabled = null
+                            }
+                        }
+                    }
+                    settingsRow("清空近期对话", if (directSnapshot?.busy == true)
+                        "请等待当前对话结束" else "让下一次聊天从新的话题开始",
+                        enabled = !directPending && directSnapshot?.ready == true && directSnapshot?.busy == false) {
+                        confirm("清空近期对话", "清除设备用于继续聊天的近期上下文。云端服务可能保留的记录不在此清除范围内，人物与配网设置会保留。") {
+                            directRequest(DeviceControlProtocol.Command.CLEAR_HISTORY)
+                        }
+                    }
+                } else if (bound) primaryButton("连接设备以管理记忆", !directConnecting) { scanDirect() }
+                else primaryButton("先添加我的傻妞", !busy) { startProvisioning() }
+            }
+            TAB_UPDATE -> {
+                sectionTitle("固件更新")
+                val info = directFirmwareInfo
+                addCard("设备当前版本", info?.let { "${it.major}.${it.minor}.${it.revision}（构建 ${it.build}，安全计数 ${it.securityCounter}）" }
+                    ?: if (directConnection == null) "连接设备后读取" else "版本不可用")
+                inspectedFirmware?.let { pack ->
+                    addCard("所选固件包", "版本 ${pack.version}\n设备 ${pack.board}\n镜像共 ${pack.ap.size + pack.cp.size} 字节")
+                    addCard("升级说明", "此固件包未提供升级说明。")
+                    addMuted("文件完整性检查通过。设备兼容性与签名仍需由连接的设备确认。")
+                }
+                firmwareInspectionMessage?.let { addMuted(it) }
+                primaryButton(if (firmwareInspectionPending) "正在检查固件包…" else "选择固件包", !firmwareInspectionPending) {
+                    startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                        type = "*/*"; addCategory(Intent.CATEGORY_OPENABLE)
+                        putExtra(android.provider.DocumentsContract.EXTRA_INITIAL_URI,
+                            android.provider.DocumentsContract.buildDocumentUri(
+                                "com.android.externalstorage.documents", "primary:Download"))
+                    }, FIRMWARE_PACKAGE_REQUEST)
+                }
+                val localState = directSnapshot
+                val ota = otaStatus
+                if (ota != null) {
+                    val percent = if (ota.progress != null && ota.total != null && ota.total > 0)
+                        ((ota.progress * 100L) / ota.total).coerceIn(0L, 100L) else null
+                    val label = when (ota.state) {
+                        0L -> "空闲"
+                        1L -> "已排队"
+                        2L -> "升级中"
+                        3L -> "已结束，等待版本核对"
+                        else -> "状态未知"
+                    }
+                    val phase = when (ota.phase) {
+                        1L -> "正在下载"
+                        2L -> "正在校验"
+                        3L -> "已写入，等待重启"
+                        4L -> "正在重启"
+                        5L -> "试运行中"
+                        6L -> "已确认完成"
+                        7L -> "已回滚"
+                        8L -> "升级失败"
+                        null -> "未知"
+                        else -> "未知阶段（${ota.phase}）"
+                    }
+                    val result = if (ota.result == 0) "无错误" else "设备错误 ${ota.result}"
+                    addCard("设备升级状态", "$label\n阶段：$phase\n" +
+                        "进度：${percent?.let { "$it%" } ?: "未知"}\n" +
+                        "结果：$result")
+                }
+                if (otaMessage.isNotBlank()) addMuted(otaMessage)
+                val canStart = inspectedFirmware != null && selectedFirmwareFile != null &&
+                    localState?.otaSupported == true && directConnection != null &&
+                    otaUpload == null && !directPending
+                primaryButton("从手机开始升级", canStart) { startLocalOta() }
+                if (otaUpload?.state == OtaControlUpload.State.WAITING ||
+                    otaUpload?.state == OtaControlUpload.State.ACCEPTED || ota?.state in 1L..2L) {
+                    actionButton("取消升级", !directPending) { cancelLocalOta() }
+                }
+                if (localState?.otaSupported != true && directConnection != null)
+                    addMuted("设备固件未声明本地升级能力，不能开始升级。")
+                if (directConnection == null && provisionedDeviceId.isNotBlank())
+                    primaryButton(if (directConnecting) "正在连接…" else "连接设备读取版本", !directConnecting) { scanDirect() }
+            }
+            else -> {
+                sectionTitle("我的傻妞")
+                addMuted("把陪伴，调成你喜欢的样子。")
+                addCard(if (bound) "我的设备" else "还没有添加傻妞",
+                    if (bound) directStatus() else "先连接你的设备，再设置声音和聊天风格。")
+                if (!bound) primaryButton("添加我的傻妞", !busy) { startProvisioning() }
+                else {
+                    if (directSnapshot == null)
+                        primaryButton(if (directConnecting) "正在连接…" else "连接我的傻妞", !directConnecting) { scanDirect() }
+                    settingsRow("扬声器音量", directSnapshot?.volume?.let { "$it%" }
+                        ?: "连接设备后设置", enabled = directSnapshot?.volume != null &&
+                        !directPending && directSnapshot?.busy == false) { editDirectVolume() }
+                    settingsRow("聊天风格", directSnapshot?.persona?.let { directPersonas[it] }
+                        ?: "选择你喜欢的陪伴方式") { currentTab = TAB_PERSONALITY; render() }
+                    settingsRow("设备配置", "配网与添加结果核对", !busy) { startProvisioning() }
+                }
+                sectionTitle("隐私与管理")
+                settingsRow("隐私与权限", "了解语音、凭据与记忆的使用") { currentTab = TAB_PRIVACY; render() }
+                settingsRow("固件更新", "查看设备当前版本与升级状态") { currentTab = TAB_UPDATE; render() }
+                if (directConnection != null)
+                    settingsRow("断开手机连接", "设备的独立对话不受此操作影响") { closeDirect(); render() }
+                if (bound) settingsRow("移除本机连接资料", "保留设备上的网络与服务配置",
+                    enabled = !busy && !directPending) { confirmClearProvisioning() }
+                if ((applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+                    content.addView(TextView(this).apply {
+                        text = "开发版本 · 历史服务联调"
+                        textSize = 12f; setTextColor(MUTED); gravity = Gravity.CENTER
+                        minHeight = dp(48); isClickable = true; isFocusable = true
+                        setOnClickListener {
+                            startActivity(Intent(this@MainActivity, MainActivity::class.java)
+                                .putExtra("legacy_console", true))
+                        }
+                    })
+                }
+            }
+        }
+    }
+
+    private fun inspectFirmwarePackage(uri: android.net.Uri?) {
+        if (uri == null || firmwareInspectionPending) return
+        inspectedFirmware = null
+        firmwareInspectionPending = true
+        firmwareInspectionMessage = null
+        ioExecutor.execute {
+            val inspected = runCatching {
+                val file = java.io.File.createTempFile("firmware-selected-", ".bkpack", cacheDir)
+                try {
+                    requireNotNull(contentResolver.openInputStream(uri)).use { input ->
+                        file.outputStream().use { output ->
+                            val buffer = ByteArray(8192)
+                            var total = 0L
+                            while (true) {
+                                val count = input.read(buffer)
+                                if (count < 0) break
+                                total += count
+                                require(total <= 20L * 1024 * 1024)
+                                output.write(buffer, 0, count)
+                            }
+                        }
+                    }
+                    BkpackInspector.inspect(file) to file
+                } catch (error: Exception) {
+                    file.delete()
+                    throw error
+                }
+            }
+            mainHandler.post {
+                if (!destroyed) {
+                    firmwareInspectionPending = false
+                    val accepted = inspected.getOrNull()
+                    inspectedFirmware = accepted?.first
+                    accepted?.let { pair ->
+                        val file = pair.second
+                        selectedFirmwareFile?.takeIf { it != file }?.delete()
+                        selectedFirmwareFile = file
+                    }
+                    firmwareInspectionMessage = if (inspected.isFailure)
+                        "无法验证此固件包，请选择完整的 .bkpack 文件后重试。" else null
+                    render()
+                }
+            }
         }
     }
 
@@ -195,6 +1045,73 @@ class MainActivity : Activity() {
     }
 
     private fun renderOverview() {
+        content.addView(CompanionPortraitView(this), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(230)).apply { bottomMargin = dp(24) })
+        val hasBinding = draftDeviceId.isNotBlank() && !controlCredentialRequired
+        val needsControlBinding = expectedControlDeviceId().isNotBlank() && !hasBinding
+        sectionTitle(if (runtime == null && !hasBinding && !needsControlBinding) "让陪伴，从这里开始" else "今天，也在你身边")
+        addMuted(if (busy) "正在连接你的傻妞，稍等一下。"
+                 else if (runtime == null && needsControlBinding) "傻妞已保存网络设置；绑定 App 控制凭据后即可连接。"
+                 else if (runtime == null && hasBinding) "暂时没有连上，请确认傻妞和手机都已联网。"
+                 else if (runtime == null) "连接你的傻妞，一起说说今天的事。"
+                 else if (!eventConnected) "正在恢复连接，稍等一下。"
+                 else "已连接。可以查看设备状态、调节音量或停止当前对话。")
+        val primaryAction = when {
+            runtime != null -> "对话与音量"
+            needsControlBinding -> "绑定 App 控制"
+            hasBinding -> "重新连接"
+            else -> "添加傻妞"
+        }
+        actionButton(primaryAction, !busy) {
+            when {
+                runtime != null -> { currentTab = TAB_PERSONALITY; render() }
+                needsControlBinding -> startConsoleEnrollmentImport()
+                hasBinding -> connect(draftOrigin, draftDeviceId, draftPins, "")
+                else -> startProvisioning()
+            }
+        }
+        if (runtime != null) {
+            actionButton("对话状态") { currentTab = TAB_INTERACTION; render() }
+        } else if (!hasBinding && !needsControlBinding) {
+            actionButton("连接已有设备", !busy) { startConsoleEnrollmentImport() }
+        }
+    }
+
+    private fun renderSettings() {
+        if (developerPanel) { renderDeveloperConnection(); return }
+        sectionTitle("我的傻妞")
+        val expectedDevice = expectedControlDeviceId()
+        val hasBinding = draftDeviceId.isNotBlank() && !controlCredentialRequired
+        addCard("设备", when {
+            runtime != null -> "已连接"
+            expectedDevice.isNotBlank() && !hasBinding -> "网络已设置，等待绑定 App 控制"
+            else -> "尚未连接"
+        })
+        if (expectedDevice.isNotBlank()) {
+            actionButton(if (hasBinding) "更换 App 控制凭据" else "绑定 App 控制凭据", !busy) {
+                startConsoleEnrollmentImport()
+            }
+        } else {
+            actionButton("连接已有设备", !busy) { startConsoleEnrollmentImport() }
+        }
+        actionButton("添加设备") {
+            startProvisioning()
+        }
+        actionButton("隐私与权限") { currentTab = TAB_PRIVACY; render() }
+        actionButton("设备更新") { currentTab = TAB_UPDATE; render() }
+        if (expectedDevice.isNotBlank() || draftDeviceId.isNotBlank()) {
+            actionButton("清除本机连接资料", !busy) { confirmClearProvisioning() }
+        }
+        if ((applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+            sectionTitle("开发工具")
+            actionButton("开发者联调") { developerPanel = true; render() }
+        }
+    }
+
+    private fun renderDeveloperConnection() {
+        actionButton("认领设备与 Wi-Fi 配网") {
+            startProvisioning(developerMode = true)
+        }
         sectionTitle("连接配置")
         val originInput = editField("HTTPS Gateway，例如 https://gateway.example.com", draftOrigin)
         val deviceInput = editField("设备 ID", draftDeviceId)
@@ -218,15 +1135,13 @@ class MainActivity : Activity() {
         }
         actionButton("刷新设备快照", enabled = runtime != null && !busy) { refreshSnapshot() }
         actionButton("断开", enabled = runtime != null || busy) {
+            autoReconnectAllowed = false
             closeRuntime(clearReportedState = true)
             lastAction = "已断开；本机配置和加密令牌仍保留"
             render()
         }
         actionButton("清除本机绑定资料", enabled = !busy) {
-            confirm(
-                title = "清除本机绑定资料",
-                message = "将删除 Gateway 地址、设备 ID、证书 pin 和 Keystore 加密令牌。",
-            ) { clearProvisioning() }
+            confirmClearProvisioning()
         }
 
         sectionTitle("设备报告")
@@ -239,7 +1154,11 @@ class MainActivity : Activity() {
                 "Gateway：${state.gateway}\n" +
                     "固件：${state.firmwareVersion ?: "未知"}\n" +
                     "电量：${state.batteryPercent?.let { "$it%" } ?: "未知"}" +
-                    (if (state.charging) "（充电中）" else "") +
+                    (when (state.charging) {
+                        true -> "（充电中）"
+                        false -> ""
+                        null -> "（充电状态未知）"
+                    }) +
                         "\n代次/事件：${state.generation}/${state.lastSequence}\n" +
                         "修订：${state.revision}\n" +
                         "需全量同步：${if (state.needsSnapshot) "是" else "否"}",
@@ -249,27 +1168,28 @@ class MainActivity : Activity() {
 
     private fun renderInteraction() {
         sectionTitle("语音交互")
-        addMuted("手机只发送控制指令；麦克风采集、播放和打断由板端负责。")
-        val state = requireReportedState() ?: return
-        addCard("当前回合", "${state.turn}\n情绪（只读）：${state.emotion}")
-        actionButton("开始远程回合", canMutate()) {
-            submitMutation(ConsoleOperation.START_REMOTE_TURN)
-        }
-        actionButton("取消当前回合", canMutate()) {
+        addMuted("在这里查看对话状态，或停止当前对话。")
+        val state = requireReportedState("查看对话状态") ?: return
+        addCard("当前对话", "${turnLabel(state.turn)}\n当前心情：${emotionLabel(state.emotion)}")
+        val cancellable = state.turn == TurnPhase.LISTENING ||
+            state.turn == TurnPhase.THINKING || state.turn == TurnPhase.SPEAKING
+        actionButton("停止当前对话", canMutate() && cancellable) {
             submitMutation(ConsoleOperation.CANCEL_TURN)
         }
     }
 
     private fun renderPersonality() {
-        sectionTitle("偏好设置")
-        val state = requireReportedState() ?: return
+        sectionTitle("心情与声音")
+        val state = requireReportedState("调整相处方式和声音") ?: return
         addCard(
             "当前设置",
-            "音量：${state.volumePercent}%\n人格：${state.personaMode}\n" +
-                "只有设备上报新 revision 后界面才确认已生效。",
+            "声音：${state.volumePercent?.let { "$it%" } ?: "未知"}\n" +
+                "相处方式：${personaLabel(state.personaMode)}\n" +
+                "设备确认后，界面才会显示为已生效。",
         )
         val volumeLabel = TextView(this).apply {
-            text = getString(R.string.volume_slider_format, state.volumePercent)
+            text = state.volumePercent?.let { getString(R.string.volume_slider_format, it) }
+                ?: "等待设备上报音量"
             textSize = 16f
             setTextColor(INK)
         }
@@ -277,8 +1197,8 @@ class MainActivity : Activity() {
         content.addView(
             SeekBar(this).apply {
                 max = 100
-                progress = state.volumePercent
-                isEnabled = canMutate()
+                progress = state.volumePercent ?: 0
+                isEnabled = canMutate() && state.volumePercent != null
                 setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                     override fun onProgressChanged(bar: SeekBar?, value: Int, fromUser: Boolean) {
                         volumeLabel.text = getString(R.string.volume_slider_format, value)
@@ -289,7 +1209,7 @@ class MainActivity : Activity() {
                     override fun onStopTrackingTouch(bar: SeekBar?) {
                         submitMutation(
                             ConsoleOperation.SET_VOLUME,
-                            ConsoleMutationArguments.SetVolume(bar?.progress ?: state.volumePercent),
+                            ConsoleMutationArguments.SetVolume(bar?.progress ?: return),
                         )
                     }
                 })
@@ -314,37 +1234,65 @@ class MainActivity : Activity() {
 
     private fun renderPrivacy() {
         sectionTitle("隐私权限")
-        val state = requireReportedState() ?: return
-        addMuted("权限变更属于 L3 管理操作，每次都要求本机确认。")
+        val state = requireReportedState("管理隐私与权限") ?: return
         PrivacyCapability.values().forEach { capability ->
             val current = state.permissions[capability] ?: PermissionState.NOT_GRANTED
-            addCard(capabilityLabel(capability), "设备报告：$current")
-            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-            row.addView(
-                compactButton("允许", canMutate() && current != PermissionState.ALLOWED) {
-                    confirmPrivacy(capability, PermissionState.ALLOWED)
-                },
-                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
-            )
-            row.addView(
-                compactButton("拒绝", canMutate() && current != PermissionState.DENIED) {
-                    confirmPrivacy(capability, PermissionState.DENIED)
-                },
-                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
-            )
-            content.addView(row)
+            addCard(capabilityLabel(capability), "当前状态：${permissionStateLabel(current)}")
+            if (capability == PrivacyCapability.LONG_TERM_MEMORY) {
+                renderLongTermMemoryControls(current)
+            }
+        }
+    }
+
+    private fun renderLongTermMemoryControls(state: PermissionState) {
+        when (state) {
+            PermissionState.ALLOWED -> {
+                addMuted("仅在傻妞确认播放完成后保存对话文本。关闭会停止后续保存；清除会删除已保存的对话记忆。")
+                actionButton("关闭长期记忆", canMutate()) {
+                    confirm(
+                        title = "关闭长期记忆",
+                        message = "将停止傻妞后续保存对话记忆，并删除已经保存的对话内容。此操作需要本机确认。",
+                    ) {
+                        submitMutation(
+                            ConsoleOperation.CONFIGURE_PERMISSION,
+                            ConsoleMutationArguments.ConfigurePermission(
+                                PrivacyCapability.LONG_TERM_MEMORY,
+                                PermissionState.DENIED,
+                            ),
+                            locallyConfirmed = true,
+                        )
+                    }
+                }
+                actionButton("清除对话记忆", canMutate()) {
+                    confirm(
+                        title = "清除对话记忆",
+                        message = "将删除傻妞已经保存的对话记忆，但长期记忆仍保持开启。此操作需要本机确认。",
+                    ) {
+                        submitMutation(
+                            ConsoleOperation.DELETE_MEMORY,
+                            ConsoleMutationArguments.DeleteMemory(MemoryDeleteScope.CONVERSATIONS),
+                            locallyConfirmed = true,
+                        )
+                    }
+                }
+            }
+            PermissionState.NOT_GRANTED ->
+                addMuted("长期记忆默认关闭；当前版本需由设备所有者在受控服务配置中明确启用，App 不提供远程开启。")
+            PermissionState.DENIED ->
+                addMuted("长期记忆已关闭并清除；当前 App 不提供重新开启入口。")
         }
     }
 
     private fun renderUpdate() {
         sectionTitle("固件更新")
-        val state = requireReportedState() ?: return
+        val state = requireReportedState("查看设备更新") ?: return
         addCard(
-            "设备报告：${state.update.phase}",
+            updatePhaseLabel(state.update.phase),
             "当前：${state.firmwareVersion ?: "未知"}\n" +
-                "目标：${state.update.targetVersion ?: "无"}\n" +
-                "进度：${state.update.progressPercent}%\n" +
-                "注意：请求被接受不等于升级成功；仅 CONFIRMED 是完成。",
+                "目标：${state.update.targetVersion ?: if (state.update.phase == UpdatePhase.UNKNOWN) "未知" else "无"}\n" +
+                "进度：${if (state.update.phase == UpdatePhase.UNKNOWN) "未知" else "${state.update.progressPercent}%"}\n" +
+                (state.update.error?.let { "原因：${updateErrorLabel(it)}\n" } ?: "") +
+                "只有设备确认完成，才表示升级成功。",
         )
         actionButton("刷新已验证发布列表", canMutate() && state.generation > 0) {
             fetchReleases()
@@ -357,21 +1305,44 @@ class MainActivity : Activity() {
         if (catalog.releases.isEmpty()) {
             addMuted("Gateway 当前没有适用于该设备的发布。")
         }
-        catalog.releases.forEach { release -> renderRelease(release) }
+        catalog.releases.forEach { release -> renderRelease(release, state) }
     }
 
-    private fun renderRelease(release: FirmwareRelease) {
-        addCard(
-            release.targetVersion,
-            "来源：${release.requiredSourceVersion}\n" +
-                "板型：${release.physicalBoard}\n" +
-                "布局：${release.layoutIdentity}\n" +
-                "清单：${release.manifestSha256.take(16)}…",
+    private fun renderRelease(release: FirmwareRelease, state: CompanionState) {
+        val phaseAllowsStart = state.update.phase in setOf(
+            UpdatePhase.IDLE,
+            UpdatePhase.FAILED,
+            UpdatePhase.ROLLED_BACK,
         )
-        actionButton("请求更新到 ${release.targetVersion}", canMutate()) {
+        val sourceMatches = state.firmwareVersion == release.requiredSourceVersion
+        val canStart = canMutate() &&
+            state.turn == TurnPhase.IDLE &&
+            phaseAllowsStart &&
+            sourceMatches
+        addCard(
+            "版本 ${release.targetVersion}",
+            "当前版本要求：${release.requiredSourceVersion}\n" +
+                "发布清单和安装包摘要已由 Gateway 验证。",
+        )
+        addMuted(
+            when {
+                state.update.phase in setOf(
+                    UpdatePhase.AWAITING_LOCAL_CONFIRMATION,
+                    UpdatePhase.DOWNLOADING,
+                    UpdatePhase.VERIFYING,
+                    UpdatePhase.STAGED,
+                    UpdatePhase.REBOOTING,
+                    UpdatePhase.TRIAL,
+                ) -> "已有更新任务进行中；请等待设备上报最终结果。"
+                !sourceMatches -> "设备当前版本与该增量包的来源版本不匹配。"
+                state.turn != TurnPhase.IDLE -> "请等当前对话结束后再开始更新。"
+                else -> "请求只携带已验证发布的摘要；设备会独立下载并校验签名。"
+            },
+        )
+        actionButton("更新到 ${release.targetVersion}", canStart) {
             confirm(
-                title = "确认固件更新",
-                message = "设备将按已验证清单 ${release.manifestSha256.take(16)}… 尝试更新到 ${release.targetVersion}。",
+                title = "安装固件 ${release.targetVersion}",
+                message = "更新期间傻妞会停止对话并重启。只有设备完成试运行并上报确认后，App 才会显示更新成功。",
             ) {
                 submitMutation(
                     ConsoleOperation.REQUEST_FIRMWARE_UPDATE,
@@ -382,7 +1353,17 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun connect(originValue: String, deviceId: String, pinsValue: String, token: String) {
+    private fun connect(
+        originValue: String,
+        deviceId: String,
+        pinsValue: String,
+        token: String,
+        automatic: Boolean = false,
+    ) {
+        if (!automatic) {
+            autoReconnectAllowed = true
+            reconnectAttempt = 0
+        }
         val pins = try {
             parsePins(pinsValue)
         } catch (_: IllegalArgumentException) {
@@ -407,7 +1388,7 @@ class MainActivity : Activity() {
             return
         }
 
-        closeRuntime(clearReportedState = true)
+        closeRuntime(clearReportedState = true, resetReconnectAttempt = !automatic)
         busy = true
         lastAction = "正在认证并获取设备快照"
         render()
@@ -415,47 +1396,123 @@ class MainActivity : Activity() {
         ioExecutor.execute {
             var sessionForCleanup: OkHttpConsoleGatewaySession? = null
             try {
-                if (token.isNotEmpty()) tokenStore.storeAccessToken(token)
-                val candidateSession = OkHttpConsoleGatewaySession(configuration, tokenStore)
+                val provider = if (token.isNotEmpty())
+                    com.shaniu.companion.gateway.GatewayAccessTokenProvider { token }
+                else tokenStore.providerFor(configuration.origin.toString(), deviceId)
+                val candidateSession = OkHttpConsoleGatewaySession(configuration, provider)
                 sessionForCleanup = candidateSession
                 val candidateClient = ConsoleGatewayClient(configuration.origin, candidateSession)
-                val result = candidateClient.fetchSnapshot(deviceId)
-                postToMain {
-                    if (!isCurrent(epoch)) {
+                val snapshot = when (val result = candidateClient.fetchSnapshot(deviceId)) {
+                    is GatewayCallResult.Failure -> {
+                        sessionForCleanup = null
                         candidateSession.close()
-                        return@postToMain
-                    }
-                    when (result) {
-                        is GatewayCallResult.Success -> {
-                            val newStore = CompanionStore(deviceId)
-                            val disposition = newStore.apply(result.value)
-                            if (disposition != EventDisposition.APPLIED) {
-                                candidateSession.close()
-                                busy = false
-                                lastAction = "连接失败：快照未通过状态校验"
-                                render()
-                                return@postToMain
+                        postToMain {
+                            if (!isCurrent(epoch)) return@postToMain
+                            busy = false
+                            handleGatewayFailure("连接失败", result, token.isNotEmpty())
+                            render()
+                            if (token.isEmpty() && result.retryable) {
+                                scheduleGatewayReconnect(epoch)
                             }
-                            preferences.edit()
-                                .putString(KEY_ORIGIN, originValue)
-                                .putString(KEY_DEVICE_ID, deviceId)
-                                .putString(KEY_PINS, pinsValue)
-                                .apply()
-                            store = newStore
-                            runtime = GatewayRuntime(epoch, deviceId, candidateSession, candidateClient)
-                            releaseCatalog = null
-                            busy = false
-                            lastAction = "快照已同步，正在建立事件流"
-                            render()
-                            openEventStream(epoch)
                         }
-                        is GatewayCallResult.Failure -> {
-                            candidateSession.close()
-                            busy = false
-                            lastAction = failureText("连接失败", result)
-                            render()
-                        }
+                        return@execute
                     }
+                    is GatewayCallResult.Success -> result.value
+                }
+
+                val newStore = CompanionStore(deviceId)
+                val disposition = newStore.apply(snapshot)
+                if (disposition != EventDisposition.APPLIED) {
+                    sessionForCleanup = null
+                    postConnectionFailure(
+                        epoch, candidateSession, "连接失败：快照未通过状态校验",
+                    )
+                    return@execute
+                }
+
+                var activeSession = candidateSession
+                var activeClient = candidateClient
+                if (token.isNotEmpty()) {
+                    // Persist endpoint metadata in a fail-closed state before replacing
+                    // the scoped credential. Keystore and disk work stays off the UI thread.
+                    val pendingSaved = preferences.edit()
+                        .putString(KEY_ORIGIN, configuration.origin.toString())
+                        .putString(KEY_DEVICE_ID, deviceId)
+                        .putString(KEY_PINS, pinsValue)
+                        .putBoolean(KEY_CONTROL_CREDENTIAL_REQUIRED, true)
+                        .commit()
+                    if (!pendingSaved) {
+                        sessionForCleanup = null
+                        postConnectionFailure(
+                            epoch, candidateSession,
+                            "连接失败：无法保存设备资料，请重试",
+                        )
+                        return@execute
+                    }
+                    try {
+                        tokenStore.storeFor(configuration.origin.toString(), deviceId, token)
+                    } catch (_: Exception) {
+                        sessionForCleanup = null
+                        postConnectionFailure(
+                            epoch, candidateSession,
+                            "连接失败：无法保存设备凭据，请重新导入",
+                            requireControlCredential = true,
+                        )
+                        return@execute
+                    }
+                    if (!preferences.edit()
+                            .putBoolean(KEY_CONTROL_CREDENTIAL_REQUIRED, false)
+                            .commit()) {
+                        sessionForCleanup = null
+                        postConnectionFailure(
+                            epoch, candidateSession,
+                            "凭据已安全写入，但绑定事务未完成；请重新导入",
+                            requireControlCredential = true,
+                        )
+                        return@execute
+                    }
+                    candidateSession.close()
+                    activeSession = OkHttpConsoleGatewaySession(
+                        configuration,
+                        tokenStore.providerFor(configuration.origin.toString(), deviceId),
+                    )
+                    activeClient = ConsoleGatewayClient(configuration.origin, activeSession)
+                } else {
+                    val saved = preferences.edit()
+                        .putString(KEY_ORIGIN, configuration.origin.toString())
+                        .putString(KEY_DEVICE_ID, deviceId)
+                        .putString(KEY_PINS, pinsValue)
+                        .putBoolean(KEY_CONTROL_CREDENTIAL_REQUIRED, false)
+                        .commit()
+                    if (!saved) {
+                        sessionForCleanup = null
+                        postConnectionFailure(
+                            epoch, candidateSession,
+                            "连接失败：无法保存设备资料，请重试",
+                        )
+                        return@execute
+                    }
+                }
+
+                sessionForCleanup = null
+                val preparedSession = activeSession
+                val preparedClient = activeClient
+                mainHandler.post {
+                    if (!isCurrent(epoch)) {
+                        closeSession(preparedSession)
+                        return@post
+                    }
+                    controlCredentialRequired = false
+                    draftOrigin = configuration.origin.toString()
+                    draftDeviceId = deviceId
+                    draftPins = pinsValue
+                    store = newStore
+                    runtime = GatewayRuntime(epoch, deviceId, preparedSession, preparedClient)
+                    releaseCatalog = null
+                    busy = false
+                    lastAction = "快照已同步，正在建立事件流"
+                    render()
+                    openEventStream(epoch)
                 }
             } catch (_: Exception) {
                 sessionForCleanup?.close()
@@ -466,6 +1523,22 @@ class MainActivity : Activity() {
                     render()
                 }
             }
+        }
+    }
+
+    private fun postConnectionFailure(
+        epoch: Long,
+        session: OkHttpConsoleGatewaySession,
+        message: String,
+        requireControlCredential: Boolean = false,
+    ) {
+        session.close()
+        postToMain {
+            if (!isCurrent(epoch)) return@postToMain
+            busy = false
+            if (requireControlCredential) controlCredentialRequired = true
+            lastAction = message
+            render()
         }
     }
 
@@ -484,6 +1557,7 @@ class MainActivity : Activity() {
                         override fun onOpen() = postToMain {
                             if (!isCurrentStream(epoch, streamEpoch)) return@postToMain
                             eventConnected = true
+                            reconnectAttempt = 0
                             lastAction = "事件流已连接"
                             render()
                         }
@@ -497,17 +1571,17 @@ class MainActivity : Activity() {
                         }
 
                         override fun onClosed() = postToMain {
-                            if (!isCurrentStream(epoch, streamEpoch)) return@postToMain
-                            eventConnected = false
-                            lastAction = "事件流已关闭；可重新连接恢复"
+                            if (!retireEventStream(epoch, streamEpoch)) return@postToMain
+                            lastAction = "事件流已关闭，正在自动恢复"
                             render()
+                            scheduleGatewayReconnect(epoch)
                         }
 
                         override fun onFailure(failure: GatewayCallResult.Failure) = postToMain {
-                            if (!isCurrentStream(epoch, streamEpoch)) return@postToMain
-                            eventConnected = false
-                            lastAction = failureText("事件流中断", failure)
+                            if (!retireEventStream(epoch, streamEpoch)) return@postToMain
+                            handleGatewayFailure("事件流中断", failure)
                             render()
+                            if (failure.retryable) scheduleGatewayReconnect(epoch)
                         }
                     },
                 )
@@ -519,10 +1593,17 @@ class MainActivity : Activity() {
                         eventConnection = connection
                     }
                 }
+            } catch (error: GatewayTransportException) {
+                postToMain {
+                    if (!retireEventStream(epoch, streamEpoch)) return@postToMain
+                    val failure = GatewayCallResult.Failure(error.reason, error.retryable)
+                    handleGatewayFailure("事件流失败", failure)
+                    render()
+                    if (failure.retryable) scheduleGatewayReconnect(epoch)
+                }
             } catch (_: Exception) {
                 postToMain {
-                    if (!isCurrentStream(epoch, streamEpoch)) return@postToMain
-                    eventConnected = false
+                    if (!retireEventStream(epoch, streamEpoch)) return@postToMain
                     lastAction = "事件流失败：凭据或传输不可用"
                     render()
                 }
@@ -559,7 +1640,7 @@ class MainActivity : Activity() {
                         }
                     }
                     is GatewayCallResult.Failure -> {
-                        lastAction = failureText("刷新失败", result)
+                        handleGatewayFailure("刷新失败", result)
                         render()
                     }
                 }
@@ -584,7 +1665,7 @@ class MainActivity : Activity() {
                         releaseCatalog = result.value
                         lastAction = "已获取 ${result.value.releases.size} 个已验证发布"
                     }
-                    is GatewayCallResult.Failure -> lastAction = failureText("发布列表失败", result)
+                    is GatewayCallResult.Failure -> handleGatewayFailure("发布列表失败", result)
                 }
                 render()
             }
@@ -649,32 +1730,66 @@ class MainActivity : Activity() {
                 when (result) {
                     is GatewayCallResult.Success -> {
                         lastAction = if (result.value.status == MutationReceiptStatus.ACCEPTED) {
-                            "${operation.name} 已受理，等待设备上报确认"
+                            if (operation == ConsoleOperation.CANCEL_TURN) {
+                                "取消已发送；尚未确认板端停止播放"
+                            } else if (operation == ConsoleOperation.SET_VOLUME) {
+                                "板端已确认运行期音量；重启仍使用已保存的偏好"
+                            } else if (operation == ConsoleOperation.CONFIGURE_PERMISSION &&
+                                arguments == ConsoleMutationArguments.ConfigurePermission(
+                                    PrivacyCapability.LONG_TERM_MEMORY,
+                                    PermissionState.DENIED,
+                                )
+                            ) {
+                                "关闭长期记忆已受理，等待傻妞确认并同步状态"
+                            } else if (operation == ConsoleOperation.DELETE_MEMORY &&
+                                arguments == ConsoleMutationArguments.DeleteMemory(
+                                    MemoryDeleteScope.CONVERSATIONS,
+                                )
+                            ) {
+                                "清除对话记忆已受理，等待傻妞确认"
+                            } else if (operation == ConsoleOperation.REQUEST_FIRMWARE_UPDATE) {
+                                releaseCatalog = null
+                                "设备已接受更新请求；等待下载和签名验证状态"
+                            } else {
+                                "${operation.name} 已受理，等待设备上报确认"
+                            }
                         } else {
-                            "${operation.name} 被拒绝：${result.value.error?.wireValue ?: "unknown"}"
+                            when (result.value.error) {
+                                ConsoleErrorCode.VOLUME_TIMEOUT -> "音量确认超时，生效结果未知；请刷新设备状态"
+                                ConsoleErrorCode.VOLUME_DEVICE_ERROR -> "板端音量操作失败，当前音量未知；请刷新设备状态"
+                                ConsoleErrorCode.VOLUME_BUSY -> "正在处理音量请求，请稍后刷新"
+                                ConsoleErrorCode.VOLUME_NOT_SUPPORTED -> "当前固件不支持远程音量控制"
+                                ConsoleErrorCode.UPDATE_MANIFEST_INVALID -> "更新请求被拒绝：发布清单无效或不适用于当前设备"
+                                ConsoleErrorCode.UPDATE_SIGNATURE_INVALID -> "更新请求被拒绝：签名校验失败"
+                                ConsoleErrorCode.UPDATE_PAIR_MISMATCH -> "更新请求被拒绝：CP/AP 固件配对不匹配"
+                                ConsoleErrorCode.UPDATE_TRIAL_FAILED -> "新固件试运行失败，设备将恢复旧版本"
+                                ConsoleErrorCode.UPDATE_DEVICE_ERROR -> "设备未能启动更新，请刷新设备状态"
+                                ConsoleErrorCode.UNSUPPORTED_OPERATION -> when (operation) {
+                                    ConsoleOperation.CONFIGURE_PERMISSION -> "当前 Gateway 尚不支持关闭长期记忆"
+                                    ConsoleOperation.DELETE_MEMORY -> "当前 Gateway 尚不支持清除对话记忆"
+                                    ConsoleOperation.REQUEST_FIRMWARE_UPDATE -> "当前 Gateway 或设备固件不支持受控更新"
+                                    else -> "${operation.name} 被拒绝：${result.value.error.wireValue}"
+                                }
+                                else -> "${operation.name} 被拒绝：${result.value.error?.wireValue ?: "unknown"}"
+                            }
                         }
                     }
-                    is GatewayCallResult.Failure -> lastAction = failureText("请求失败", result)
+                    is GatewayCallResult.Failure -> handleGatewayFailure("请求失败", result)
                 }
                 render()
             }
         }
     }
 
-    private fun confirmPrivacy(capability: PrivacyCapability, state: PermissionState) {
+    private fun confirmClearProvisioning() {
         confirm(
-            title = "确认隐私权限变更",
-            message = "将 $capability 设置为 $state。此操作会发送到已绑定设备。",
-        ) {
-            submitMutation(
-                ConsoleOperation.CONFIGURE_PERMISSION,
-                ConsoleMutationArguments.ConfigurePermission(capability, state),
-                locallyConfirmed = true,
-            )
-        }
+            title = "清除本机连接资料",
+            message = "将删除这台手机保存的设备连接资料。傻妞上的网络设置和服务凭据不会改变，尚未核对的认领回执会保留。",
+        ) { clearProvisioning() }
     }
 
     private fun clearProvisioning() {
+        closeDirect()
         closeRuntime(clearReportedState = true)
         val epoch = connectionEpoch
         busy = true
@@ -682,8 +1797,18 @@ class MainActivity : Activity() {
         render()
         ioExecutor.execute {
             val cleared = try {
-                tokenStore.clearAccessToken()
-                true
+                // Remove the authoritative binding first. If this fails, keep
+                // the other stores intact so the user can retry coherently.
+                val durableDeviceId = provisionBindingStore.boundDeviceId()
+                if (durableDeviceId != null &&
+                    !provisionBindingStore.clearBound(durableDeviceId)) {
+                    false
+                } else if (!preferences.edit().clear().commit()) {
+                    false
+                } else {
+                    tokenStore.clearAccessToken()
+                    true
+                }
             } catch (_: Exception) {
                 false
             }
@@ -691,25 +1816,31 @@ class MainActivity : Activity() {
                 if (!isCurrent(epoch)) return@postToMain
                 busy = false
                 if (cleared) {
-                    preferences.edit().clear().apply()
                     draftOrigin = ""
                     draftDeviceId = ""
                     draftPins = ""
+                    provisionedDeviceId = ""
+                    controlCredentialRequired = false
                     lastAction = "本机绑定资料已清除"
                 } else {
-                    lastAction = "清除失败：本机安全存储不可用"
+                    reloadLocalConfiguration()
+                    lastAction = "清除未完成：已停止自动连接，请重试"
                 }
                 render()
             }
         }
     }
 
-    private fun closeRuntime(clearReportedState: Boolean) {
+    private fun closeRuntime(
+        clearReportedState: Boolean,
+        resetReconnectAttempt: Boolean = true,
+    ) {
+        cancelGatewayReconnect(resetReconnectAttempt)
         connectionEpoch += 1
         eventStreamEpoch += 1
         eventConnection?.close()
         eventConnection = null
-        runtime?.session?.close()
+        runtime?.session?.let(::closeSession)
         runtime = null
         eventConnected = false
         busy = false
@@ -717,18 +1848,183 @@ class MainActivity : Activity() {
         if (clearReportedState) store = null
     }
 
-    private fun canMutate(): Boolean = runtime != null && !busy && store?.state?.needsSnapshot == false
+    private fun closeSession(session: OkHttpConsoleGatewaySession) {
+        // Connection-pool eviction may close a live TLS socket. Android treats
+        // that as network I/O, so lifecycle and button callbacks must not run it
+        // on the main thread.
+        try {
+            ioExecutor.execute { session.close() }
+        } catch (_: RejectedExecutionException) {
+            Thread({ session.close() }, "shaniu-session-close").apply {
+                isDaemon = true
+                start()
+            }
+        }
+    }
 
-    private fun requireReportedState(): CompanionState? {
+    private fun canMutate(): Boolean =
+        runtime != null && eventConnected && !busy && store?.state?.needsSnapshot == false
+
+    private fun requireReportedState(action: String = "查看和调整设置"): CompanionState? {
         val state = store?.state
-        if (state == null) addMuted("请先在“概览”页连接 Gateway 并同步设备快照。")
+        if (state == null) {
+            val needsControlBinding = expectedControlDeviceId().isNotBlank() &&
+                (draftDeviceId.isBlank() || controlCredentialRequired)
+            addMuted(if (needsControlBinding) "傻妞已完成网络设置；绑定 App 控制凭据后即可$action。"
+                     else if (draftDeviceId.isBlank()) "连接你的傻妞后，就能在这里$action。"
+                     else "暂时没有连上傻妞，重新连接后即可$action。")
+            actionButton(if (needsControlBinding) "绑定 App 控制" else if (draftDeviceId.isBlank()) "添加傻妞" else "重新连接", !busy) {
+                if (needsControlBinding) startConsoleEnrollmentImport()
+                else if (draftDeviceId.isBlank()) startProvisioning()
+                else connect(draftOrigin, draftDeviceId, draftPins, "")
+            }
+        }
         return state
     }
 
     private fun isCurrent(epoch: Long): Boolean = !destroyed && epoch == connectionEpoch
 
+    private fun startProvisioning(developerMode: Boolean = false) {
+        startActivityForResult(
+            Intent(this, ProvisionActivity::class.java)
+                .putExtra("developer_mode", developerMode),
+            PROVISION_REQUEST,
+        )
+    }
+
+    private fun startConsoleEnrollmentImport() {
+        if (busy) return
+        startActivityForResult(
+            Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                type = "application/json"
+                addCategory(Intent.CATEGORY_OPENABLE)
+            },
+            CONSOLE_ENROLLMENT_REQUEST,
+        )
+    }
+
+    private fun importConsoleEnrollment(data: Intent?) {
+        val expectedDevice = expectedControlDeviceId()
+        val uri = data?.data
+        if (uri == null) {
+            lastAction = "控制凭据导入失败：未选择文件"
+            render()
+            return
+        }
+
+        closeRuntime(clearReportedState = true)
+        busy = true
+        lastAction = "正在导入并验证 App 控制凭据"
+        render()
+        val epoch = connectionEpoch
+        ioExecutor.execute {
+            var bytes: ByteArray? = null
+            var input: CharArray? = null
+            try {
+                bytes = contentResolver.openInputStream(uri)?.use { stream ->
+                    val buffer = ByteArray(ConsoleEnrollment.MAX_BYTES + 1)
+                    try {
+                        var count = 0
+                        while (count < buffer.size) {
+                            val read = stream.read(buffer, count, buffer.size - count)
+                            if (read < 0) break
+                            require(read > 0)
+                            count += read
+                        }
+                        require(count in 1..ConsoleEnrollment.MAX_BYTES)
+                        buffer.copyOf(count)
+                    } finally {
+                        buffer.fill(0)
+                    }
+                } ?: throw IllegalArgumentException()
+                val chars = Charsets.UTF_8.newDecoder().decode(java.nio.ByteBuffer.wrap(bytes))
+                val decoded = CharArray(chars.remaining()).also { chars.get(it) }
+                input = decoded
+                try {
+                    ConsoleEnrollment.parse(
+                        decoded,
+                        expectedDeviceId = expectedDevice.takeIf { it.isNotBlank() },
+                    ).use { enrollment ->
+                        val origin = enrollment.gatewayOrigin.toString()
+                        val deviceId = enrollment.deviceId
+                        val pins = enrollment.certificatePins.joinToString("\n")
+                        enrollment.useAccessToken { token ->
+                            val suppliedToken = token.concatToString()
+                            postToMain {
+                                if (!isCurrent(epoch)) return@postToMain
+                                busy = false
+                                connect(origin, deviceId, pins, suppliedToken)
+                            }
+                        }
+                    }
+                } finally {
+                    if (chars.hasArray()) chars.array().fill('\u0000')
+                }
+            } catch (_: Exception) {
+                postToMain {
+                    if (!isCurrent(epoch)) return@postToMain
+                    busy = false
+                    lastAction = "控制凭据导入失败：文件无效、已过期或不属于这台设备"
+                    render()
+                }
+            } finally {
+                input?.fill('\u0000')
+                bytes?.fill(0)
+            }
+        }
+    }
+
+    private fun expectedControlDeviceId(): String =
+        provisionedDeviceId.ifBlank { draftDeviceId }
+
     private fun isCurrentStream(epoch: Long, streamEpoch: Long): Boolean =
         isCurrent(epoch) && streamEpoch == eventStreamEpoch
+
+    private fun retireEventStream(epoch: Long, streamEpoch: Long): Boolean {
+        if (!isCurrentStream(epoch, streamEpoch)) return false
+        eventStreamEpoch += 1
+        eventConnection = null
+        eventConnected = false
+        return true
+    }
+
+    private fun cancelGatewayReconnect(resetAttempt: Boolean) {
+        reconnectTicket += 1
+        if (resetAttempt) reconnectAttempt = 0
+    }
+
+    private fun scheduleGatewayReconnect(epoch: Long) {
+        if (!isCurrent(epoch) || !foreground || !autoReconnectAllowed ||
+            controlCredentialRequired || draftOrigin.isBlank() || draftDeviceId.isBlank()) {
+            return
+        }
+        val attempt = reconnectAttempt.coerceAtMost(RECONNECT_DELAYS_MS.lastIndex)
+        val delayMs = RECONNECT_DELAYS_MS[attempt]
+        reconnectAttempt += 1
+        val ticket = ++reconnectTicket
+        val seconds = (delayMs + 999L) / 1_000L
+        lastAction = "连接中断，${seconds} 秒后自动恢复"
+        render()
+        mainHandler.postDelayed(
+            { runGatewayReconnect(ticket, epoch) },
+            delayMs,
+        )
+    }
+
+    private fun runGatewayReconnect(ticket: Long, epoch: Long) {
+        if (ticket != reconnectTicket || !isCurrent(epoch) || !foreground ||
+            !autoReconnectAllowed || controlCredentialRequired) {
+            return
+        }
+        if (busy) {
+            mainHandler.postDelayed(
+                { runGatewayReconnect(ticket, epoch) },
+                RECONNECT_BUSY_WAIT_MS,
+            )
+            return
+        }
+        connect(draftOrigin, draftDeviceId, draftPins, "", automatic = true)
+    }
 
     private fun postToMain(block: () -> Unit) {
         if (!destroyed) mainHandler.post { if (!destroyed) block() }
@@ -746,6 +2042,49 @@ class MainActivity : Activity() {
     private fun failureText(prefix: String, failure: GatewayCallResult.Failure): String =
         "$prefix：${failure.reason.label()}${if (failure.retryable) "（可重试）" else ""}"
 
+    private fun handleGatewayFailure(
+        prefix: String,
+        failure: GatewayCallResult.Failure,
+        credentialWasSupplied: Boolean = false,
+    ) {
+        val credentialUnavailable = failure.reason == GatewayFailureReason.AUTHORIZATION_REVOKED ||
+            failure.reason == GatewayFailureReason.CREDENTIALS_UNAVAILABLE
+        if (!credentialUnavailable || credentialWasSupplied) {
+            lastAction = failureText(prefix, failure)
+            return
+        }
+
+        closeRuntime(clearReportedState = true)
+        controlCredentialRequired = true
+        val markerSaved = preferences.edit()
+            .putBoolean(KEY_CONTROL_CREDENTIAL_REQUIRED, true)
+            .commit()
+        val reason = if (failure.reason == GatewayFailureReason.AUTHORIZATION_REVOKED) {
+            "授权已失效"
+        } else {
+            "本机控制凭据不可用"
+        }
+        lastAction = if (markerSaved) {
+            "$reason；请重新导入 App 控制凭据"
+        } else {
+            "$reason；本机未能保存停用状态，请重新导入控制凭据"
+        }
+        val epoch = connectionEpoch
+        ioExecutor.execute {
+            val cleared = try {
+                tokenStore.clearAccessToken()
+                true
+            } catch (_: Exception) {
+                false
+            }
+            if (!cleared) postToMain {
+                if (!isCurrent(epoch)) return@postToMain
+                lastAction = "$reason；旧凭据已停用，但安全存储清理失败"
+                render()
+            }
+        }
+    }
+
     private fun GatewayFailureReason.label(): String = when (this) {
         GatewayFailureReason.CREDENTIALS_UNAVAILABLE -> "凭据不可用"
         GatewayFailureReason.TRANSPORT_UNAVAILABLE -> "网络不可用"
@@ -758,11 +2097,110 @@ class MainActivity : Activity() {
         GatewayFailureReason.PROTOCOL_ERROR -> "协议校验失败"
     }
 
+    private fun settingsRow(title: String, subtitle: String, enabled: Boolean = true,
+                            selected: Boolean = false, action: () -> Unit) {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(18), dp(16), dp(18), dp(16))
+            minimumHeight = dp(72)
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(if (selected) Color.rgb(230, 239, 231) else Color.WHITE)
+                cornerRadius = dp(18).toFloat()
+            }
+            isEnabled = enabled; isClickable = enabled; isFocusable = enabled
+            contentDescription = "$title，$subtitle" + if (selected) "，当前已选择" else ""
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
+            if (enabled) setOnClickListener { action() }
+        }
+        val labels = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+            addView(TextView(context).apply {
+                text = title; textSize = 16f; setTextColor(if (enabled) INK else MUTED)
+                typeface = android.graphics.Typeface.create("sans-serif-medium", 0)
+            })
+            addView(TextView(context).apply {
+                text = subtitle; textSize = 12f; setTextColor(MUTED)
+                setPadding(0, dp(5), 0, 0)
+            })
+        }
+        row.addView(labels, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        row.addView(TextView(this).apply {
+            text = if (selected) "✓" else if (enabled) "›" else ""
+            textSize = 22f; setTextColor(MUTED); setPadding(dp(12), 0, 0, 0)
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        })
+        content.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(6); bottomMargin = dp(2) })
+    }
+
+    private fun primaryButton(label: String, enabled: Boolean, action: () -> Unit) {
+        content.addView(Button(this).apply {
+            text = label; isAllCaps = false; textSize = 16f
+            typeface = android.graphics.Typeface.create("sans-serif-medium", 0)
+            isEnabled = enabled
+            setTextColor(Color.WHITE)
+            stateListAnimator = null
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(if (enabled) INK else MUTED); cornerRadius = dp(20).toFloat()
+            }
+            setOnClickListener { action() }
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)).apply {
+            topMargin = dp(8)
+        })
+    }
+
+    private fun navigationIcon(tab: Int): android.graphics.drawable.Drawable =
+        object : android.graphics.drawable.Drawable() {
+            private val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                color = INK; style = android.graphics.Paint.Style.STROKE
+                strokeWidth = 1.7f; strokeCap = android.graphics.Paint.Cap.ROUND
+                strokeJoin = android.graphics.Paint.Join.ROUND
+            }
+            override fun getIntrinsicWidth() = dp(23)
+            override fun getIntrinsicHeight() = dp(23)
+            override fun setAlpha(alpha: Int) { paint.alpha = alpha; invalidateSelf() }
+            override fun setColorFilter(filter: android.graphics.ColorFilter?) { paint.colorFilter = filter }
+            @Deprecated("Drawable contract")
+            override fun getOpacity() = android.graphics.PixelFormat.TRANSLUCENT
+            override fun draw(canvas: android.graphics.Canvas) {
+                canvas.save()
+                canvas.translate(bounds.left.toFloat(), bounds.top.toFloat())
+                canvas.scale(bounds.width() / 24f, bounds.height() / 24f)
+                when (tab) {
+                    TAB_OVERVIEW -> {
+                        canvas.drawRoundRect(3f, 4f, 21f, 20f, 6f, 6f, paint)
+                        canvas.drawLine(8f, 10f, 8f, 13f, paint)
+                        canvas.drawLine(16f, 10f, 16f, 13f, paint)
+                    }
+                    TAB_PERSONALITY -> {
+                        val path = android.graphics.Path().apply {
+                            moveTo(12f, 20f)
+                            cubicTo(-7f, 8f, 7f, -2f, 12f, 7f)
+                            cubicTo(17f, -2f, 31f, 8f, 12f, 20f)
+                            close()
+                        }
+                        canvas.drawPath(path, paint)
+                    }
+                    else -> {
+                        canvas.drawCircle(12f, 12f, 7f, paint)
+                        canvas.drawCircle(12f, 12f, 2.5f, paint)
+                        for (i in 0 until 8) {
+                            canvas.drawLine(12f, 2f, 12f, 5f, paint)
+                            canvas.rotate(45f, 12f, 12f)
+                        }
+                    }
+                }
+                canvas.restore()
+            }
+        }
+
     private fun sectionTitle(title: String) {
         content.addView(
             TextView(this).apply {
                 text = title
-                textSize = 20f
+                textSize = 23f
+                typeface = android.graphics.Typeface.create("sans-serif-medium", 0)
                 setTextColor(INK)
                 setPadding(0, dp(18), 0, dp(8))
             },
@@ -773,11 +2211,14 @@ class MainActivity : Activity() {
         content.addView(
             LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
-                setBackgroundColor(Color.WHITE)
-                setPadding(dp(16), dp(14), dp(16), dp(14))
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    setColor(Color.WHITE); cornerRadius = dp(20).toFloat()
+                }
+                setPadding(dp(20), dp(18), dp(20), dp(18))
                 addView(TextView(context).apply {
                     text = title
                     textSize = 17f
+                    typeface = android.graphics.Typeface.create("sans-serif-medium", 0)
                     setTextColor(INK)
                 })
                 addView(TextView(context).apply {
@@ -844,6 +2285,13 @@ class MainActivity : Activity() {
             isAllCaps = false
             isEnabled = enabled
             gravity = Gravity.CENTER
+            textSize = 16f
+            setTextColor(if (enabled) INK else MUTED)
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(if (enabled) Color.rgb(222, 235, 229) else Color.rgb(235, 237, 233))
+                cornerRadius = dp(18).toFloat()
+            }
+            minHeight = dp(54)
             setOnClickListener { action() }
         }
 
@@ -864,6 +2312,57 @@ class MainActivity : Activity() {
         PersonaMode.TSUNDERE_LITE -> "轻傲娇"
     }
 
+    private fun turnLabel(phase: TurnPhase): String = when (phase) {
+        TurnPhase.IDLE -> "等待你说话"
+        TurnPhase.LISTENING -> "正在听你说"
+        TurnPhase.THINKING -> "正在思考"
+        TurnPhase.SPEAKING -> "正在回答"
+        TurnPhase.CANCELLING -> "正在停止"
+        TurnPhase.CANCEL_UNCONFIRMED -> "停止结果待确认"
+        TurnPhase.PLAYBACK_UNCONFIRMED -> "播放结果待确认"
+        TurnPhase.OFFLINE -> "设备离线"
+        TurnPhase.ERROR -> "对话出现异常"
+    }
+
+    private fun emotionLabel(emotion: Emotion): String = when (emotion) {
+        Emotion.UNKNOWN -> "未知"
+        Emotion.NEUTRAL -> "平静"
+        Emotion.HAPPY -> "开心"
+        Emotion.SHY -> "害羞"
+        Emotion.SAD -> "难过"
+        Emotion.SURPRISED -> "惊讶"
+        Emotion.THINKING -> "思考中"
+    }
+
+    private fun permissionStateLabel(state: PermissionState): String = when (state) {
+        PermissionState.NOT_GRANTED -> "尚未选择"
+        PermissionState.ALLOWED -> "已允许"
+        PermissionState.DENIED -> "已拒绝"
+    }
+
+    private fun updatePhaseLabel(phase: UpdatePhase): String = when (phase) {
+        UpdatePhase.UNKNOWN -> "更新状态未知"
+        UpdatePhase.IDLE -> "暂无更新任务"
+        UpdatePhase.AWAITING_LOCAL_CONFIRMATION -> "等待设备确认"
+        UpdatePhase.DOWNLOADING -> "正在下载"
+        UpdatePhase.VERIFYING -> "正在验证"
+        UpdatePhase.STAGED -> "已准备安装"
+        UpdatePhase.REBOOTING -> "正在重启"
+        UpdatePhase.TRIAL -> "正在试运行"
+        UpdatePhase.CONFIRMED -> "更新已完成"
+        UpdatePhase.ROLLED_BACK -> "已恢复旧版本"
+        UpdatePhase.FAILED -> "更新失败"
+    }
+
+    private fun updateErrorLabel(error: ConsoleErrorCode): String = when (error) {
+        ConsoleErrorCode.UPDATE_MANIFEST_INVALID -> "发布清单无效或不适用于当前设备"
+        ConsoleErrorCode.UPDATE_SIGNATURE_INVALID -> "签名校验失败"
+        ConsoleErrorCode.UPDATE_PAIR_MISMATCH -> "CP/AP 固件配对不匹配"
+        ConsoleErrorCode.UPDATE_TRIAL_FAILED -> "新固件试运行失败"
+        ConsoleErrorCode.UPDATE_DEVICE_ERROR -> "设备执行更新失败"
+        else -> error.wireValue
+    }
+
     private fun capabilityLabel(capability: PrivacyCapability): String = when (capability) {
         PrivacyCapability.MICROPHONE -> "麦克风"
         PrivacyCapability.CAMERA -> "摄像头"
@@ -879,17 +2378,30 @@ class MainActivity : Activity() {
         private const val KEY_ORIGIN = "origin"
         private const val KEY_DEVICE_ID = "device_id"
         private const val KEY_PINS = "certificate_pins"
+        private const val KEY_PROVISIONED_DEVICE_ID = "provisioned_device_id"
+        private const val KEY_CONTROL_CREDENTIAL_REQUIRED = "control_credential_required"
+        private const val KEY_OTA_EXPECTED_VERSION = "ota_expected_version"
+        private const val KEY_OTA_EXPECTED_COUNTER = "ota_expected_counter"
+        private const val KEY_OTA_EXPECTED_CATALOG = "ota_expected_catalog"
+        private const val KEY_OTA_EXPECTED_DEVICE = "ota_expected_device"
+        private const val DEVICE_BOARD = "aidk_ai_toy"
+        private const val PROVISION_REQUEST = 41
+        private const val CONSOLE_ENROLLMENT_REQUEST = 42
         private const val MUTATION_TTL_MS = 30_000L
+        private const val RECONNECT_BUSY_WAIT_MS = 500L
+        private val RECONNECT_DELAYS_MS = longArrayOf(1_000L, 2_000L, 4_000L, 8_000L, 16_000L, 30_000L)
 
         private const val TAB_OVERVIEW = 0
         private const val TAB_INTERACTION = 1
         private const val TAB_PERSONALITY = 2
         private const val TAB_PRIVACY = 3
         private const val TAB_UPDATE = 4
-        private val TABS = listOf("概览", "交互", "性格", "隐私", "更新")
+        private const val FIRMWARE_PACKAGE_REQUEST = 6043
+        private const val TAB_SETTINGS = 5
+        private val TABS = listOf(TAB_OVERVIEW to "陪伴", TAB_PERSONALITY to "心情", TAB_SETTINGS to "设置")
 
-        private val BACKGROUND = Color.rgb(245, 247, 250)
-        private val INK = Color.rgb(30, 41, 59)
-        private val MUTED = Color.rgb(100, 116, 139)
+        private val BACKGROUND = Color.rgb(248, 248, 243)
+        private val INK = Color.rgb(35, 57, 50)
+        private val MUTED = Color.rgb(113, 126, 119)
     }
 }

@@ -67,6 +67,10 @@ int bk7258_sdk_runtime_initialize(void)
   return g_sdk_result;
 }
 
+void bk7258_ap_retained_report(void)
+{
+}
+
 int bk7258_ap_control_initialize(
   const struct bk7258_ap_image_desc_s *image)
 {

@@ -51,9 +51,14 @@ class ConsolePolicyTest {
     }
 
     @Test
-    fun otaAndUnbindRequireExplicitLocalConfirmation() {
+    fun adminMutationsRequireExplicitLocalConfirmation() {
         val grants = setOf(PermissionLevel.L3_ADMIN)
-        listOf(ConsoleOperation.REQUEST_FIRMWARE_UPDATE, ConsoleOperation.UNBIND_DEVICE).forEach {
+        listOf(
+            ConsoleOperation.REQUEST_FIRMWARE_UPDATE,
+            ConsoleOperation.UNBIND_DEVICE,
+            ConsoleOperation.CONFIGURE_PERMISSION,
+            ConsoleOperation.DELETE_MEMORY,
+        ).forEach {
             val value = mutation(operation = it)
             assertRejected(
                 ConsoleErrorCode.LOCAL_CONFIRMATION_REQUIRED,

@@ -5,7 +5,7 @@
 以下命令在本项目根目录执行，`../nuttx` 应为该隔离副本：
 
 ```sh
-for patch in "$PWD"/nuttx/patches/{video,mmcsd,fs,input,netdb}/*.patch; do
+for patch in "$PWD"/nuttx/patches/{video,mmcsd,fs,input,netdb,contactless,bluetooth}/*.patch; do
   git -C ../nuttx apply --check "$patch" || exit 1
   git -C ../nuttx apply "$patch" || exit 1
 done
@@ -22,6 +22,19 @@ done
 | `fs/0001` | 保留 FAT 扩展链的底层错误并区分空间不足、损坏链 |
 | `input/0001` | FF 文件关闭时停止并回收其效果，校验写事件与 owner，避免注销时访问已销毁 lower half |
 | `netdb/0001` | 允许只有 RPMsg 套接字的配置启用已有 AF_RPMSG netdb/rexec 实现 |
+| `contactless/0001` | MFRC522 检测到卡但选卡失败时返回原始错误，避免使用未初始化 UID 误报成功 |
+| `bluetooth/0002` | 将既有 Host 连接回调、广播及断开接口声明公开，产品无需引用私有头文件；不改协议实现 |
+| `bluetooth/0001` | 增加可检查通知结果的 GATT API，保留 16 位句柄、按每个 peer 的 CCC 发送并释放断开连接引用 |
+
+`bt_gatt_notify_checked` 返回已交给 L2CAP 的 PDU 数量；无发送时返回负错误。
+正数可能代表广播部分成功，不能直接重发，也不是远端接收确认。无订阅/连接返回
+`-ENOTCONN`，首个 PDU 分配失败返回 `-ENOMEM`，调用参数无效返回 `-EINVAL`。
+原 `bt_gatt_notify` 保留 void ABI。单连接产品可对 `-ENOMEM` 做有期限的重试，
+仍需自己的发送窗口和 TLS/连接超时。补丁保留上游 BSD-3-Clause 许可。
+`bt_gatt_notify_peer` 只向指定连接发送；异步持有 Host 回调连接时使用已公开的
+`bt_conn_addref` / `bt_conn_release`，不能把裸指针跨断线留存后再使用。
+执行 `python3 tests/host/bk7258/test_gatt_notify_result.py`，会在临时固定基线副本
+应用补丁，编译实际通知函数，验证分配失败、部分成功、peer CCC、断连引用和 16 位句柄。
 
 `video/0001` 涉及控制编号 ABI，内核与客户端必须一起重建。
 AIDK 配置选择一个扇区读、16 个扇区写、禁用 ACMD23；其他板卡默认值不变。

@@ -39,6 +39,9 @@ struct bk7258_gpio_config_s
   bool user_led_console_shared;
   uint8_t user_button_gpio;
   bool user_button_active_low;
+  bool power_button_enabled;
+  uint8_t power_button_gpio;
+  bool power_button_active_low;
 };
 
 /****************************************************************************

@@ -32,7 +32,7 @@
  * Private Data and Functions
  ****************************************************************************/
 
-#ifdef CONFIG_BK7258_STORAGE_ONCHIP_PERSISTENT
+#ifdef CONFIG_BK7258_ONCHIP_DATAFS
 _Static_assert(BK7258_FLASH_ERASE_SIZE == BK7258_FLASH_SECTOR_SIZE,
                "partition and Flash erase sizes differ");
 
@@ -56,7 +56,7 @@ static void bk7258_fs_register(FAR struct mtd_dev_s *mtd)
       _err("bk7258: failed to register LittleFS FTL block device\n");
     }
 }
-#endif /* CONFIG_BK7258_STORAGE_ONCHIP_PERSISTENT */
+#endif /* CONFIG_BK7258_ONCHIP_DATAFS */
 
 /****************************************************************************
  * Public Functions
@@ -103,7 +103,7 @@ int bk7258_bringup(void)
     bk7258_flash_mtd_initialize(&g_bk7258_data_mtd_config);
   if (mtd != NULL)
     {
-#ifdef CONFIG_BK7258_STORAGE_ONCHIP_PERSISTENT
+#ifdef CONFIG_BK7258_ONCHIP_DATAFS
       bk7258_fs_register(mtd);
 #endif
     }

@@ -23,6 +23,10 @@ set(BK7258_SDK_CONFIG_DIR "${BK7258_SDK_DIR}/config")
 set(BK7258_SDK_LIBS_DIR "${BK7258_SDK_DIR}/libs")
 set(BK7258_NUTTX_OVERLAY_DIR "${NUTTX_DIR}/../vendor/beken/nuttx")
 
+if(CONFIG_CL_MFRC522_FRAME AND CONFIG_CL_MFRC522)
+  message(FATAL_ERROR "select exactly one MFRC522 implementation")
+endif()
+
 if(CONFIG_INPUT_GT9XX_STANDARD_IOCTL AND CONFIG_INPUT_GT9XX)
   message(FATAL_ERROR
           "select exactly one GT9xx implementation")
@@ -149,6 +153,9 @@ if(CONFIG_BK7258_RPTUN)
   if(CONFIG_BK7258_OTA_RPMSG)
     list(APPEND BK7258_CP_SRCS common/bk7258_ota_rpmsg.c)
   endif()
+  if(CONFIG_BK7258_USBMODE_RPMSG)
+    list(APPEND BK7258_CP_SRCS common/bk7258_usbmode_rpmsg.c)
+  endif()
   if(CONFIG_BK7258_PM_CLOCK)
     list(APPEND BK7258_CP_SRCS cp/bk7258_pm_server.c)
   endif()
@@ -195,6 +202,10 @@ if(CONFIG_BK7258_GPIO_LOWERHALF)
        cp/bk7258_gpio_lowerhalf.c)
 endif()
 
+if(CONFIG_BK7258_CP_GPIO_INPUT)
+  list(APPEND BK7258_CP_SRCS cp/bk7258_gpio_input.c)
+endif()
+
 if(CONFIG_BK7258_CLOCK_240M)
   list(APPEND BK7258_CP_SRCS cp/bk7258_clock.c)
 endif()
@@ -204,6 +215,10 @@ endif()
 
 if(CONFIG_BK7258_DVFS)
   list(APPEND BK7258_CP_SRCS cp/bk7258_dvfs.c)
+endif()
+
+if(CONFIG_BK7258_PM_SOFT_OFF)
+  list(APPEND BK7258_CP_SRCS cp/bk7258_pm_soft_off.c)
 endif()
 
 if(CONFIG_BK7258_PM_POLICY)
@@ -301,6 +316,7 @@ if(CONFIG_BK7258_OTA_MANAGER)
             "BK7258_OTA_MANAGER requires the generated catalog public root")
   endif()
   list(APPEND BK7258_AP_BASE_SRCS
+       ap/bk7258_active_image.c
        ap/bk7258_ota_manager.c
        ap/bk7258_ota_catalog.c
        "$ENV{BK7258_OTA_CATALOG_PUBLIC_SOURCE}")
@@ -369,6 +385,16 @@ endif()
 if(CONFIG_VIDEO_GC2145_CONTROLS)
   list(APPEND BK7258_AP_BASE_SRCS
        ${BK7258_NUTTX_OVERLAY_DIR}/drivers/video/gc2145.c)
+endif()
+
+if(CONFIG_CL_MFRC522_FRAME)
+  list(APPEND BK7258_AP_BASE_SRCS
+       ${BK7258_NUTTX_OVERLAY_DIR}/drivers/contactless/mfrc522.c)
+endif()
+
+if(CONFIG_CL_ISODEP)
+  list(APPEND BK7258_AP_BASE_SRCS
+       ${BK7258_NUTTX_OVERLAY_DIR}/drivers/contactless/isodep.c)
 endif()
 
 if(CONFIG_SENSORS_SC7A20)
@@ -551,6 +577,9 @@ if(CONFIG_BK7258_RPTUN)
   list(APPEND BK7258_AP_BASE_SRCS common/bk7258_rptun.c)
   if(CONFIG_BK7258_OTA_RPMSG)
     list(APPEND BK7258_AP_BASE_SRCS common/bk7258_ota_rpmsg.c)
+  endif()
+  if(CONFIG_BK7258_USBMODE_RPMSG)
+    list(APPEND BK7258_AP_BASE_SRCS common/bk7258_usbmode_rpmsg.c)
   endif()
   if(CONFIG_BK7258_PM_CLOCK)
     list(APPEND BK7258_AP_BASE_SRCS ap/bk7258_pm_client.c)

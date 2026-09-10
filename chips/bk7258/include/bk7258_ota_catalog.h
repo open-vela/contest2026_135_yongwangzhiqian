@@ -39,6 +39,12 @@ int bk7258_ota_catalog_verify(const uint8_t *catalog, size_t catalog_size,
                               const uint8_t *signature,
                               size_t signature_size,
                               struct bk7258_ota_catalog_s *result);
+/* SHA-256 of the canonical DER key embedded for catalog verification.  The
+ * release builder derives this source from the same MCUboot public key that
+ * it verifies against BL2.
+ */
+int bk7258_ota_catalog_public_fingerprint(
+  uint8_t fingerprint[BK7258_OTA_SHA256_SIZE]);
 #endif
 
 #ifdef __cplusplus

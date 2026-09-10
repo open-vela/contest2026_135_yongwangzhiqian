@@ -31,6 +31,9 @@
 #include <arch/chip/bk7258_ota.h>
 #include <arch/chip/bk7258_ota_rpmsg.h>
 #include <arch/chip/bk7258_usbmode.h>
+#ifndef CONFIG_BK7258_AP_CORE
+#  include <arch/chip/bk7258_system_reset.h>
+#endif
 #if defined(CONFIG_BK7258_AP_CORE) && defined(CONFIG_BK7258_OTA_SOURCE_FILE)
 #  include <arch/chip/bk7258_ota_source_file.h>
 #endif
@@ -68,7 +71,11 @@ enum bk7258_ota_rpmsg_command_e
   BK7258_OTA_RPMSG_MANAGER_CANCEL,
   BK7258_OTA_RPMSG_USBMODE_GET,
   BK7258_OTA_RPMSG_USBMODE_SET,
-  BK7258_OTA_RPMSG_CONTROL_REPLY
+  BK7258_OTA_RPMSG_CONTROL_REPLY,
+  BK7258_OTA_RPMSG_PAIR_STATUS,
+  /* Keep the former REBOOT wire value as the non-destructive prepare step. */
+  BK7258_OTA_RPMSG_REBOOT_PREPARE,
+  BK7258_OTA_RPMSG_REBOOT_COMMIT
 };
 
 struct bk7258_ota_rpmsg_header_s
@@ -100,7 +107,9 @@ struct bk7258_ota_rpmsg_dev_s
   spinlock_t lock;
 #ifdef CONFIG_BK7258_AP_CORE
   mutex_t session_lock;
+  mutex_t control_lock;
   sem_t event_sem;
+  sem_t lifecycle_sem;
   volatile bool stage_active;
   volatile bool cancel_requested;
   bool read_pending;
@@ -114,6 +123,12 @@ struct bk7258_ota_rpmsg_dev_s
   uint32_t next_session;
   const struct bk7258_ota_source_ops_s *source;
   void *source_context;
+  uint32_t next_control_session;
+  uint32_t waiting_control_session;
+  bool control_reply_valid;
+  uint32_t control_reply_length;
+  int control_reply_status;
+  uint8_t control_reply[BK7258_OTA_RPMSG_PAYLOAD_SIZE];
 #if defined(CONFIG_BK7258_OTA_SOURCE_FILE) || \
     defined(CONFIG_BK7258_OTA_SOURCE_HTTP) || \
     defined(CONFIG_BK7258_USBMODE)
@@ -148,7 +163,17 @@ struct bk7258_ota_rpmsg_dev_s
   bool control_reply_valid;
   uint32_t control_reply_length;
   int control_reply_status;
-  uint8_t control_reply[sizeof(struct bk7258_ota_manager_status_s)];
+  uint8_t control_reply[BK7258_OTA_RPMSG_PAYLOAD_SIZE];
+  bool lifecycle_pending;
+  uint16_t lifecycle_command;
+  uint32_t lifecycle_session;
+  uint32_t lifecycle_generation;
+  bool reboot_prepared;
+  uint32_t reboot_prepared_session;
+  uint32_t reboot_prepared_generation;
+  uint32_t reboot_prepared_candidate_epoch;
+  bool staged_candidate_ready;
+  uint32_t staged_candidate_epoch;
 #endif
 };
 
@@ -168,11 +193,15 @@ static_assert(BK7258_OTA_CONTROL_URL_SIZE + BK7258_OTA_CONTROL_CA_SIZE <=
 static_assert(sizeof(struct bk7258_ota_manager_status_s) <=
               BK7258_OTA_RPMSG_PAYLOAD_SIZE,
               "BK7258 OTA manager status does not fit one message");
+static_assert(sizeof(struct bk7258_ota_pair_snapshot_s) <=
+              BK7258_OTA_RPMSG_PAYLOAD_SIZE,
+              "BK7258 OTA pair status does not fit one message");
 
 static struct bk7258_ota_rpmsg_dev_s g_bk7258_ota_rpmsg =
 {
 #ifdef CONFIG_BK7258_AP_CORE
   .session_lock = NXMUTEX_INITIALIZER,
+  .control_lock = NXMUTEX_INITIALIZER,
 #else
   .control_lock = NXMUTEX_INITIALIZER,
 #endif
@@ -431,7 +460,8 @@ static bool bk7258_ota_rpmsg_valid(
         return payload == msg->header.length &&
                (payload == 0u ||
                 payload == sizeof(uint32_t) ||
-                payload == sizeof(struct bk7258_ota_manager_status_s));
+                payload == sizeof(struct bk7258_ota_manager_status_s) ||
+                payload == sizeof(struct bk7258_ota_pair_snapshot_s));
 
       case BK7258_OTA_RPMSG_USBMODE_SET:
         return payload == sizeof(uint32_t) &&
@@ -444,6 +474,9 @@ static bool bk7258_ota_rpmsg_valid(
       case BK7258_OTA_RPMSG_MANAGER_STATUS:
       case BK7258_OTA_RPMSG_MANAGER_CANCEL:
       case BK7258_OTA_RPMSG_USBMODE_GET:
+      case BK7258_OTA_RPMSG_PAIR_STATUS:
+      case BK7258_OTA_RPMSG_REBOOT_PREPARE:
+      case BK7258_OTA_RPMSG_REBOOT_COMMIT:
         return payload == 0u;
 
       default:
@@ -484,6 +517,115 @@ static int bk7258_ota_rpmsg_control_reply(uint32_t session, int status,
 
   ret = rpmsg_trysend(&priv->ept, &reply, bk7258_ota_rpmsg_size(length));
   return ret < 0 ? ret : OK;
+}
+
+/* The caller owns control_lock.  A nonzero *session reuses the prepare
+ * session for its matching commit; otherwise this helper allocates one. */
+
+static int bk7258_ota_rpmsg_cp_control_request_locked(
+  uint16_t command, uint32_t *session, uint32_t timeout_ms, void *reply,
+  uint32_t reply_size)
+{
+  struct bk7258_ota_rpmsg_dev_s *priv = &g_bk7258_ota_rpmsg;
+  struct bk7258_ota_rpmsg_message_s request;
+  irqstate_t flags;
+  int ret;
+
+  if (session == NULL || (reply == NULL) != (reply_size == 0u) ||
+      reply_size > BK7258_OTA_RPMSG_PAYLOAD_SIZE || timeout_ms == 0u)
+    {
+      return -EINVAL;
+    }
+
+  if (!bk7258_ota_rpmsg_ready())
+    {
+      return -ENOTCONN;
+    }
+
+  if (*session == 0u && ++priv->next_control_session == 0u)
+    {
+      priv->next_control_session++;
+    }
+
+  if (*session == 0u)
+    {
+      *session = priv->next_control_session;
+    }
+
+  bk7258_ota_rpmsg_flush(&priv->lifecycle_sem);
+  flags = spin_lock_irqsave(&priv->lock);
+  priv->waiting_control_session = *session;
+  priv->control_reply_valid = false;
+  priv->control_reply_length = 0u;
+  priv->control_reply_status = -EINPROGRESS;
+  spin_unlock_irqrestore(&priv->lock, flags);
+
+  memset(&request, 0, sizeof(request));
+  bk7258_ota_rpmsg_header(&request.header, command, *session);
+  ret = bk7258_ota_rpmsg_send(&request, 0u);
+  if (ret < 0)
+    {
+      goto out_clear;
+    }
+
+  ret = nxsem_tickwait_uninterruptible(&priv->lifecycle_sem,
+                                        MSEC2TICK(timeout_ms));
+  if (ret < 0)
+    {
+      goto out_clear;
+    }
+
+  flags = spin_lock_irqsave(&priv->lock);
+  if (!priv->control_reply_valid)
+    {
+      ret = -ESTALE;
+    }
+  else
+    {
+      ret = priv->control_reply_status;
+      if (reply != NULL)
+        {
+          if (priv->control_reply_length == reply_size)
+            {
+              memcpy(reply, priv->control_reply, reply_size);
+            }
+          else if (ret >= 0 || priv->control_reply_length != 0u)
+            {
+              ret = -EPROTO;
+            }
+        }
+      else if (priv->control_reply_length != 0u)
+        {
+          ret = -EPROTO;
+        }
+    }
+  spin_unlock_irqrestore(&priv->lock, flags);
+
+out_clear:
+  flags = spin_lock_irqsave(&priv->lock);
+  priv->waiting_control_session = 0u;
+  priv->control_reply_valid = false;
+  spin_unlock_irqrestore(&priv->lock, flags);
+  return ret;
+}
+
+static int bk7258_ota_rpmsg_cp_control_request(
+  uint16_t command, uint32_t timeout_ms, void *reply, uint32_t reply_size)
+{
+  struct bk7258_ota_rpmsg_dev_s *priv = &g_bk7258_ota_rpmsg;
+  uint32_t session = 0u;
+  int ret;
+
+  ret = nxmutex_lock(&priv->control_lock);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  ret = bk7258_ota_rpmsg_cp_control_request_locked(
+          command, &session, timeout_ms, reply, reply_size);
+  nxmutex_unlock(&priv->control_lock);
+  return ret;
 }
 
 #if defined(CONFIG_BK7258_OTA_SOURCE_FILE) || \
@@ -802,7 +944,83 @@ int bk7258_ota_rpmsg_cancel(void)
   return OK;
 }
 
+int bk7258_ota_rpmsg_pair_status(
+  struct bk7258_ota_pair_snapshot_s *snapshot, uint32_t timeout_ms)
+{
+  if (snapshot == NULL)
+    {
+      return -EINVAL;
+    }
+
+  return bk7258_ota_rpmsg_cp_control_request(
+           BK7258_OTA_RPMSG_PAIR_STATUS, timeout_ms, snapshot,
+           sizeof(*snapshot));
+}
+
+int bk7258_ota_rpmsg_reboot(uint32_t timeout_ms)
+{
+  struct bk7258_ota_rpmsg_dev_s *priv = &g_bk7258_ota_rpmsg;
+  struct bk7258_ota_rpmsg_message_s commit;
+  uint32_t session = 0u;
+  int ret;
+
+  ret = nxmutex_lock(&priv->control_lock);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  /* A failed or lost prepare has no side effect on CP.  Only a caller that
+   * received this reply can submit the session-bound commit below. */
+
+  ret = bk7258_ota_rpmsg_cp_control_request_locked(
+          BK7258_OTA_RPMSG_REBOOT_PREPARE, &session, timeout_ms, NULL, 0u);
+  if (ret >= 0)
+    {
+      memset(&commit, 0, sizeof(commit));
+      bk7258_ota_rpmsg_header(&commit.header,
+                              BK7258_OTA_RPMSG_REBOOT_COMMIT, session);
+      ret = bk7258_ota_rpmsg_send(&commit, 0u);
+    }
+
+  nxmutex_unlock(&priv->control_lock);
+  return ret;
+}
+
 #else /* CONFIG_BK7258_AP_CORE */
+
+static int bk7258_ota_rpmsg_control_reply(uint32_t session, int status,
+                                          const void *payload,
+                                          uint32_t length, bool blocking)
+{
+  struct bk7258_ota_rpmsg_dev_s *priv = &g_bk7258_ota_rpmsg;
+  struct bk7258_ota_rpmsg_message_s reply;
+  int ret;
+
+  if ((payload == NULL) != (length == 0u) ||
+      length > sizeof(reply.payload))
+    {
+      return -EINVAL;
+    }
+
+  memset(&reply, 0, sizeof(reply));
+  bk7258_ota_rpmsg_header(&reply.header,
+                          BK7258_OTA_RPMSG_CONTROL_REPLY, session);
+  reply.header.status = status;
+  reply.header.length = length;
+  if (length > 0u)
+    {
+      memcpy(reply.payload, payload, length);
+    }
+
+  if (blocking)
+    {
+      return bk7258_ota_rpmsg_send(&reply, length);
+    }
+
+  ret = rpmsg_trysend(&priv->ept, &reply, bk7258_ota_rpmsg_size(length));
+  return ret < 0 ? ret : OK;
+}
 
 struct bk7258_ota_rpmsg_source_s
 {
@@ -1166,6 +1384,118 @@ int bk7258_ota_rpmsg_usbmode_set(enum bk7258_usbmode_e mode,
          wire_actual == (uint32_t)BK7258_USBMODE_MSC ? OK : -EPROTO;
 }
 
+static int bk7258_ota_rpmsg_lifecycle_worker(
+  uint16_t command, uint32_t session, uint32_t generation)
+{
+  struct bk7258_ota_rpmsg_dev_s *priv = &g_bk7258_ota_rpmsg;
+  struct bk7258_ota_pair_snapshot_s snapshot;
+  volatile struct bk7258_rptun_control_s *control = bk7258_rptun_control();
+  bool endpoint_ready;
+  bool staged_reboot_allowed;
+  uint32_t candidate_epoch;
+  irqstate_t flags;
+  int operation;
+  int ret;
+
+  memset(&snapshot, 0, sizeof(snapshot));
+  operation = bk7258_ota_get_active_pair(&snapshot);
+  endpoint_ready = bk7258_ota_rpmsg_ready();
+  flags = spin_lock_irqsave(&priv->lock);
+  candidate_epoch = priv->staged_candidate_epoch;
+  staged_reboot_allowed =
+    priv->staged_candidate_ready && operation == OK &&
+    snapshot.state == BK7258_OTA_PAIR_CONFIRMED &&
+    snapshot.security_counter_present &&
+    priv->manifest.security_counter > snapshot.security_counter &&
+    bk7258_mcuboot_version_compare(&priv->manifest.image_version,
+                                   &snapshot.version) > 0;
+  spin_unlock_irqrestore(&priv->lock, flags);
+  if (command == BK7258_OTA_RPMSG_PAIR_STATUS)
+    {
+      ret = bk7258_ota_rpmsg_control_reply(
+              session, operation, operation == OK ? &snapshot : NULL,
+              operation == OK ? sizeof(snapshot) : 0u, true);
+      __atomic_store_n(&priv->stage_busy, false, __ATOMIC_RELEASE);
+      return ret;
+    }
+
+  if (command == BK7258_OTA_RPMSG_REBOOT_PREPARE)
+    {
+      flags = spin_lock_irqsave(&priv->lock);
+      priv->reboot_prepared = false;
+      if (staged_reboot_allowed && endpoint_ready &&
+          control->generation == generation)
+        {
+          priv->reboot_prepared = true;
+          priv->reboot_prepared_session = session;
+          priv->reboot_prepared_generation = generation;
+          priv->reboot_prepared_candidate_epoch = candidate_epoch;
+        }
+      else if (operation == OK)
+        {
+          operation = -EPERM;
+        }
+      spin_unlock_irqrestore(&priv->lock, flags);
+
+      ret = bk7258_ota_rpmsg_control_reply(session, operation, NULL, 0u,
+                                           true);
+      if (ret < 0)
+        {
+          flags = spin_lock_irqsave(&priv->lock);
+          if (priv->reboot_prepared &&
+              priv->reboot_prepared_session == session &&
+              priv->reboot_prepared_generation == generation)
+            {
+              priv->reboot_prepared = false;
+            }
+          spin_unlock_irqrestore(&priv->lock, flags);
+        }
+      __atomic_store_n(&priv->stage_busy, false, __ATOMIC_RELEASE);
+      return ret < 0 ? ret : operation;
+    }
+
+  if (command != BK7258_OTA_RPMSG_REBOOT_COMMIT)
+    {
+      __atomic_store_n(&priv->stage_busy, false, __ATOMIC_RELEASE);
+      return -ENOMSG;
+    }
+
+  /* Consume the prepare token before the potentially slow flash query.  A
+   * duplicate commit cannot be queued while stage_busy is set, and a later
+   * commit cannot reuse this token after it has been consumed. */
+
+  flags = spin_lock_irqsave(&priv->lock);
+  if (!priv->reboot_prepared ||
+      priv->reboot_prepared_session != session ||
+      priv->reboot_prepared_generation != generation ||
+      priv->reboot_prepared_candidate_epoch != candidate_epoch ||
+      !priv->staged_candidate_ready ||
+      !endpoint_ready || control->generation != generation)
+    {
+      operation = -ESTALE;
+    }
+  else
+    {
+      priv->reboot_prepared = false;
+      priv->staged_candidate_ready = false;
+    }
+  spin_unlock_irqrestore(&priv->lock, flags);
+
+  if (operation == OK && !staged_reboot_allowed)
+    {
+      operation = -EPERM;
+    }
+
+  if (operation < 0)
+    {
+      __atomic_store_n(&priv->stage_busy, false, __ATOMIC_RELEASE);
+      return operation;
+    }
+
+  /* AP has already received PREPARE and committed the matching session. */
+  bk7258_system_reset(BK7258_RESET_SOURCE_REBOOT);
+}
+
 static int bk7258_ota_rpmsg_worker(int argc, char *argv[])
 {
   struct bk7258_ota_rpmsg_dev_s *priv = &g_bk7258_ota_rpmsg;
@@ -1176,6 +1506,10 @@ static int bk7258_ota_rpmsg_worker(int argc, char *argv[])
     {
       struct bk7258_ota_rpmsg_source_s source;
       struct bk7258_ota_rpmsg_message_s complete;
+      uint16_t lifecycle_command = 0u;
+      uint32_t lifecycle_session = 0u;
+      uint32_t lifecycle_generation = 0u;
+      irqstate_t flags;
       int ret;
 
       if (nxsem_wait_uninterruptible(&priv->worker_sem) < 0)
@@ -1183,9 +1517,34 @@ static int bk7258_ota_rpmsg_worker(int argc, char *argv[])
           continue;
         }
 
+      flags = spin_lock_irqsave(&priv->lock);
+      if (priv->lifecycle_pending)
+        {
+          lifecycle_command = priv->lifecycle_command;
+          lifecycle_session = priv->lifecycle_session;
+          lifecycle_generation = priv->lifecycle_generation;
+          priv->lifecycle_pending = false;
+        }
+      spin_unlock_irqrestore(&priv->lock, flags);
+
+      if (lifecycle_command != 0u)
+        {
+          (void)bk7258_ota_rpmsg_lifecycle_worker(lifecycle_command,
+                                                   lifecycle_session,
+                                                   lifecycle_generation);
+          continue;
+        }
+
       source.dev = priv;
       source.session = priv->active_session;
       ret = bk7258_ota_stage_pair(&g_bk7258_ota_proxy_ops, &source);
+      flags = spin_lock_irqsave(&priv->lock);
+      priv->staged_candidate_ready = ret == OK;
+      if (ret == OK && ++priv->staged_candidate_epoch == 0u)
+        {
+          priv->staged_candidate_epoch++;
+        }
+      spin_unlock_irqrestore(&priv->lock, flags);
       bk7258_ota_rpmsg_header(&complete.header,
                               BK7258_OTA_RPMSG_COMPLETE,
                               source.session);
@@ -1215,6 +1574,27 @@ static int bk7258_ota_rpmsg_ept_cb(FAR struct rpmsg_endpoint *ept,
     }
 
 #ifdef CONFIG_BK7258_AP_CORE
+  if (msg->header.command == BK7258_OTA_RPMSG_CONTROL_REPLY)
+    {
+      flags = spin_lock_irqsave(&priv->lock);
+      if (priv->waiting_control_session == 0u ||
+          msg->header.session != priv->waiting_control_session)
+        {
+          spin_unlock_irqrestore(&priv->lock, flags);
+          return -ESTALE;
+        }
+
+      priv->control_reply_status = msg->header.status;
+      priv->control_reply_length = msg->header.length;
+      if (msg->header.length > 0u)
+        {
+          memcpy(priv->control_reply, msg->payload, msg->header.length);
+        }
+      priv->control_reply_valid = true;
+      spin_unlock_irqrestore(&priv->lock, flags);
+      return nxsem_post(&priv->lifecycle_sem);
+    }
+
   if (msg->header.command == BK7258_OTA_RPMSG_MANAGER_STATUS)
     {
       struct bk7258_ota_manager_status_s status;
@@ -1468,10 +1848,66 @@ static int bk7258_ota_rpmsg_ept_cb(FAR struct rpmsg_endpoint *ept,
       return nxsem_post(&priv->control_sem);
     }
 
+  if (msg->header.command == BK7258_OTA_RPMSG_PAIR_STATUS ||
+      msg->header.command == BK7258_OTA_RPMSG_REBOOT_PREPARE ||
+      msg->header.command == BK7258_OTA_RPMSG_REBOOT_COMMIT)
+    {
+      bool expected = false;
+      int ret;
+
+      if (!__atomic_compare_exchange_n(&priv->stage_busy, &expected, true,
+                                       false, __ATOMIC_ACQ_REL,
+                                       __ATOMIC_ACQUIRE))
+        {
+          if (msg->header.command == BK7258_OTA_RPMSG_REBOOT_COMMIT)
+            {
+              return -EBUSY;
+            }
+
+          return bk7258_ota_rpmsg_control_reply(
+                   msg->header.session, -EBUSY, NULL, 0u, false);
+        }
+
+      flags = spin_lock_irqsave(&priv->lock);
+      priv->lifecycle_command = msg->header.command;
+      priv->lifecycle_session = msg->header.session;
+      priv->lifecycle_generation = msg->header.generation;
+      priv->lifecycle_pending = true;
+      spin_unlock_irqrestore(&priv->lock, flags);
+      ret = nxsem_post(&priv->worker_sem);
+      if (ret < 0)
+        {
+          flags = spin_lock_irqsave(&priv->lock);
+          priv->lifecycle_pending = false;
+          priv->lifecycle_command = 0u;
+          priv->lifecycle_session = 0u;
+          priv->lifecycle_generation = 0u;
+          if (msg->header.command == BK7258_OTA_RPMSG_REBOOT_COMMIT &&
+              priv->reboot_prepared &&
+              priv->reboot_prepared_session == msg->header.session &&
+              priv->reboot_prepared_generation == msg->header.generation)
+            {
+              priv->reboot_prepared = false;
+            }
+          spin_unlock_irqrestore(&priv->lock, flags);
+          __atomic_store_n(&priv->stage_busy, false, __ATOMIC_RELEASE);
+          if (msg->header.command == BK7258_OTA_RPMSG_REBOOT_COMMIT)
+            {
+              return ret;
+            }
+
+          return bk7258_ota_rpmsg_control_reply(
+                   msg->header.session, ret, NULL, 0u, false);
+        }
+
+      return OK;
+    }
+
   if (msg->header.command == BK7258_OTA_RPMSG_START)
     {
       bool expected = false;
       struct bk7258_ota_rpmsg_message_s complete;
+      int ret;
 
       if (msg->header.length != sizeof(priv->manifest))
         {
@@ -1489,11 +1925,21 @@ static int bk7258_ota_rpmsg_ept_cb(FAR struct rpmsg_endpoint *ept,
                                sizeof(complete.header)) < 0 ? -EAGAIN : OK;
         }
 
+      flags = spin_lock_irqsave(&priv->lock);
       memcpy(&priv->manifest, msg->payload, sizeof(priv->manifest));
+      priv->staged_candidate_ready = false;
+      priv->reboot_prepared = false;
+      spin_unlock_irqrestore(&priv->lock, flags);
       priv->active_session = msg->header.session;
       priv->cancel_requested = false;
       __asm volatile ("dmb sy" ::: "memory");
-      return nxsem_post(&priv->worker_sem);
+      ret = nxsem_post(&priv->worker_sem);
+      if (ret < 0)
+        {
+          __atomic_store_n(&priv->stage_busy, false, __ATOMIC_RELEASE);
+        }
+
+      return ret;
     }
 
   if (msg->header.command == BK7258_OTA_RPMSG_CANCEL &&
@@ -1592,6 +2038,7 @@ static void bk7258_ota_rpmsg_device_destroy(FAR struct rpmsg_device *rdev,
 {
   struct bk7258_ota_rpmsg_dev_s *priv = priv_;
   FAR const char *cpuname = rpmsg_get_cpuname(rdev);
+  irqstate_t flags;
 
   if (cpuname == NULL ||
       strcmp(cpuname, BK7258_OTA_RPMSG_REMOTE_NAME) != 0)
@@ -1601,16 +2048,26 @@ static void bk7258_ota_rpmsg_device_destroy(FAR struct rpmsg_device *rdev,
 
   __atomic_store_n(&priv->endpoint_created, false, __ATOMIC_RELEASE);
   priv->connection_error = -ENOTCONN;
+  flags = spin_lock_irqsave(&priv->lock);
 #ifdef CONFIG_BK7258_AP_CORE
   priv->complete_status = -ENOTCONN;
   priv->complete_session = priv->next_session;
   priv->complete_pending = true;
-  (void)nxsem_post(&priv->event_sem);
+  priv->control_reply_status = -ENOTCONN;
+  priv->control_reply_length = 0u;
+  priv->control_reply_valid = true;
 #else
   __atomic_store_n(&priv->cancel_requested, true, __ATOMIC_RELEASE);
   priv->control_reply_status = -ENOTCONN;
   priv->control_reply_length = 0u;
   priv->control_reply_valid = true;
+  priv->reboot_prepared = false;
+#endif
+  spin_unlock_irqrestore(&priv->lock, flags);
+#ifdef CONFIG_BK7258_AP_CORE
+  (void)nxsem_post(&priv->event_sem);
+  (void)nxsem_post(&priv->lifecycle_sem);
+#else
   (void)nxsem_post(&priv->data_sem);
   (void)nxsem_post(&priv->control_sem);
 #endif
@@ -1631,6 +2088,9 @@ int bk7258_ota_rpmsg_initialize(void)
     defined(CONFIG_BK7258_OTA_SOURCE_HTTP) || \
     defined(CONFIG_BK7258_USBMODE)
   bool second_sem = false;
+#endif
+#ifdef CONFIG_BK7258_AP_CORE
+  bool lifecycle_sem_initialized = false;
 #endif
 #ifndef CONFIG_BK7258_AP_CORE
   bool third_sem = false;
@@ -1670,6 +2130,13 @@ int bk7258_ota_rpmsg_initialize(void)
     {
       ret = nxsem_init(&priv->control_sem, 0, 0);
       second_sem = ret >= 0;
+    }
+#endif
+#ifdef CONFIG_BK7258_AP_CORE
+  if (ret >= 0)
+    {
+      ret = nxsem_init(&priv->lifecycle_sem, 0, 0);
+      lifecycle_sem_initialized = ret >= 0;
     }
 #elif !defined(CONFIG_BK7258_AP_CORE)
   if (ret >= 0)
@@ -1760,13 +2227,19 @@ int bk7258_ota_rpmsg_initialize(void)
         {
           (void)nxsem_destroy(&priv->data_sem);
         }
-#elif defined(CONFIG_BK7258_OTA_SOURCE_FILE) || \
-      defined(CONFIG_BK7258_OTA_SOURCE_HTTP) || \
-      defined(CONFIG_BK7258_USBMODE)
+#else
+      if (lifecycle_sem_initialized)
+        {
+          (void)nxsem_destroy(&priv->lifecycle_sem);
+        }
+#if defined(CONFIG_BK7258_OTA_SOURCE_FILE) || \
+    defined(CONFIG_BK7258_OTA_SOURCE_HTTP) || \
+    defined(CONFIG_BK7258_USBMODE)
       if (second_sem)
         {
           (void)nxsem_destroy(&priv->control_sem);
         }
+#endif
 #endif
       if (first_sem)
         {

@@ -8,11 +8,22 @@
  * halves; this App layer owns only the product's fixed PCM tuple.
  ****************************************************************************/
 
+#ifdef __NuttX__
+#include <nuttx/config.h>
+#endif
+
 #include "bk7258_voice_turn_audio.h"
 
 #include <errno.h>
 #include <media_player.h>
+#include <media_policy.h>
 #include <media_recorder.h>
+#ifdef CONFIG_BK7258_PREFERENCES
+#include "bk7258_preferences.h"
+#endif
+#ifdef CONFIG_BK7258_VOICE_VOLUME_PERSISTENCE
+#include "bk7258_voice_volume_store.h"
+#endif
 #include <stdint.h>
 #include <string.h>
 
@@ -204,6 +215,26 @@ static int bkvoice_turn_audio_mic_stop(void *context)
   return ret;
 }
 
+int bkvoice_turn_audio_reader_stop(struct bkvoice_turn_audio_s *audio)
+{
+  if (audio == NULL)
+    {
+      return -EINVAL;
+    }
+
+  if (!__atomic_load_n(&audio->mic_reader_active, __ATOMIC_ACQUIRE))
+    {
+      return -EPERM;
+    }
+
+  /* PTT release stops the public recorder so the blocking reader wakes, but
+   * deliberately leaves that reader attached.  The owner must join and
+   * detach it before the turn arbiter may drain and release the MIC.
+   */
+
+  return bkvoice_turn_audio_mic_stop(audio);
+}
+
 static int bkvoice_turn_audio_mic_drain(void *context)
 {
   struct bkvoice_turn_audio_s *audio = context;
@@ -262,6 +293,18 @@ static int bkvoice_turn_audio_mic_release(void *context)
   return ret;
 }
 
+static void bkvoice_turn_audio_event(void *cookie, int event, int result,
+                                     const char *extra)
+{
+  struct bkvoice_turn_audio_s *audio = cookie;
+  (void)extra;
+  if (event == MEDIA_EVENT_COMPLETED)
+    {
+      audio->dac_result = result;
+      __atomic_store_n(&audio->dac_completed, true, __ATOMIC_RELEASE);
+    }
+}
+
 static int bkvoice_turn_audio_dac_acquire(void *context)
 {
   struct bkvoice_turn_audio_s *audio = context;
@@ -282,6 +325,156 @@ static int bkvoice_turn_audio_dac_acquire(void *context)
   return audio->dac_handle != NULL ? 0 : bkvoice_turn_audio_errno();
 }
 
+static int bkvoice_turn_audio_volume_policy(struct bkvoice_turn_audio_s *audio,
+                                            bool apply,
+                                            unsigned int requested,
+                                            unsigned int *volume)
+{
+  int minimum;
+  int maximum;
+  int index;
+  int observed;
+  int ret;
+
+  if (audio == NULL || volume == NULL || (apply && requested > 100u))
+    {
+      return -EINVAL;
+    }
+
+  ret = media_policy_get_range(MEDIA_STREAM_MUSIC MEDIA_POLICY_VOLUME,
+                                &minimum, &maximum);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  if (minimum < 0 || maximum <= minimum)
+    {
+      return -ERANGE;
+    }
+
+  index = minimum + (int)(((uint64_t)requested *
+                           (maximum - minimum) + 50u) / 100u);
+  if (apply)
+    {
+      ret = media_policy_set_stream_volume(MEDIA_STREAM_MUSIC, index);
+      if (ret < 0)
+        {
+          return ret;
+        }
+    }
+
+  ret = media_policy_get_stream_volume(MEDIA_STREAM_MUSIC, &observed);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  if (observed < minimum || observed > maximum ||
+      (apply && observed != index))
+    {
+      return -EIO;
+    }
+
+  *volume = (unsigned int)(((uint64_t)(observed - minimum) * 100u +
+                            (maximum - minimum) / 2u) / (maximum - minimum));
+  if (apply)
+    {
+      audio->volume_override = true;
+      audio->volume_percent = requested;
+    }
+
+  return 0;
+}
+
+static int bkvoice_turn_audio_volume(void *context, bool set,
+                                     unsigned int requested,
+                                     unsigned int *volume)
+{
+  struct bkvoice_turn_audio_s *audio = context;
+  unsigned int persisted;
+  int ret;
+
+  if (audio == NULL || volume == NULL || (set && requested > 100u))
+    {
+      return -EINVAL;
+    }
+
+#ifdef CONFIG_BK7258_VOICE_VOLUME_PERSISTENCE
+  if (set)
+    {
+      /* A successful report promises reboot persistence. Publish the small
+       * LittleFS record before changing the live media policy.
+       */
+      ret = bkvoice_volume_store_set(requested);
+      if (ret < 0)
+        {
+          return ret;
+        }
+    }
+  else if (!audio->volume_override &&
+           bkvoice_volume_store_get(&persisted) == 0)
+    {
+      /* The first post-boot query also reconciles the media policy, so the
+       * App observes the restored value before the next TTS turn.
+       */
+      return bkvoice_turn_audio_volume_policy(audio, true, persisted, volume);
+    }
+#else
+  (void)persisted;
+  (void)ret;
+#endif
+
+  return bkvoice_turn_audio_volume_policy(audio, set, requested, volume);
+}
+
+static int bkvoice_turn_audio_apply_volume(struct bkvoice_turn_audio_s *audio)
+{
+  unsigned int desired = audio->volume_percent;
+  unsigned int observed;
+#ifdef CONFIG_BK7258_VOICE_VOLUME_PERSISTENCE
+  /* Every control path commits to the device volume store.  A previous
+   * live override must not hide a later settings/CLI change on next reply.
+   */
+  bool override = false;
+#else
+  bool override = audio->volume_override;
+#endif
+  int ret;
+
+  if (!override)
+    {
+#ifdef CONFIG_BK7258_VOICE_VOLUME_PERSISTENCE
+      ret = bkvoice_volume_store_get(&desired);
+      if (ret < 0)
+        {
+          /* Missing, not-yet-mounted or damaged preference data must not
+           * take the core voice path offline. A later explicit mutation can
+           * still report the precise storage failure to the App.
+           */
+          return 0;
+        }
+#elif defined(CONFIG_BK7258_PREFERENCES)
+      ret = bk7258_preferences_playback_volume(&desired);
+      if (ret < 0)
+        {
+          return ret;
+        }
+#else
+      return 0;
+#endif
+    }
+
+  if (desired > 100u)
+    {
+      return -ERANGE;
+    }
+
+  ret = bkvoice_turn_audio_volume_policy(audio, true, desired, &observed);
+  audio->volume_override = override;
+  return ret;
+}
+
 static int bkvoice_turn_audio_dac_prepare(void *context)
 {
   struct bkvoice_turn_audio_s *audio = context;
@@ -297,12 +490,24 @@ static int bkvoice_turn_audio_dac_prepare(void *context)
       return -EALREADY;
     }
 
+  __atomic_store_n(&audio->dac_completed, false, __ATOMIC_RELEASE);
+  ret = media_player_set_event_callback(audio->dac_handle, audio,
+                                        bkvoice_turn_audio_event);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
   ret = media_player_prepare(audio->dac_handle, NULL,
                              BKVOICE_TURN_AUDIO_OPTIONS);
   if (ret >= 0)
     {
       audio->dac_prepared = true;
-      return 0;
+      /* Mark prepared before applying policy so failures still release the
+       * player's reservation and buffers through the normal turn cleanup.
+       */
+
+      return bkvoice_turn_audio_apply_volume(audio);
     }
 
   return ret;
@@ -356,7 +561,6 @@ static ssize_t bkvoice_turn_audio_dac_write(void *context,
 static int bkvoice_turn_audio_dac_drain(void *context)
 {
   struct bkvoice_turn_audio_s *audio = context;
-  int ret;
 
   if (audio == NULL || audio->dac_handle == NULL)
     {
@@ -368,21 +572,19 @@ static int bkvoice_turn_audio_dac_drain(void *context)
       return 0;
     }
 
-  /* The standalone BK7258 media_player_stop() drains pending PCM, stops the
-   * lower half and releases its reservation while retaining the player
-   * handle.  Model that folded public-backend operation here; dac_stop()
-   * below is therefore idempotent after a successful drain.
-   */
+  media_player_close_socket(audio->dac_handle);
+  return -EINPROGRESS;
+}
 
-  ret = media_player_stop(audio->dac_handle);
-  if (ret >= 0)
+static int bkvoice_turn_audio_dac_result(void *context)
+{
+  struct bkvoice_turn_audio_s *audio = context;
+  if (!__atomic_exchange_n(&audio->dac_completed, false, __ATOMIC_ACQ_REL))
     {
-      audio->dac_prepared = false;
-      audio->dac_started = false;
-      return 0;
+      return -EAGAIN;
     }
 
-  return ret;
+  return audio->dac_result;
 }
 
 static int bkvoice_turn_audio_dac_stop(void *context)
@@ -400,11 +602,12 @@ static int bkvoice_turn_audio_dac_stop(void *context)
       return 0;
     }
 
-  /* Retry the folded cleanup only when dac_drain() failed. */
+  /* Cancellation skips drain; the public close API stops immediately. */
 
-  ret = media_player_stop(audio->dac_handle);
+  ret = media_player_close(audio->dac_handle, 0);
   if (ret >= 0)
     {
+      audio->dac_handle = NULL;
       audio->dac_prepared = false;
       audio->dac_started = false;
       return 0;
@@ -428,7 +631,7 @@ static int bkvoice_turn_audio_dac_release(void *context)
       return 0;
     }
 
-  ret = media_player_close(audio->dac_handle, 1);
+  ret = media_player_close(audio->dac_handle, 0);
   if (ret >= 0)
     {
       audio->dac_handle = NULL;
@@ -457,9 +660,47 @@ static const struct bkvoice_turn_audio_ops_s g_bkvoice_turn_audio_ops =
   .dac_start = bkvoice_turn_audio_dac_start,
   .dac_write = bkvoice_turn_audio_dac_write,
   .dac_drain = bkvoice_turn_audio_dac_drain,
+  .dac_result = bkvoice_turn_audio_dac_result,
   .dac_stop = bkvoice_turn_audio_dac_stop,
   .dac_release = bkvoice_turn_audio_dac_release,
+  .volume = bkvoice_turn_audio_volume,
 };
+
+static int bkvoice_turn_capture_attach(void *context)
+{
+  return bkvoice_turn_audio_reader_attach(context);
+}
+
+static ssize_t bkvoice_turn_capture_read(void *context, void *pcm,
+                                         size_t bytes)
+{
+  return bkvoice_turn_audio_read(context, pcm, bytes);
+}
+
+static int bkvoice_turn_capture_interrupt(void *context)
+{
+  return bkvoice_turn_audio_reader_stop(context);
+}
+
+static int bkvoice_turn_capture_detach(void *context)
+{
+  return bkvoice_turn_audio_reader_detach(context);
+}
+
+static const struct bkvoice_capture_source_ops_s
+  g_bkvoice_turn_capture_source_ops =
+{
+  .attach = bkvoice_turn_capture_attach,
+  .read = bkvoice_turn_capture_read,
+  .interrupt = bkvoice_turn_capture_interrupt,
+  .detach = bkvoice_turn_capture_detach,
+};
+
+const struct bkvoice_capture_source_ops_s *
+bkvoice_turn_audio_capture_source_ops(void)
+{
+  return &g_bkvoice_turn_capture_source_ops;
+}
 
 const struct bkvoice_turn_audio_ops_s *bkvoice_turn_audio_ops(void)
 {

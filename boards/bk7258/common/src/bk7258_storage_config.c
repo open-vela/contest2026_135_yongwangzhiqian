@@ -106,7 +106,7 @@ static const struct bk7258_radio_storage_config_s
 };
 #endif
 
-#ifdef BK7258_STORAGE_TOPOLOGY_ONCHIP_PERSISTENT
+#ifdef CONFIG_BK7258_ONCHIP_DATAFS
 static const struct bk7258_storage_region_s g_bk7258_data_storage =
 {
   .start = BK7258_DATA_RAW_PHYSICAL_OFFSET,
@@ -122,7 +122,7 @@ const struct bk7258_storage_config_s g_bk7258_board_storage_config =
 #if defined(CONFIG_BK7258_BT_IPC) || defined(CONFIG_BK7258_WIFI_VNET)
   .radio_storage = &g_bk7258_radio_storage,
 #endif
-#ifdef BK7258_STORAGE_TOPOLOGY_ONCHIP_PERSISTENT
+#ifdef CONFIG_BK7258_ONCHIP_DATAFS
   .data_storage = &g_bk7258_data_storage,
 #endif
   .reset_marker_address = BK7258_RESET_MARKER_START,

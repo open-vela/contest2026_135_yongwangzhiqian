@@ -26,6 +26,10 @@
 
 #include "bk7258_internal.h"
 
+#ifdef CONFIG_INPUT_BUTTONS
+int bk7258_board_buttons_initialize(void);
+#endif
+
 /****************************************************************************
  * Private Data
  ****************************************************************************/
@@ -99,7 +103,24 @@ static int bk7258_cp_bringup_run(void)
     }
 #endif
 
-  return bk7258_cp_platform_finish();
+  ret = bk7258_cp_platform_finish();
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+#ifdef CONFIG_INPUT_BUTTONS
+  /* The CP platform is ready before a selected board binds its physical
+   * lower half.  Boards which select INPUT_BUTTONS provide this hook.
+   */
+  ret = bk7258_board_buttons_initialize();
+  if (ret < 0)
+    {
+      return ret;
+    }
+#endif
+
+  return 0;
 }
 
 /****************************************************************************
@@ -125,6 +146,12 @@ int bk7258_cp_bringup_initialize(void)
   if (status.state == BK7258_PLATFORM_DONE)
     {
       ret = status.terminal_result;
+#ifdef CONFIG_INPUT_BUTTONS
+      if (ret == 0)
+        {
+          ret = bk7258_board_buttons_initialize();
+        }
+#endif
     }
   else if (status.state != BK7258_PLATFORM_NEW)
     {

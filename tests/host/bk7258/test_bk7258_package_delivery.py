@@ -5,22 +5,27 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+import stat
 import sys
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 
 REPOSITORY = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPOSITORY / "tools/bk7258"))
+sys.path.insert(0, str(REPOSITORY / "gateway/shaniu"))
 
 from _lib import build as build_domain  # noqa: E402
 from _lib import image as image_domain  # noqa: E402
 from _lib import layout as layout_domain  # noqa: E402
 from _lib import package as package_domain  # noqa: E402
 from _lib import product as product_domain  # noqa: E402
+from shaniu_gateway.firmware import load_firmware_releases  # noqa: E402
 
 
 class ProductDeliveryTest(unittest.TestCase):
@@ -99,6 +104,25 @@ class ProductDeliveryTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_clean_prunes_only_stale_role_identities(self) -> None:
+        workspace = self.root / "workspace"
+        role_root = (
+            workspace / "out/bk7258/test_board/cp__ap/layout"
+            / "roles/mcuboot/ap"
+        )
+        current = role_root / "bk7258-role-1111111111111111"
+        stale = role_root / "bk7258-role-2222222222222222"
+        current.mkdir(parents=True)
+        stale.mkdir()
+        (current / "keep").write_text("current", encoding="utf-8")
+        (stale / "drop").write_text("stale", encoding="utf-8")
+
+        build_domain._prune_stale_role_outputs(current, workspace)
+
+        self.assertEqual((current / "keep").read_text(encoding="utf-8"),
+                         "current")
+        self.assertFalse(stale.exists())
+
     def _inputs(self, stem: str) -> tuple[Path, Path]:
         package = self.root / f"{stem}.bkpack"
         package_domain.create(
@@ -157,6 +181,68 @@ class ProductDeliveryTest(unittest.TestCase):
             base_evidence=self.base_evidence,
             version="1.2.3+4",
             output=output,
+        )
+        return output
+
+    def _ota_delivery(self, stem: str) -> Path:
+        package, manifest = self._inputs(stem)
+        recovery = product_domain.materialize_recovery(
+            package, self.policy, self.base, self.base_evidence
+        )
+        ota_images = image_domain.ImageSet(
+            self.layout,
+            tuple(row for row in self.images.writes if row.artifact in {'cp', 'ap'}),
+            (),
+            (),
+        )
+        public = bytearray(range(91))
+        public[-65] = 0x04
+        public_bytes = bytes(public)
+        evidence = {
+            'mode': 'signed-ota',
+            'algorithm': 'ecdsa-p256-sha256',
+            'mcuboot_public_fingerprint': hashlib.sha256(public_bytes).hexdigest(),
+            'mcuboot_public_der': public_bytes.hex(),
+            'rollback': 'otp-readonly-plus-explicit-software-floor',
+            'trailer': 'pending-v1',
+            'images': [
+                {
+                    'artifact': row.artifact,
+                    'signed_sha256': hashlib.sha256(row.data).hexdigest(),
+                    'version': '1.2.4+5',
+                    'security_counter': 5,
+                }
+                for row in ota_images.writes
+            ],
+        }
+        ota = self.root / f'{stem}-ota.bkpack'
+        package_domain.create(
+            image_set=ota_images,
+            member_names={'cp': 'cp.bin', 'ap': 'ap.bin'},
+            sdk_evidence={},
+            trust_evidence=evidence,
+            physical_board='test_board',
+            output=ota,
+            catalog_signer=lambda _: b'\x30\x06\x02\x01\x01\x02\x01\x01',
+        )
+
+        def fixture_verifier(candidate: Path) -> object:
+            report = package_domain.verify(candidate)
+            self.assertEqual(report['security'], 'signed-ota')
+            return report
+
+        output = self.root / f'{stem}-delivery.zip'
+        product_domain.create_delivery(
+            package=package,
+            build_manifest=manifest,
+            policy=self.policy,
+            recovery=recovery,
+            base_evidence=self.base_evidence,
+            version='1.2.4+5',
+            output=output,
+            ota_package=ota,
+            ota_required_source_version='1.2.3+4',
+            package_verifier=fixture_verifier,
         )
         return output
 
@@ -242,6 +328,89 @@ class ProductDeliveryTest(unittest.TestCase):
                 output=output,
             )
         self.assertEqual(output.read_bytes(), accepted)
+
+    def test_gateway_registry_projects_only_verified_ota_metadata(self) -> None:
+        delivery = self._ota_delivery('gateway')
+        output = self.root / 'firmware-releases.json'
+        calls = []
+
+        def fixture_verifier(candidate: Path) -> object:
+            calls.append(hashlib.sha256(candidate.read_bytes()).hexdigest())
+            return package_domain.verify(candidate)
+
+        report = product_domain.create_gateway_release_registry(
+            (delivery,), output, package_verifier=fixture_verifier,
+        )
+        self.assertEqual(report['releases'], 1)
+        self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
+        self.assertTrue(calls)
+        registry = json.loads(output.read_text(encoding='utf-8'))
+        self.assertEqual(set(registry), {'format', 'releases'})
+        self.assertEqual(registry['format'], 'shaniu.firmware-release-registry/1')
+        self.assertEqual(len(registry['releases']), 1)
+        release = registry['releases'][0]
+        self.assertEqual(release['device_id'], 'test-unit:0001')
+        self.assertEqual(release['target_version'], '1.2.4+5')
+        self.assertEqual(release['required_source_version'], '1.2.3+4')
+        self.assertEqual(release['physical_board'], 'test_board')
+        self.assertNotIn('path', release)
+        self.assertNotIn('uri', release)
+
+        with zipfile.ZipFile(delivery) as outer:
+            delivery_manifest = json.loads(outer.read('release.json'))
+            ota_row = delivery_manifest['components']['ota']['package']
+            ota_bytes = outer.read(ota_row['path'])
+        with zipfile.ZipFile(io.BytesIO(ota_bytes)) as ota_archive:
+            expected_manifest = hashlib.sha256(ota_archive.read('catalog.json')).hexdigest()
+        self.assertEqual(release['manifest_sha256'], expected_manifest)
+        self.assertEqual(release['package_sha256'], hashlib.sha256(ota_bytes).hexdigest())
+        self.assertEqual(release['package_size_bytes'], len(ota_bytes))
+        loaded = load_firmware_releases(output)
+        self.assertEqual(
+            loaded.compatible(
+                'test-unit:0001', '1.2.3+4',
+                release['required_source_root_sha256'],
+            )[0].projection(),
+            {key: value for key, value in release.items() if key != 'device_id'},
+        )
+
+        with self.assertRaises(product_domain.ProductError):
+            product_domain.create_gateway_release_registry(
+                (delivery,), output, package_verifier=fixture_verifier,
+            )
+
+    def test_gateway_registry_rejects_missing_ota_and_duplicates(self) -> None:
+        without_ota = self._delivery('without-ota')
+        with self.assertRaises(product_domain.ProductError):
+            product_domain.create_gateway_release_registry(
+                (without_ota,), self.root / 'missing.json',
+                package_verifier=lambda candidate: package_domain.verify(candidate),
+            )
+        delivery = self._ota_delivery('duplicate')
+        with self.assertRaises(product_domain.ProductError):
+            product_domain.create_gateway_release_registry(
+                (delivery, delivery), self.root / 'duplicate.json',
+                package_verifier=lambda candidate: package_domain.verify(candidate),
+            )
+        with self.assertRaises(product_domain.ProductError):
+            product_domain.create_gateway_release_registry(
+                (delivery,), self.root / 'unverified.json', package_verifier=None,
+            )
+
+        verified = product_domain.verify_delivery(
+            delivery,
+            package_verifier=lambda candidate: package_domain.verify(candidate),
+        )
+        oversized = dict(verified)
+        oversized['firmware_release'] = dict(verified['firmware_release'])
+        oversized['firmware_release']['package_size_bytes'] = \
+            product_domain.MAX_GATEWAY_PACKAGE_SIZE + 1
+        with mock.patch.object(product_domain, 'verify_delivery', return_value=oversized):
+            with self.assertRaises(product_domain.ProductError):
+                product_domain.create_gateway_release_registry(
+                    (delivery,), self.root / 'oversized.json',
+                    package_verifier=lambda candidate: package_domain.verify(candidate),
+                )
 
     def test_release_directory_publish_never_replaces_existing_output(self) -> None:
         staging = self.root / "staging-release"

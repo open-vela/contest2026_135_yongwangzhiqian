@@ -21,6 +21,7 @@
 
 #include <nuttx/fs/fs.h>
 #include <nuttx/mutex.h>
+#include <nuttx/signal.h>
 
 #include <arch/chip/bk7258_usbmsc.h>
 
@@ -86,7 +87,7 @@ struct usbd_msc_cfg_priv {
 
 #ifdef CONFIG_USBDEV_MSC_THREAD
 static volatile uint8_t thread_op;
-static usb_osal_sem_t msc_sem;
+static beken_semaphore_t msc_sem;
 static usb_osal_thread_t msc_thread = NULL;
 static volatile uint32_t current_byte_read;
 #endif
@@ -118,105 +119,47 @@ static mutex_t g_bk7258_usbmsc_lock = NXMUTEX_INITIALIZER;
 volatile static uint8_t gs_status = 0;
 static void usbd_set_status(uint8_t status);
 
-const uint8_t msc_storage_descriptor[] = {
-    USB_DEVICE_DESCRIPTOR_INIT(USB_2_1, 0x00, 0x00, 0x00, USBD_VID, USBD_PID, 0x0200, 0x01),
+const uint8_t msc_storage_descriptor[] __attribute__((aligned(4))) = {
+    /* Keep the control-plane descriptor deliberately small, just like the
+     * proven CDC path.  Product identity for a mass-storage disk comes from
+     * SCSI INQUIRY; optional USB strings only add EP0 transactions during the
+     * sensitive CDC-to-MSC re-enumeration window.
+     */
+    0x12,                       /* bLength */
+    USB_DESCRIPTOR_TYPE_DEVICE, /* bDescriptorType */
+    0x00, 0x02,                 /* bcdUSB 2.0 */
+    0x00,                       /* bDeviceClass */
+    0x00,                       /* bDeviceSubClass */
+    0x00,                       /* bDeviceProtocol */
+    0x40,                       /* bMaxPacketSize0 */
+    USBD_VID & 0xff, (USBD_VID >> 8) & 0xff,
+    USBD_PID & 0xff, (USBD_PID >> 8) & 0xff,
+    0x00, 0x02,                 /* bcdDevice 2.0 */
+    0x00,                       /* iManufacturer */
+    0x00,                       /* iProduct */
+    0x00,                       /* iSerialNumber */
+    0x01,                       /* bNumConfigurations */
     USB_CONFIG_DESCRIPTOR_INIT(USB_CONFIG_SIZE, 0x01, 0x01, USB_CONFIG_BUS_POWERED, USBD_MAX_POWER),
-    MSC_DESCRIPTOR_INIT(0x00, MSC_OUT_EP, MSC_IN_EP, 0x02),
-    ///////////////////////////////////////
-    /// string0 descriptor
-    ///////////////////////////////////////
-    USB_LANGID_INIT(USBD_LANGID_STRING),
-    ///////////////////////////////////////
-    /// string1 descriptor
-    ///////////////////////////////////////
-    0x14,                       /* bLength */
-    USB_DESCRIPTOR_TYPE_STRING, /* bDescriptorType */
-    'B', 0x00,                  /* wcChar0 */
-    'e', 0x00,                  /* wcChar1 */
-    'k', 0x00,                  /* wcChar2 */
-    'e', 0x00,                  /* wcChar3 */
-    'n', 0x00,                  /* wcChar4 */
-    '-', 0x00,                  /* wcChar5 */
-    'U', 0x00,                  /* wcChar6 */
-    'S', 0x00,                  /* wcChar7 */
-    'B', 0x00,                  /* wcChar8 */
-    ///////////////////////////////////////
-    /// string2 descriptor
-    ///////////////////////////////////////
-    0x26,                       /* bLength */
-    USB_DESCRIPTOR_TYPE_STRING, /* bDescriptorType */
-    'B', 0x00,                  /* wcChar0 */
-    'e', 0x00,                  /* wcChar1 */
-    'k', 0x00,                  /* wcChar2 */
-    'e', 0x00,                  /* wcChar3 */
-    'n', 0x00,                  /* wcChar4 */
-    '-', 0x00,                  /* wcChar5 */
-    'U', 0x00,                  /* wcChar6 */
-    'S', 0x00,                  /* wcChar7 */
-    'B', 0x00,                  /* wcChar8 */
-    ' ', 0x00,                  /* wcChar9 */
-    'M', 0x00,                  /* wcChar10 */
-    'S', 0x00,                  /* wcChar11 */
-    'C', 0x00,                  /* wcChar12 */
-    ' ', 0x00,                  /* wcChar13 */
-    'D', 0x00,                  /* wcChar14 */
-    'E', 0x00,                  /* wcChar15 */
-    'M', 0x00,                  /* wcChar16 */
-    'O', 0x00,                  /* wcChar17 */
-    ///////////////////////////////////////
-    /// string3 descriptor
-    ///////////////////////////////////////
-    0x16,                       /* bLength */
-    USB_DESCRIPTOR_TYPE_STRING, /* bDescriptorType */
-    '2', 0x00,                  /* wcChar0 */
-    '0', 0x00,                  /* wcChar1 */
-    '2', 0x00,                  /* wcChar2 */
-    '2', 0x00,                  /* wcChar3 */
-    '1', 0x00,                  /* wcChar4 */
-    '2', 0x00,                  /* wcChar5 */
-    '3', 0x00,                  /* wcChar6 */
-    '4', 0x00,                  /* wcChar7 */
-    '5', 0x00,                  /* wcChar8 */
-    '6', 0x00,                  /* wcChar9 */
-#ifdef CONFIG_USB_HS
-    ///////////////////////////////////////
-    /// device qualifier descriptor
-    ///////////////////////////////////////
-    0x0a,
-    USB_DESCRIPTOR_TYPE_DEVICE_QUALIFIER,
-    0x00,
-    0x02,
-    0x00,
-    0x00,
-    0x00,
-    0x40,
-    0x01,
-    0x00,
-#endif
+    MSC_DESCRIPTOR_INIT(0x00, MSC_OUT_EP, MSC_IN_EP, 0x00),
     0x00
 };
 
-static const uint8_t msc_storage_bos_desc[] = {
-    0x05,
-    USB_DESCRIPTOR_TYPE_BINARY_OBJECT_STORE,
-    0x0c & 0xff,
-    (0x0c & 0xff00) >> 8,
-    0x01,
-    ///////////////////////////////////////
-    /// USB 2.0 Extension Descriptor
-    ///////////////////////////////////////
-    0x07,
-    USB_DESCRIPTOR_TYPE_DEVICE_CAPABILITY,
-    0x02,
-    0x06, 0x00, 0x00, 0x00,
-};
-
-static struct usb_bos_descriptor msc_storage_bos_descriptor = {
-    .string = (uint8_t *)msc_storage_bos_desc,
-    .string_len = 0xc,
-};
+_Static_assert(sizeof(msc_storage_descriptor) == 18u + USB_CONFIG_SIZE + 1u,
+               "BK7258 MSC descriptor length mismatch");
 
 static struct usbd_interface gs_intf0;
+
+#define BK7258_MUSB_POWER_REG        0x46000001u
+#define BK7258_MUSB_POWER_SOFTCONN   (1u << 6)
+#define BK7258_USB_DETACH_US         10000u
+
+static void bk7258_usbmsc_soft_disconnect(void)
+{
+    volatile uint8_t *power = (volatile uint8_t *)BK7258_MUSB_POWER_REG;
+
+    *power &= (uint8_t)~BK7258_MUSB_POWER_SOFTCONN;
+    (void)nxsig_usleep(BK7258_USB_DETACH_US);
+}
 
 
 static void usbd_msc_reset(void)
@@ -254,11 +197,13 @@ void msc_storage_notify_handler(uint8_t event, void *arg)
 {
     switch (event) {
         case USBD_EVENT_ERROR:
+            break;
         case USBD_EVENT_RESET:
             USB_LOG_VBS("USBD_EVENT_RESET\r\n");
             usbd_msc_reset();
-            thread_op = MSC_THREAD_OP_RESET;
-            usb_osal_sem_give(msc_sem);
+            break;
+        case USBD_EVENT_CONNECTED:
+        case USBD_EVENT_DISCONNECTED:
             break;
         case USBD_EVENT_CONFIGURED:
             USB_LOG_VBS("Start reading cbw\r\n");
@@ -266,8 +211,6 @@ void msc_storage_notify_handler(uint8_t event, void *arg)
             break;
         case USBD_EVENT_SUSPEND:
             USB_LOG_VBS("USBD_EVENT_SUSPEND\r\n");
-            thread_op = MSC_THREAD_OP_SUSPEND;
-            usb_osal_sem_give(msc_sem);
             break;
         case USBD_EVENT_RESUME:
 
@@ -814,7 +757,7 @@ static bool SCSI_processRead(void)
     /* Start reading one sector */
 #ifdef CONFIG_USBDEV_MSC_THREAD
     thread_op = MSC_THREAD_OP_READ_MEM;
-    usb_osal_sem_give(msc_sem);
+    (void)rtos_set_semaphore(&msc_sem);
     return true;
 #else
     if (usbd_msc_sector_read(usbd_msc_cfg.start_sector, usbd_msc_cfg.block_buffer, transfer_len) != 0) {
@@ -868,7 +811,7 @@ static bool SCSI_processWrite(uint32_t nbytes)
 #ifdef CONFIG_USBDEV_MSC_THREAD
     thread_op = MSC_THREAD_OP_WRITE_MEM;
     current_byte_read = nbytes;
-    usb_osal_sem_give(msc_sem);
+    (void)rtos_set_semaphore(&msc_sem);
     return true;
 #else
     if (usbd_msc_sector_write(usbd_msc_cfg.start_sector, usbd_msc_cfg.block_buffer, nbytes) != 0) {
@@ -1067,7 +1010,10 @@ static void usbd_msc_thread(void *argument)
     (void)argument;
 
     while (1) {
-        usb_osal_sem_take(msc_sem, 0xffffffff);
+        if (rtos_get_semaphore(&msc_sem, 0xffffffff) != BK_OK) {
+            rtos_delay_milliseconds(1);
+            continue;
+        }
 
         switch (thread_op) {
             case MSC_THREAD_OP_READ_MEM:
@@ -1135,10 +1081,15 @@ struct usbd_interface *usbd_msc_init_intf(struct usbd_interface *intf, const uin
 #ifdef CONFIG_USBDEV_MSC_THREAD
     if(msc_thread == NULL)
     {
-        msc_sem = usb_osal_sem_create(0);
+        if (rtos_init_semaphore(&msc_sem, 1) != BK_OK) {
+            USB_LOG_ERR("failed to create msc semaphore\r\n");
+            return NULL;
+        }
         msc_thread = usb_osal_thread_create("usbd_msc", CONFIG_USBDEV_MSC_STACKSIZE, CONFIG_USBDEV_MSC_PRIO, usbd_msc_thread, NULL);
         if (msc_thread == NULL) {
             USB_LOG_ERR("no enough memory to alloc msc thread\r\n");
+            (void)rtos_deinit_semaphore(&msc_sem);
+            msc_sem = NULL;
             return NULL;
         }
     }
@@ -1269,8 +1220,11 @@ int bk7258_usbmsc_initialize(const char *blockdev)
 
     ret = nxmutex_lock(&g_bk7258_usbmsc_lock);
     if (ret < 0) {
+        syslog(LOG_ERR, "BK7258 USBMSC START stage=lock-fail ret=%d\n",
+               ret);
         return ret;
     }
+
 
     if (s_msc_storage_init) {
         nxmutex_unlock(&g_bk7258_usbmsc_lock);
@@ -1279,9 +1233,13 @@ int bk7258_usbmsc_initialize(const char *blockdev)
 
     ret = open_blockdriver(blockdev, 0, &inode);
     if (ret < 0) {
+        syslog(LOG_ERR,
+               "BK7258 USBMSC START stage=block-open-fail dev=%s ret=%d\n",
+               blockdev, ret);
         nxmutex_unlock(&g_bk7258_usbmsc_lock);
         return ret;
     }
+
 
     if (inode == NULL || inode->u.i_bops == NULL ||
         inode->u.i_bops->geometry == NULL ||
@@ -1298,8 +1256,15 @@ int bk7258_usbmsc_initialize(const char *blockdev)
         geometry.geo_nsectors > UINT32_MAX ||
         geometry.geo_sectorsize > UINT16_MAX) {
         ret = ret < 0 ? ret : -ENODEV;
+        syslog(LOG_ERR,
+               "BK7258 USBMSC START stage=geometry-fail ret=%d "
+               "available=%u sectors=%lu size=%u\n",
+               ret, geometry.geo_available ? 1u : 0u,
+               (unsigned long)geometry.geo_nsectors,
+               (unsigned int)geometry.geo_sectorsize);
         goto errout_with_inode;
     }
+
 
     g_bk7258_usbmsc_inode = inode;
     memcpy(&g_bk7258_usbmsc_geometry, &geometry, sizeof(geometry));
@@ -1308,18 +1273,22 @@ int bk7258_usbmsc_initialize(const char *blockdev)
     memset(&gs_intf0, 0, sizeof(gs_intf0));
     memset(mass_ep_data, 0, sizeof(mass_ep_data));
     usbd_desc_register(msc_storage_descriptor);
-    usbd_bos_desc_register(&msc_storage_bos_descriptor);
     intf = usbd_msc_init_intf(&gs_intf0, MSC_OUT_EP, MSC_IN_EP);
     if (intf == NULL) {
         ret = -ENOMEM;
+        syslog(LOG_ERR,
+               "BK7258 USBMSC START stage=class-fail ret=%d\n", ret);
         goto errout_with_state;
     }
 
     usbd_add_interface(intf);
     ret = usbd_initialize();
     if (ret < 0) {
+        syslog(LOG_ERR,
+               "BK7258 USBMSC START stage=controller-fail ret=%d\n", ret);
         goto errout_with_state;
     }
+
 
     syslog(LOG_INFO,
            "BK7258 USBMSC: ready blockdev=%s sectors=%lu size=%u\n",
@@ -1357,6 +1326,7 @@ int bk7258_usbmsc_uninitialize(void)
     }
 
     s_msc_storage_init = 0;
+    bk7258_usbmsc_soft_disconnect();
     ret = usbd_deinitialize();
     inode = g_bk7258_usbmsc_inode;
     g_bk7258_usbmsc_inode = NULL;

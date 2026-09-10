@@ -25,13 +25,63 @@
 #define BKVOICE_STATUS_SERVICE_READY (1u << 0)
 #define BKVOICE_STATUS_BLOCK_PRESENT (1u << 1)
 #define BKVOICE_STATUS_LOCAL_ONLY    (1u << 2)
+#define BKVOICE_STATUS_PTT_OWNER_READY (1u << 3)
+#define BKVOICE_STATUS_CONFIGURED      (1u << 4)
+#define BKVOICE_STATUS_CONNECTED       (1u << 5)
+#define BKVOICE_STATUS_GATEWAY_READY   (1u << 6)
+#define BKVOICE_STATUS_PTT_LINK        (1u << 7)
+#define BKVOICE_STATUS_PTT_PRESSED     (1u << 8)
+#define BKVOICE_STATUS_TLS_AVAILABLE   (1u << 9)
+#define BKVOICE_STATUS_CLOUD_MODE      (1u << 10)
+#define BKVOICE_STATUS_CLOUD_READY     (1u << 11)
+#define BKVOICE_STATUS_CLOUD_BUSY      (1u << 12)
+
+#define BKVOICE_PROVISION_MAX_BYTES    8192u
+#define BKVOICE_PROVISION_CHUNK_BYTES  64u
+
+#define BKVOICE_PREFS_DEFAULT_VOLUME  (1u << 0)
+#define BKVOICE_PREFS_DEFAULT_PERSONA (1u << 1)
 
 enum bkvoice_rpc_command_e
 {
   BKVOICE_RPC_STATUS = 1,
   BKVOICE_RPC_VERIFY = 2,
   BKVOICE_RPC_PLAY = 3,
+  BKVOICE_RPC_CONFIG_BEGIN = 4,
+  BKVOICE_RPC_CONFIG_DATA = 5,
+  BKVOICE_RPC_CONFIG_COMMIT = 6,
+  BKVOICE_RPC_CONFIG_CLEAR = 7,
+  BKVOICE_RPC_CONNECT = 8,
+  BKVOICE_RPC_DISCONNECT = 9,
+  BKVOICE_RPC_PREFS_GET = 10,
+  BKVOICE_RPC_PREFS_VOLUME = 11,
+  BKVOICE_RPC_PREFS_PERSONA = 12,
+  BKVOICE_RPC_HIL_CAPTURE = 0x100,
   BKVOICE_RPC_RESPONSE = 0x8000,
+};
+
+struct bkvoice_rpc_pack_result_s
+{
+  uint32_t version;
+  uint32_t clip_count;
+  uint32_t error_line;
+};
+
+union bkvoice_rpc_result_u
+{
+  struct bkvoice_rpc_pack_result_s pack;
+  struct
+  {
+    uint32_t turn_state;
+    uint32_t presses;
+    int32_t last_error;
+  } live;
+  struct
+  {
+    uint32_t volume_percent;
+    uint32_t persona;
+    uint32_t default_flags;
+  } preferences;
 };
 
 struct bkvoice_rpc_request_s
@@ -54,9 +104,7 @@ struct bkvoice_rpc_response_s
   uint32_t sequence;
   int32_t status;
   uint32_t flags;
-  uint32_t pack_version;
-  uint32_t clip_count;
-  uint32_t error_line;
+  union bkvoice_rpc_result_u result;
   uint32_t data_bytes;
   uint32_t duration_ms;
   char speaker_id[BKVOICE_ID_SIZE];
@@ -77,6 +125,8 @@ _Static_assert(sizeof(struct bkvoice_rpc_response_s) == 92,
                "bkvoice response wire size changed");
 _Static_assert(offsetof(struct bkvoice_rpc_response_s, status) == 16,
                "bkvoice response status offset changed");
+_Static_assert(offsetof(struct bkvoice_rpc_response_s, result) == 24,
+               "bkvoice response result offset changed");
 _Static_assert(offsetof(struct bkvoice_rpc_response_s, speaker_id) == 44,
                "bkvoice response speaker offset changed");
 

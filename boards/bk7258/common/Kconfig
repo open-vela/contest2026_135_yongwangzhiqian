@@ -91,11 +91,22 @@ config BK7258_STORAGE_ONCHIP_PERSISTENT
 	bool "Persistent data on BK7258 on-chip Flash"
 	default n
 	depends on ARCH_BOARD_BK7258 && ARCH_CHIP_BK7258 && !BK7258_AP_CORE
-	select BK7258_FLASH_MTD
-	select FS_LITTLEFS
+	select BK7258_ONCHIP_DATAFS
 	help
 		Expose the CSV-selected persistent_data range through MTD and mount
 		LittleFS at /data.  Ordinary boot never auto-formats the range.
+
+config BK7258_ONCHIP_DATAFS
+	bool "CP on-chip private data filesystem"
+	default n
+	depends on ARCH_BOARD_BK7258 && ARCH_CHIP_BK7258 && !BK7258_AP_CORE
+	select BK7258_FLASH_MTD
+	select FS_LITTLEFS
+	help
+		Expose the CSV-selected persistent_data range at /data on CP.
+		This filesystem may coexist with AP fixed/removable primary storage;
+		it does not change the CSV's primary storage topology or export /data
+		through USB MSC. Boot only mounts an existing LittleFS, never formats.
 
 config BK7258_STORAGE_REMOVABLE_BLOCK
 	bool "Persistent data on removable block media"

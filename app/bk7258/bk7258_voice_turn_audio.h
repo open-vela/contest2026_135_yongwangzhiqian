@@ -9,6 +9,7 @@
 #ifndef __APP_BK7258_BK7258_VOICE_TURN_AUDIO_H
 #define __APP_BK7258_BK7258_VOICE_TURN_AUDIO_H
 
+#include "bk7258_voice_capture.h"
 #include "bk7258_voice_turn.h"
 
 #include <stdbool.h>
@@ -24,6 +25,10 @@ struct bkvoice_turn_audio_s
   volatile bool mic_reader_active;
   bool dac_prepared;
   bool dac_started;
+  bool dac_completed;
+  int dac_result;
+  bool volume_override;
+  unsigned int volume_percent;
 };
 
 /* Initialization does not open a device.  All operations are serialized by
@@ -38,6 +43,9 @@ int bkvoice_turn_audio_reader_attach(struct bkvoice_turn_audio_s *audio);
 int bkvoice_turn_audio_reader_detach(struct bkvoice_turn_audio_s *audio);
 ssize_t bkvoice_turn_audio_read(struct bkvoice_turn_audio_s *audio,
                                 void *pcm, size_t bytes);
+int bkvoice_turn_audio_reader_stop(struct bkvoice_turn_audio_s *audio);
+const struct bkvoice_capture_source_ops_s *
+  bkvoice_turn_audio_capture_source_ops(void);
 bool bkvoice_turn_audio_released(const struct bkvoice_turn_audio_s *audio);
 
 #endif /* __APP_BK7258_BK7258_VOICE_TURN_AUDIO_H */

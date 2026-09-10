@@ -2,6 +2,10 @@
 
 target_sources(board PRIVATE bk7258_board_bringup.c)
 
+if(CONFIG_BK7258_AIDK_BUTTONS)
+  target_sources(board PRIVATE bk7258_aidk_buttons.c)
+endif()
+
 if(CONFIG_BK7258_AIDK_MOTOR)
   target_sources(board PRIVATE bk7258_aidk_motor.c)
 endif()

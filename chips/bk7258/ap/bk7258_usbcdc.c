@@ -27,10 +27,33 @@
 #include <nuttx/fs/fs.h>
 #include <nuttx/mutex.h>
 #include <nuttx/serial/serial.h>
+#include <nuttx/signal.h>
 
 #include <arch/chip/bk7258_usbcdc.h>
 
 #include <components/cherryusb/usbd_core.h>
+
+/* The pinned BK7258 CherryUSB DCD turns the PHY and clock off in
+ * usb_dc_deinit(), but leaves MUSB POWER.SOFTCONN set.  If another device
+ * class is started in the same boot, re-enabling the PHY exposes the stale
+ * pull-up before usb_dc_init() has reset EP0.  Disconnect explicitly while
+ * the controller clock is still running and give the host a clean detach
+ * interval before entering the SDK deinit path.
+ */
+
+#define BK7258_MUSB_POWER_REG      0x46000001u
+#define BK7258_MUSB_POWER_SOFTCONN (1u << 6)
+#define BK7258_USB_DETACH_US       10000u
+
+static void bk7258_usbcdc_soft_disconnect(void)
+{
+  FAR volatile uint8_t *power =
+    (FAR volatile uint8_t *)BK7258_MUSB_POWER_REG;
+
+  *power &= (uint8_t)~BK7258_MUSB_POWER_SOFTCONN;
+  (void)nxsig_usleep(BK7258_USB_DETACH_US);
+}
+
 #include <components/cherryusb/usbd_cdc.h>
 #include <components/cherryusb/usb_cdc.h>
 
@@ -43,6 +66,7 @@
 #define BK7258_USBCDC_EP_BULK_IN  0x82u
 #define BK7258_USBCDC_MPS_BULK    64u
 #define BK7258_USBCDC_MPS_INTR    8u
+#define BK7258_USBCDC_CONFIG_LEN   75u
 
 #ifdef CONFIG_BK7258_USBHOST
 #  error "BK7258_USBCDC and BK7258_USBHOST share the MUSB controller"
@@ -55,6 +79,7 @@
 #define USB_DT_STRING     0x03u
 #define USB_DT_INTERFACE  0x04u
 #define USB_DT_ENDPOINT   0x05u
+#define USB_DT_IAD        0x0bu
 
 #define USB_DT_CS_INTERFACE  0x24u
 #define CDC_HEADER           0x00u
@@ -110,7 +135,11 @@ static const uint8_t g_bk7258_usbcdc_descriptors[] =
   1,                        /* bNumConfigurations */
 
   /* Configuration */
-  9, USB_DT_CONFIG, 0x43, 0x00, 2, 1, 0, 0xc0, 0x32,
+  9, USB_DT_CONFIG, BK7258_USBCDC_CONFIG_LEN & 0xff,
+  (BK7258_USBCDC_CONFIG_LEN >> 8) & 0xff, 2, 1, 0, 0xc0, 0x32,
+
+  /* Interface association: group control and data as one CDC function. */
+  8, USB_DT_IAD, 0, 2, 0x02, 0x02, 0x01, 0,
 
   /* Interface 0: CDC ACM */
   9, USB_DT_INTERFACE, 0, 0, 1, 0x02, 0x02, 0x01, 0,
@@ -126,7 +155,7 @@ static const uint8_t g_bk7258_usbcdc_descriptors[] =
 
   /* Endpoint: interrupt IN */
   7, USB_DT_ENDPOINT, BK7258_USBCDC_EP_INTR_IN,
-  USB_ENDPOINT_XFER_INT, BK7258_USBCDC_MPS_INTR, 0x10, 0x00,
+  USB_ENDPOINT_XFER_INT, BK7258_USBCDC_MPS_INTR, 0x00, 0x10,
 
   /* Interface 1: CDC Data */
   9, USB_DT_INTERFACE, 1, 0, 2, 0x0a, 0x00, 0x00, 0,
@@ -141,6 +170,10 @@ static const uint8_t g_bk7258_usbcdc_descriptors[] =
 
   0,
 };
+
+_Static_assert(sizeof(g_bk7258_usbcdc_descriptors) ==
+               18u + BK7258_USBCDC_CONFIG_LEN + 1u,
+               "BK7258 CDC descriptor length mismatch");
 
 static struct usbd_endpoint g_bk7258_usbcdc_ep_intr;
 static struct usbd_endpoint g_bk7258_usbcdc_ep_out;
@@ -669,16 +702,28 @@ int bk7258_usbcdc_uninitialize(void)
       return -EBUSY;
     }
 
+  bk7258_usbcdc_soft_disconnect();
   ret = usbd_deinitialize();
   if (ret < 0)
     {
+      syslog(LOG_ERR, "BK7258 USBCDC STOP stage=controller-fail ret=%d\n",
+             ret);
       nxmutex_unlock(&priv->lock);
       return ret;
     }
 
   if (priv->serial_registered)
     {
-      unregister_driver(priv->config.devname);
+      ret = unregister_driver(priv->config.devname);
+      if (ret < 0)
+        {
+          syslog(LOG_ERR,
+                 "BK7258 USBCDC STOP stage=serial-fail dev=%s ret=%d\n",
+                 priv->config.devname, ret);
+          nxmutex_unlock(&priv->lock);
+          return ret;
+        }
+
       priv->serial_registered = false;
     }
 

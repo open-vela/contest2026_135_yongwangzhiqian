@@ -13,6 +13,9 @@
  * Included Files
  ****************************************************************************/
 
+#ifdef CONFIG_NETDB_DNSCLIENT
+#include <nuttx/net/dns.h>
+#endif
 #include <nuttx/config.h>
 
 #include <errno.h>
@@ -38,6 +41,7 @@
 #endif
 
 #include <arch/chip/bk7258_wifi.h>
+#include <arch/chip/bk7258_os_adapt.h>
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -182,6 +186,8 @@ static int bk7258_wifi_wait_cached_mac(FAR uint8_t *mac);
  */
 
 extern int bk_wifi_init(void);
+extern void *os_sram_malloc(size_t size);
+extern void os_free(void *ptr);
 extern int wdrv_txdata_sender(FAR struct pbuf *p, uint32_t vif_idx);
 extern struct bk7258_wifi_wdrv_host_prefix_s wdrv_host_env;
 
@@ -391,7 +397,12 @@ FAR struct pbuf *pbuf_alloc(int layer, uint16_t length, int type)
       return NULL;
     }
 
-  p = kmm_malloc(allocsize);
+  /* CP consumes the AP pbuf directly in the non-copying VNET profile.
+   * The system heap may include PSRAM, so use the existing SRAM-only
+   * allocator for both the shared descriptor and its packet storage.
+   */
+
+  p = os_sram_malloc(allocsize);
   if (p == NULL)
     {
       return NULL;
@@ -481,7 +492,7 @@ uint8_t pbuf_free(FAR struct pbuf *p)
 
       next = p->next;
       spin_unlock_irqrestore(&g_bk7258_wifi_pbuf_lock, flags);
-      kmm_free(p);
+      os_free(p);
       p = next;
       count++;
     }
@@ -545,8 +556,8 @@ int host_wlan_remove_netif(void)
    * a complete deinit path.
    */
 
-  priv->ifup = false;
   net_lock();
+  priv->ifup = false;
   bk7258_wifi_sync_carrier_locked(priv);
   net_unlock();
   work_cancel_sync(LPWORK, &priv->pollwork);
@@ -682,6 +693,14 @@ int bk7258_wifi_initialize(void)
   uint8_t mac[BK7258_WIFI_WDRV_MAC_LENGTH];
   int ret;
 
+#ifdef CONFIG_BK7258_SDK_SRAM_HEAP
+  ret = bk7258_os_sram_heap_initialize();
+  if (ret < 0)
+    {
+      return ret;
+    }
+#endif
+
   /* The official v3.1.1.9 AP startup initializes the event service before
    * Wi-Fi.  The vnet archive deliberately omits that top-level startup step,
    * so provide it here before any link event can be posted.  bk_event_init()
@@ -733,6 +752,47 @@ int bk7258_wifi_refresh_carrier(void)
   return OK;
 }
 
+bool bk7258_wifi_native_lease_matches(
+  const struct bk7258_wifi_result_s *result)
+{
+  FAR struct bk7258_wifi_driver_s *priv = &g_bk7258_wifi;
+  bool matches;
+
+  if (result == NULL)
+    {
+      return false;
+    }
+
+  net_lock();
+  matches = priv->registered && priv->ifup &&
+            (priv->dev.d_flags & (IFF_UP | IFF_RUNNING)) ==
+              (IFF_UP | IFF_RUNNING) &&
+            priv->dev.d_ipaddr == result->ipaddr &&
+            priv->dev.d_netmask == result->netmask &&
+            priv->dev.d_draddr == result->router;
+  net_unlock();
+  return matches;
+}
+
+#ifdef CONFIG_NETDB_DNSCLIENT
+static void bk7258_wifi_publish_dns(uint32_t address)
+{
+  struct bk7258_wifi_wdrv_connect_ind_s first, second;
+  memcpy(&first, &wdrv_host_env.connect_ind, sizeof(first));
+  __asm volatile ("dmb sy" ::: "memory");
+  memcpy(&second, &wdrv_host_env.connect_ind, sizeof(second));
+  if (!memcmp(&first, &second, sizeof(first)) && first.ipaddr == address && first.dns != 0)
+    {
+      struct sockaddr_in server = {0};
+      server.sin_family = AF_INET;
+      server.sin_addr.s_addr = first.dns;
+      (void)dns_add_nameserver((const struct sockaddr *)&server, sizeof(server));
+    }
+  explicit_bzero(&first, sizeof(first));
+  explicit_bzero(&second, sizeof(second));
+}
+#endif
+
 int bk7258_wifi_set_native_lease(
   const struct bk7258_wifi_result_s *result)
 {
@@ -766,6 +826,9 @@ int bk7258_wifi_set_native_lease(
       bk7258_wifi_sync_carrier_locked(priv);
     }
   net_unlock();
+#ifdef CONFIG_NETDB_DNSCLIENT
+  if (ret >= 0) bk7258_wifi_publish_dns(result->ipaddr);
+#endif
   return ret;
 }
 

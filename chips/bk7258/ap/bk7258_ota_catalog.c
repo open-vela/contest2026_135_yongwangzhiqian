@@ -40,6 +40,19 @@ extern const size_t bk7258_ota_catalog_public_key_der_size;
 static const uint8_t g_bk7258_ota_layout_sha256[BK7258_OTA_SHA256_SIZE] =
   BK7258_LAYOUT_SHA256_BYTES;
 
+int bk7258_ota_catalog_public_fingerprint(
+  uint8_t fingerprint[BK7258_OTA_SHA256_SIZE])
+{
+  if (fingerprint == NULL || bk7258_ota_catalog_public_key_der_size == 0u)
+    {
+      return -EINVAL;
+    }
+
+  return mbedtls_sha256(bk7258_ota_catalog_public_key_der,
+                        bk7258_ota_catalog_public_key_der_size,
+                        fingerprint, 0);
+}
+
 static bool bk7258_ota_catalog_exact_object(
   const cJSON *object, const char *const *names, size_t count)
 {

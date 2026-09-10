@@ -40,7 +40,7 @@
 
 #if defined(CONFIG_ETC_ROMFS) || \
     (defined(CONFIG_FS_PROCFS) && defined(CONFIG_NSH_PROC_MOUNTPOINT)) || \
-    defined(CONFIG_BK7258_STORAGE_ONCHIP_PERSISTENT)
+    defined(CONFIG_BK7258_ONCHIP_DATAFS)
 static int bk7258_final_check_fs(FAR const char *name,
                                  FAR const char *path,
                                  uint32_t expected)
@@ -104,7 +104,7 @@ int board_app_finalinitialize(uintptr_t arg)
 {
 #if defined(CONFIG_ETC_ROMFS) || \
     (defined(CONFIG_FS_PROCFS) && defined(CONFIG_NSH_PROC_MOUNTPOINT)) || \
-    defined(CONFIG_BK7258_STORAGE_ONCHIP_PERSISTENT)
+    defined(CONFIG_BK7258_ONCHIP_DATAFS)
   int ret;
 #endif
 
@@ -140,7 +140,7 @@ int board_app_finalinitialize(uintptr_t arg)
     }
 #endif
 
-#ifdef CONFIG_BK7258_STORAGE_ONCHIP_PERSISTENT
+#ifdef CONFIG_BK7258_ONCHIP_DATAFS
   ret = bk7258_final_check_fs("persistent data", "/data",
                              LITTLEFS_SUPER_MAGIC);
   if (ret < 0)

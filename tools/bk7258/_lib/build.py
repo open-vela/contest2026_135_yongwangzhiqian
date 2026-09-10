@@ -514,6 +514,27 @@ def _remove_output_tree(path: Path, workspace: Path) -> None:
         shutil.rmtree(path)
 
 
+def _prune_stale_role_outputs(current: Path, workspace: Path) -> None:
+    """Keep only the selected content-addressed identity for one role."""
+
+    role_root = current.parent
+    if role_root.is_symlink():
+        raise BuildError(f"role output root must not be a symlink: {role_root}")
+    if not role_root.exists():
+        return
+    if not role_root.is_dir():
+        raise BuildError(f"role output root must be a directory: {role_root}")
+
+    for candidate in role_root.iterdir():
+        if candidate.name == current.name:
+            continue
+        if re.fullmatch(r"bk7258-role-[0-9a-f]{16}", candidate.name) is None:
+            raise BuildError(
+                f"refusing to prune unexpected role output: {candidate}"
+            )
+        _remove_output_tree(candidate, workspace)
+
+
 def _dotconfig(path: Path) -> dict[str, str | None]:
     values: dict[str, str | None] = {}
     for raw in path.read_text(encoding="utf-8").splitlines():
@@ -803,6 +824,8 @@ def _role_build(repository: Path, workspace: Path, official_build: Path,
         workspace, config, build_config_root, selected_layout, toolchain,
         sdk_report.tree_hash, catalog_public_source,
     )
+    if clean:
+        _prune_stale_role_outputs(output_root, workspace)
     binary_root = output_root / "cmake"
     generated = layout_domain.emit(selected_layout, output_root / "generated")
 

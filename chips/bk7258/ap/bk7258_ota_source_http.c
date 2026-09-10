@@ -37,6 +37,8 @@
 #include <mbedtls/ctr_drbg.h>
 #include <mbedtls/entropy.h>
 #include <mbedtls/net_sockets.h>
+#include <mbedtls/pk.h>
+#include <mbedtls/sha256.h>
 #include <mbedtls/ssl.h>
 #include <mbedtls/x509_crt.h>
 
@@ -72,6 +74,10 @@ struct bk7258_ota_http_source_priv_s
   mbedtls_entropy_context entropy;
   mbedtls_ctr_drbg_context random;
   mbedtls_x509_crt ca;
+  mbedtls_x509_crt *borrowed_ca;
+  mbedtls_x509_crt *borrowed_client_certificate;
+  mbedtls_pk_context *borrowed_client_key;
+  struct in_addr peer_address;
   struct socket socket;
   mbedtls_ssl_context ssl;
   mbedtls_ssl_config config;
@@ -79,13 +85,30 @@ struct bk7258_ota_http_source_priv_s
   enum bk7258_ota_image_e range_cache_image;
   uint32_t range_cache_start;
   uint32_t range_cache_length;
+  uint8_t expected_catalog_sha256[BK7258_OTA_SHA256_SIZE];
   bool range_cache_valid;
   bool socket_open;
   bool tls_active;
   bool secure;
   bool crypto_ready;
+  bool borrowed_credentials;
+  bool peer_address_valid;
+  bool expected_catalog_set;
+  bool open_attempted;
   volatile bool canceled;
 };
+
+static bool bk7258_ota_http_certificate_ready(
+  const mbedtls_x509_crt *certificate)
+{
+  return certificate != NULL && certificate->raw.p != NULL &&
+         certificate->raw.len != 0u;
+}
+
+static bool bk7258_ota_http_key_ready(const mbedtls_pk_context *key)
+{
+  return key != NULL && key->pk_info != NULL;
+}
 
 static int bk7258_ota_http_copy(char *output, size_t output_size,
                                 const char *input)
@@ -398,7 +421,19 @@ static int bk7258_ota_http_connect(
   memset(&numeric_address, 0, sizeof(numeric_address));
   memset(&numeric_sockaddr, 0, sizeof(numeric_sockaddr));
   port = strtoul(url->port, NULL, 10);
-  if (port > 0u && port <= UINT16_MAX &&
+  if (port > 0u && port <= UINT16_MAX && priv->peer_address_valid)
+    {
+      numeric_sockaddr.sin_addr = priv->peer_address;
+      numeric_sockaddr.sin_family = AF_INET;
+      numeric_sockaddr.sin_port = htons((uint16_t)port);
+      numeric_address.ai_family = AF_INET;
+      numeric_address.ai_socktype = SOCK_STREAM;
+      numeric_address.ai_protocol = IPPROTO_TCP;
+      numeric_address.ai_addrlen = sizeof(numeric_sockaddr);
+      numeric_address.ai_addr = (struct sockaddr *)&numeric_sockaddr;
+      addresses = &numeric_address;
+    }
+  else if (port > 0u && port <= UINT16_MAX &&
       inet_pton(AF_INET, url->host, &numeric_sockaddr.sin_addr) == 1)
     {
       numeric_sockaddr.sin_family = AF_INET;
@@ -491,9 +526,20 @@ static int bk7258_ota_http_connect(
     {
       mbedtls_ssl_conf_authmode(&priv->config,
                                 MBEDTLS_SSL_VERIFY_REQUIRED);
-      mbedtls_ssl_conf_ca_chain(&priv->config, &priv->ca, NULL);
+      mbedtls_ssl_conf_ca_chain(&priv->config,
+                                priv->borrowed_credentials ?
+                                priv->borrowed_ca : &priv->ca, NULL);
       mbedtls_ssl_conf_rng(&priv->config, mbedtls_ctr_drbg_random,
                            &priv->random);
+      if (priv->borrowed_client_certificate != NULL)
+        {
+          ret = mbedtls_ssl_conf_own_cert(
+                  &priv->config, priv->borrowed_client_certificate,
+                  priv->borrowed_client_key);
+        }
+    }
+  if (ret == 0)
+    {
       ret = mbedtls_ssl_setup(&priv->ssl, &priv->config);
     }
   if (ret == 0)
@@ -754,6 +800,28 @@ static int bk7258_ota_http_load_ca(
   return ret == 0 ? 0 : -EKEYREJECTED;
 }
 
+static int bk7258_ota_http_catalog_expected(
+  const struct bk7258_ota_http_source_priv_s *priv,
+  const uint8_t *catalog, size_t catalog_size)
+{
+  uint8_t digest[BK7258_OTA_SHA256_SIZE];
+  int ret;
+
+  if (!priv->expected_catalog_set)
+    {
+      return 0;
+    }
+
+  ret = mbedtls_sha256(catalog, catalog_size, digest, 0);
+  if (ret != 0)
+    {
+      return ret;
+    }
+
+  return memcmp(digest, priv->expected_catalog_sha256, sizeof(digest)) == 0 ?
+         0 : -EBADMSG;
+}
+
 static int bk7258_ota_http_open(
   void *context, struct bk7258_ota_manifest_s *manifest)
 {
@@ -771,6 +839,10 @@ static int bk7258_ota_http_open(
       return -EINVAL;
     }
 
+  /* An expectation is configuration, not a mutable transfer parameter. */
+
+  priv->open_attempted = true;
+
   ret = 0;
   if (priv->secure)
     {
@@ -779,7 +851,10 @@ static int bk7258_ota_http_open(
                                   sizeof(personalization) - 1u);
       if (ret == 0)
         {
-          ret = bk7258_ota_http_load_ca(priv);
+          if (!priv->borrowed_credentials)
+            {
+              ret = bk7258_ota_http_load_ca(priv);
+            }
         }
       if (ret == 0)
         {
@@ -803,6 +878,10 @@ static int bk7258_ota_http_open(
       ret = bk7258_ota_catalog_verify(catalog, catalog_size,
                                       signature, signature_size,
                                       &priv->catalog);
+    }
+  if (ret == 0 && priv->expected_catalog_set)
+    {
+      ret = bk7258_ota_http_catalog_expected(priv, catalog, catalog_size);
     }
   if (ret == 0)
     {
@@ -918,7 +997,11 @@ static int bk7258_ota_http_cancel(void *context)
     {
       return -EINVAL;
     }
-  __atomic_store_n(&priv->canceled, true, __ATOMIC_RELEASE);
+  if (__atomic_exchange_n(&priv->canceled, true, __ATOMIC_ACQ_REL))
+    {
+      return 0;
+    }
+
   if (priv->socket_open)
     {
       (void)psock_shutdown(&priv->socket, SHUT_RDWR);
@@ -953,16 +1036,22 @@ static const struct bk7258_ota_source_ops_s g_bk7258_ota_http_ops =
   .close = bk7258_ota_http_close,
 };
 
-int bk7258_ota_http_source_initialize(
+static int bk7258_ota_http_source_initialize_common(
   struct bk7258_ota_http_source_s *source, const char *catalog_url,
-  const char *ca_path)
+  const char *ca_path, const struct in_addr *peer_address,
+  mbedtls_x509_crt *server_ca,
+  mbedtls_x509_crt *client_certificate, mbedtls_pk_context *client_key,
+  bool require_client_certificate)
 {
   struct bk7258_ota_http_source_priv_s *priv;
   struct bk7258_ota_http_url_s parsed;
   int ret;
 
-  if (source == NULL || catalog_url == NULL || ca_path == NULL ||
-      source->priv != NULL)
+  if (source == NULL || catalog_url == NULL || source->priv != NULL ||
+      (ca_path == NULL &&
+       (server_ca == NULL ||
+        (require_client_certificate &&
+         (client_certificate == NULL || client_key == NULL)))))
     {
       return -EINVAL;
     }
@@ -988,7 +1077,30 @@ int bk7258_ota_http_source_initialize(
   if (ret == 0)
     {
       priv->secure = parsed.secure;
-      if (priv->secure)
+      if (server_ca != NULL)
+        {
+          uint32_t address = peer_address == NULL ? 0u :
+                             ntohl(peer_address->s_addr);
+
+          if (!priv->secure || !bk7258_ota_http_certificate_ready(server_ca) ||
+              (require_client_certificate &&
+               (!bk7258_ota_http_certificate_ready(client_certificate) ||
+                !bk7258_ota_http_key_ready(client_key))) || address == 0u ||
+              address >= 0xe0000000u)
+            {
+              ret = !priv->secure ? -EPROTONOSUPPORT : -EKEYREJECTED;
+            }
+          else
+            {
+              priv->peer_address = *peer_address;
+              priv->peer_address_valid = true;
+              priv->borrowed_ca = server_ca;
+              priv->borrowed_client_certificate = client_certificate;
+              priv->borrowed_client_key = client_key;
+              priv->borrowed_credentials = true;
+            }
+        }
+      else if (priv->secure)
         {
           ret = bk7258_ota_http_copy(priv->ca_path,
                                      sizeof(priv->ca_path), ca_path);
@@ -1015,6 +1127,63 @@ int bk7258_ota_http_source_initialize(
   mbedtls_ssl_init(&priv->ssl);
   mbedtls_ssl_config_init(&priv->config);
   source->priv = priv;
+  return 0;
+}
+
+int bk7258_ota_http_source_initialize(
+  struct bk7258_ota_http_source_s *source, const char *catalog_url,
+  const char *ca_path)
+{
+  return bk7258_ota_http_source_initialize_common(source, catalog_url,
+                                                   ca_path, NULL, NULL, NULL,
+                                                   NULL, false);
+}
+
+int bk7258_ota_http_source_initialize_with_credentials(
+  struct bk7258_ota_http_source_s *source, const char *catalog_url,
+  const struct in_addr *peer_address,
+  struct mbedtls_x509_crt *server_ca,
+  struct mbedtls_x509_crt *client_certificate,
+  struct mbedtls_pk_context *client_key)
+{
+  return bk7258_ota_http_source_initialize_common(
+           source, catalog_url, NULL, peer_address, server_ca,
+           client_certificate,
+           client_key, true);
+}
+
+int bk7258_ota_http_source_initialize_with_server_ca(
+  struct bk7258_ota_http_source_s *source, const char *catalog_url,
+  const struct in_addr *peer_address, struct mbedtls_x509_crt *server_ca)
+{
+  /* Server authentication is still mandatory. Only client-certificate
+   * authentication is absent on this explicitly selected entry point.
+   */
+  return bk7258_ota_http_source_initialize_common(
+           source, catalog_url, NULL, peer_address, server_ca,
+           NULL, NULL, false);
+}
+
+int bk7258_ota_http_source_expect_catalog(
+  struct bk7258_ota_http_source_s *source,
+  const uint8_t sha256[BK7258_OTA_SHA256_SIZE])
+{
+  struct bk7258_ota_http_source_priv_s *priv;
+
+  if (source == NULL || sha256 == NULL || source->priv == NULL)
+    {
+      return -EINVAL;
+    }
+
+  priv = source->priv;
+  if (priv->open_attempted)
+    {
+      return -EBUSY;
+    }
+
+  memcpy(priv->expected_catalog_sha256, sha256,
+         sizeof(priv->expected_catalog_sha256));
+  priv->expected_catalog_set = true;
   return 0;
 }
 

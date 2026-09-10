@@ -1,23 +1,36 @@
 # BKVoice AIDK 授权音色伴侣：产品架构与适配计划
 
+本文是 [傻妞全项目 Master Plan](shaniu-master-plan.md) 的板端 App、Gateway AI、模型资产与
+OpenVela 能力专项计划。跨设备、Android、发布和项目级优先级以 Master Plan 为准。
+
 ## 1. 产品目标与当前边界
 
 BKVoice 面向 AIDK AI Toy，目标是做一台可随身携带、能看、能听、能说、能陪用户出行的
 语音与视觉伴侣。AIDK 是唯一运行终端；手机只承担可选配网、位置授权和网络中继，用户自有
 Gateway/GPU 主机承担动态 ASR、VLM、LLM、授权音色 TTS、唱歌生成和长期记忆。
 
+产品伴侣名固定为“傻妞”，稳定 machine ID 为 `shaniu`。`fictional-ex-girlfriend` 只描述
+虚构的互动风格；设备、Gateway prompt、日志和 UI 的真实身份始终是 `ai-companion`，并持续
+披露 AI 与合成声音。人物设定不冒充真人，也不自动授予对任何真人聊天、声音或肖像的使用权。
+
+移动端首版固定为原生 Android 完整控制台；微信小程序只作为后续经用户 Gateway 接入的
+轻客户端。Android 负责 BLE 近场认领、Wi-Fi/Gateway 配置、设备状态、隐私、情绪偏好、
+单帧图片和受控视频预览；小程序不直接承担底层配网、持续视频、OTA 或诊断。详细决策、
+协议边界与验收阶段见 [傻妞 Android companion 计划](shaniu-android-companion-plan.md)。
+
 产品不把“所有模型都塞进 MCU”当目标。板端必须独立完成隐私指示、唤醒、VAD、会话状态、
 音频/相机资源仲裁、离线降级和安全更新；高质量生成任务按能力卸载到用户控制的主机。
 
-当前仓库实现仍只是第一条待构建、待上板的纵切，不等于最终产品已经完成：
+以下是早期离线播放纵切的功能范围；当前执行和实板进度统一见主计划第 17 节：
 
 1. 从已挂载文件系统读取 `bkvoice-pack-v1`；
 2. 严格检查授权声明、合成声音披露和音频格式；
 3. 按 clip ID 选择资产；
 4. 通过公共 NuttX `media_player`/audio ABI 流式播放；
-5. 在串口输出机器可读的 PASS/FAIL 结果。
+5. 通过同一公共播放 ABI 提供固定、低幅度的非语音喇叭诊断；
+6. 在串口输出机器可读的 PASS/FAIL 结果。
 
-当前版本没有启用 TFLite Micro、CMSIS-NN、Media、uORB、healthd、MQTT、Keystore 或
+早期播放 profile 没有启用 TFLite Micro、CMSIS-NN、Media、uORB、healthd、MQTT、Keystore 或
 LVGL 产品 UI，也没有安装端侧唤醒模型。AIDK CP/AP 直接构建和 Gateway 侧 GPT-SoVITS
 V2Pro 单轮微调、加载、合成 smoke 已通过，但两者尚未完成实机流式联调；不能把主机构建、
 checkpoint 存在或一次 WAV 合成写成产品音色已经 `SELECTED`。文字聊天记录可用于后续的
@@ -33,8 +46,8 @@ checkpoint 存在或一次 WAV 合成写成产品音色已经 `SELECTED`。文�
 同日第一轮本地质量门已真实执行：965 个 `received` 候选中保留 949 个（约 2,825.74 秒），
 拒绝 16 个。ASR 对其中 947 个生成私有草稿，2 个空结果继续排除；自动 speaker embedding
 门保留 924 个主说话人候选并隔离 23 个异常，最后冻结 248 个训练片段（约 15.02 分钟）和
-34 个评测片段（约 2.03 分钟）。私有语音使用脱敏文件名的符号链接，未复制进仓库。当前
-worklog 状态是 `VOICE_MODEL_SMOKE_COMPLETE`：特征、S2/S1 单轮微调和本地合成格式门通过，
+34 个评测片段（约 2.03 分钟）。私有语音使用脱敏文件名的符号链接，未复制进仓库。
+当日 worklog 状态是 `VOICE_MODEL_SMOKE_COMPLETE`：特征、S2/S1 单轮微调和本地合成格式门通过，
 但零样本对照、holdout 内容正确率/音色相似度、盲听、资产签发和 AIDK 实机流式播放仍未通过；
 因此仍不存在可发布的 `SELECTED` 音色资产。
 
@@ -108,6 +121,8 @@ nsh> bkvoice play /mnt/voice/voicepack.ini greeting
 
 ```text
 bkvoice status
+bkvoice capture-test <duration-ms:100..5000>
+bkvoice tone-test
 bkvoice verify <manifest>
 bkvoice play <manifest> <clip-id>
 bkvoice stress <manifest> <clip-id> <count:1..100>
@@ -118,15 +133,21 @@ bkvoice stress <manifest> <clip-id> <count:1..100>
 - `play` 再验证目标 WAV，播放前打印 `BKVOICE SYNTHETIC`，自然 drain 后才打印 PASS；
 - `stress` 只验证一次 manifest，再有界重复播放并报告首个失败轮次，供 50/100 次资源
   回收实机验收使用；
+- `capture-test` 只在操作者显式命令期间开启短生命周期本地统计 sink；原始 PCM 不落盘、
+  不通过 RPMsg 返回，PASS 至少要求完整 640-byte 帧、非零样本和非零峰值；
+- `tone-test` 固定生成 1 kHz、500 ms、峰值 4096 的 16 kHz/mono/S16LE 非语音信号，按
+  640-byte/20 ms 帧完成 partial write，并在连接丢失或 stop/close 失败时返回失败；它不读取
+  voice pack，PTT/MIC/DAC owner 忙时也不抢占；
 - 任一解析、文件、reserve、queue、播放或清理错误都返回失败，不能用成功日志掩盖。
 
-当前 `status` 必须报告 `mode=playback-only` 和 `transport=not-installed`。仓内已有
-`companion-v1` 的 transport-neutral codec/session contract，以及硬件无关的半双工 turn
-arbiter。App 私有 adapter 已把该资源契约映射到公共 `media_recorder/media_player` ABI，
-并随 AP voice-service 生命周期完成无设备占用的初始化；host fake-media test 已覆盖真实
-wrapper 的 MIC/DAC 调用顺序、超时、取消、stop 重试和 close 失败后的故障回滚。PTT、阻塞
-录音 reader 的 stop/join owner、上行传输以及 TLS/WSS 数据面仍未接入产品运行时，因此当前
-产品模式仍是 playback-only，不能写成实机对话已完成。
+当前 `status` 分开报告服务、配置、连接、Gateway、TLS、PTT 链路、按键和 turn 状态；
+启用 `BK7258_VOICE_TLS` 的构建启动时报告 `transport=tls-wss`。仓内 `companion-v1`、
+半双工 turn arbiter、公共 `media_recorder/media_player` adapter、joinable capture/PTT owner、
+CP GPIO PTT 事件和 TLS/WSS session 已进入 AIDK 产品配置与 AP 构建。host fake-media/
+fake-sink test 覆盖 MIC/DAC 调用顺序、完整 640-byte/20 ms 帧、partial-frame 丢弃、滚动窗口、
+主动取消、超时、断连、序号溢出、stop 重试和 close 失败后的故障回滚。`capture-test` 只为
+取得 aggregate-only 实机 MIC 证据而临时打开本地 sink。真实 PTT、板端网络、MiMo 回复和
+扬声器仍须在同一实板完成，因此不能把构建和主机互操作写成实机对话已完成。
 
 ## 6. 证据状态与 OpenVela 全树能力矩阵
 
@@ -142,20 +163,20 @@ wrapper 的 MIC/DAC 调用顺序、超时、取消、stop 重试和 close 失败
 
 | 能力 | OpenVela 现状 | AIDK 当前状态 | 需要的适配与归属 | 首个通过门槛 |
 |---|---|---|---|---|
-| TFLite Micro | `apps/mlearning/tflite-micro` 完整存在，依赖 FlatBuffers、gemmlowp、kissfft、ruy | 未配置 | Framework 不改；App 按模型实测选择 caller-owned tensor arena、模型和阈值；Chip 只提供通用 allocator 属性、对齐、cycle counter 和 PM 原语 | 逐项启用后可链接；10 分钟实时流无 arena 越界，实时率和峰值堆有记录 |
+| TFLite Micro | runtime/tool/benchmark 接入存在；嵌套 upstream 源含 16 kHz/mono/S16 的 `micro_speech` yes/no 参考，但未接成产品 App/模型 | 未配置 | Framework 不改；App 按模型实测选择 caller-owned tensor arena、模型和阈值；Chip 只提供通用 allocator 属性、对齐、cycle counter 和 PM 原语 | 逐项启用后可链接；10 分钟实时流无 arena 越界，实时率和峰值堆有记录 |
 | CMSIS-NN | `apps/mlearning/cmsis-nn` 存在，TFLM 可切换 CMSIS-NN kernels | 未配置 | Framework 保持原位；Chip 验证 BK7258 指令集、编译选项和 cycle counter；App 不直接调用私有 kernel | 与 reference kernel 输出误差在模型量化容差内，且实测加速不回退 |
 | Media Framework | Player/Recorder/Server/Graph/Policy/Focus 均存在 | `CONFIG_MEDIA` 未启用；当前 standalone BKVoice 与它硬互斥，使用同名公共 Media API 的 raw bridge | **不新增 raw backend，也不只改 Kconfig 假装迁移完成**。`media-standard` 是独立替换 profile；先定义 buffer PCM、prepare/start/write/stop/drain/close、错误与单实例契约，再验证 FFmpeg NuttX `indev/outdev` 和 BK7258 lower-half | 独立 profile 完成同一 WAV 的录放、自然 drain、反复切换和资源回收；通过前不得与 standalone BKVoice 同启 |
-| Media Trigger | 公共模型插件、load/start/stop/event API 已存在 | 未配置，无 KWS 插件 | Framework API 不改；App 的 KWS 插件调用 TFLM；Chip 只提供连续 PCM、时间戳和低功耗 vote | 连续 1 小时误触发/漏触发数据可复现，触发后带 1 秒 pre-roll |
+| Media Trigger | load/start/stop/event 和抽象 model API 已存在；未发现可直接用于 BK7258 的具体 KWS runner | 未配置，无 KWS 插件 | 产品先实现调用经验证 TFLM 模型的 App-owned runner；只有选择独立 `media-standard` profile 时才增加 Media Trigger adapter；Chip 只提供连续 PCM、时间戳和低功耗 vote | App runner 独立 profile 先通过 build/resolved config；可选 Media Trigger adapter 单独验证；连续 1 小时 FAR/FRR 可复现，触发后带 1 秒 pre-roll |
 | FFmpeg NuttX audio | 已实现 NuttX AUDIOIOC、mqueue、PCM input/output | 未随 Media 启用 | 优先复用；只有发现 BK7258 lower-half 违反公共 ABI 才修 Chip | 对 `pcm0c/pcm0p` 的 capability、reserve、queue、stop、release 全闭环 |
 | uORB / topics | `apps/system/uorb` 与 battery/connectivity/miai/media topics 存在 | `SENSORS=y`，但 `USENSOR/uORB` 未启用 | Framework 保持原位；补齐配置依赖；Chip 发布 SoC 状态，Board 传感器走标准驱动，App 订阅低频状态 | 电池、网络、会话和故障事件有单一 schema；不通过 uORB 搬 PCM/JPEG |
 | healthd | 标准电池状态采集并发布 `battery_state` | 未启用；默认扫描 `/dev/charge/`，AIDK 当前为 `/dev/bat0` | 优先让 Board 注册兼容的标准 charge 节点或给 healthd 增加通用可配置路径；不要在 App 轮询私有 ioctl | 拔插电源、低电和充电状态均正确发布，空设备不阻塞启动 |
 | MQTT-C | MQTT-C 与 mbedTLS 支持存在 | 未启用 | MQTT 库保留 Framework；Chip 只负责网络 lower-half、TRNG 和 PM；App 定义 topic、QoS、重连和凭据引用。MVP 若一个 TLS/WSS 会话已承载控制和数据，则不强制 MQTT | 强制证书校验和 hostname；断网重连有上限；不通过 MQTT 发送连续 PCM/JPEG |
 | Android Keystore/Keymaster | AOSP Keystore 存在，但依赖 Binder、HIDL、Keymaster | 未启用，BK7258 无已验证 TEE/HUK backend | 只做独立安全架构与尺寸 spike；先明确 software-backed 边界和可用硬件原语，不在 Chip 复制一套未兼容的“轻量 Keystore” | 选型后再定义验收；在此之前不得宣称 hardware-backed 或把它列为 MVP blocker |
-| KVDB / Settings | KVDB 支持 direct/server 及 UnQLite/NVS/file；Settings 支持小型持久配置 | 未启用 | 非秘密产品设置优先 `KVDB_DIRECT` 或 Settings 二选一；存储介质路径由 Board 提供，Chip 提供原子/磨损/掉电语义 | 1000 次更新和随机断电后仍能读取最后一个已提交版本；密钥不进 KVDB |
+| KVDB / Settings | KVDB 支持 direct/server 及 UnQLite/NVS/file；Settings 支持小型持久配置 | `BK7258_PREFERENCES` 适配及 CP 命令已有源码，默认关闭 | 复用 KVDB 保存非秘密音量/persona；AP 串行处理配置，持久分区和服务位置由 Board 配置。当前 file 短写处理和 UnQLite 提交/缺失语义需先验证，不能直接启用 | 1000 次更新和随机断电后仍能读取最后一个已提交版本；密钥不进 KVDB |
 | Permission Manager | 基于 UnQLite，已有录音、网络、蓝牙等权限名与审计记录 | 未启用 | 单一可信内置 App 的 MVP 不强制启用；多 App/第三方扩展时再由 Framework 管权限、App 映射产品动作，Board 不作策略判断 | 独立 profile 中禁止态不能打开设备；授权/撤销和审计记录可追踪 |
 | LVGL / UIKit | LVGL 与 UIKit 均存在；BK7258 的 DMA2D adapter 面向 RGB framebuffer 条件 | 未启用产品 UI；AIDK 是双 GC9D01 SPI framebuffer，不是 RGB scanout | AIDK 首轮只做低刷新、固定上限的 SPI UI；Board 声明两屏几何/背光/复位，App 定义页面。DMA2D/RGB 是另一显示 profile，不作为 AIDK 前置 | 两屏 30 分钟低刷新无越界或堆泄漏，语音实时任务无 deadline miss |
 | Bluetooth Framework | GATT、scan、advertising、service 均存在，但完整 Framework 依赖 libuv | 当前只有 BK7258 HCI/NuttX host 基础已验证，完整服务未启用 | Chip 完成 controller/HCI/PM/GATT 能力；Board 不写协议；配网先走最小 GATT，完整 Bluetooth Framework 单独做依赖和尺寸验证 | 手机完成一次性配网、凭据加密落盘、撤销后不能重连 |
-| AI Agent | `packages/ai_agent` 有 message bus、Gateway、voice、camera、MQTT、LVGL 与工具框架 | AIDK 未配置 | 它是 standalone BKVoice transport/state-machine 的候选替代 owner，不可两边各建 Gateway、会话状态机和 audio controller；先列出 channel allowlist、buffer 与线程预算 | 二选一 owner 的最小 channel 组合可构建；同一 profile 中只有一个 audio/session owner，远程命令全部 allowlist |
+| AI Agent | `packages/ai_agent` 有 message bus、voice、LLM/tool loop、camera、MQTT、LVGL；公共采播和回复链路可复用，流式 ASR/TTS 仍绑定火山 | AIDK 当前产品 profile 未启用，App 已有 Agent 生命周期绑定 | 优先验证 standalone BKVoice 的替代 profile，补 MiMo/provider 接口；不直接复制到 Python Gateway，不可两边各建对话/音频 owner；范围见主计划第 17.5 节 | 二选一 owner 的最小 channel 组合可构建并通过清理和资源实测后才切换，远程命令全部 allowlist |
 | Paired OTA | BK7258 CP/AP 配对更新与确认机制已存在 | 已有基础 | 保持 Chip/平台所有权；App 只发起更新和显示状态；模型/音色资产采用独立签名清单 | 固件、模型、音色三类版本可独立回滚，任何失败不破坏 `sys_rf` |
 
 矩阵是实施清单，不要求一次把所有大型 Framework 同时常驻。每项先做独立 profile，记录
@@ -221,7 +242,7 @@ MEDIA_GRAPH`，不同时启用 `BK7258_VOICE_SERVICE`；Policy/PFW、Focus、UIK
               ^
               | BLE GATT（可选，仅配网/授权）
               v
-          手机 companion（可选，不是运行必需）
+       原生 Android companion（可选，不是运行必需）
 ```
 
 板端无网络时仍可唤醒、显示状态、播报固定授权语音包、记录待同步事件；动态对话、视觉理解、
@@ -284,24 +305,96 @@ boot_generation | session_id | turn_id | sequence | timestamp_ms
 
 ### 11.1 本地唤醒
 
-建议首个模型为量化 DS-CNN 或 TC-ResNet 小模型：
+用户提供的赛事规则第 4 条限定唤醒词为“你好，openvela”或“Hello，openvela”。首版选择
+中文官方词，面向多人通用唤醒。“小冰”保留为后续非比赛版本扩展，单独训练并验收，
+不进入首期适配；比赛 profile 在模型安装和 App 选择时均只允许官方词。
+当前进度以[主计划](shaniu-master-plan.md#m7-kws本地唤醒)
+为准。本地树里最接近 BK7258 实板的参考是 Beken
+`asr_service_example`：它支持 AP/CP、板载/UAC MIC 与 8/16 kHz 输入，Wanson 实际要求
+16 kHz，8 kHz 需重采样；AEC 只属于 `startnomic ... aec` 的 voice-service 路径，不能外推为
+所有 MIC 模式自动具备。该示例选中预编译 Wanson group V1 图和 `libasrfst.a`，静态词中只有
+“嗨阿米诺/拜拜阿米诺”等预置命令，没有“傻妞”。它只用于取得 MIC→识别的供应商性能基线，
+不能直接并入产品，也不能通过修改回调字符串生成新唤醒词。
+
+OpenVela 当前 checkout 的嵌套 upstream TFLM 源含 `micro_speech`：输入是 16 kHz/mono/S16，
+现成模型只识别英文 yes/no；常规 OpenVela 入口只接入 runtime/tool/benchmark，没有把该示例
+接成产品 App 或“傻妞”模型。Media Trigger 提供 load/start/stop/event 与
+`media_trigger_model_*` 接口，没有已接入 BK7258 的具体模型 runner。当前 AIDK resolved config
+同时关闭 Media、Media Trigger 和 CMSIS-NN，因此“树里有源码/接口”不等于已经配置或可部署。
+
+产品采用 App-owned INT8 DS-CNN + TFLM runner；前端、触发门限和模型契约均在
+`app/bk7258/bk7258_voice_kws*`，不调用 SDK ASR 私有入口。`BK7258_VOICE_KWS` 默认关闭，
+依赖 TFLM/C++，目前构建推理库和一个纯 App wake-window core，不打开 MIC、不注册后台
+监听任务。wake window 已用 caller-owned 32 KiB 环实现 1 秒 pre-roll，并对连续语音、静音、
+空唤醒、最大时长和时间戳断层做宿主状态机验证；能量/噪声门限仍无实板标定。AP 的监听
+录音、停止/join 后切入同一会话、pre-roll 上行和播放后恢复仍需接入与验收。
+TFLM 是推理 runtime，Media Trigger 是生命周期/事件框架，两者不是
+二选一；只有产品另行选择 `media-standard` profile 时，才给同一 runner 增加 Media Trigger
+adapter：
 
 ```text
-MIC -> AEC/NS/AGC -> VAD gate -> log-mel/MFCC -> TFLM(CMSIS-NN) -> debounce
+AP owner 的 PCM -> 上游 microfrontend -> TFLM INT8 DS-CNN -> 连续命中/冷却 -> AP owner
 ```
 
 模型、特征参数、阈值、词表和 tensor arena 选址属于 App workload policy；Chip 提供可查询
-的 SRAM/PSRAM 属性、通用 allocator、cycle counter 和 PM vote。Media Trigger 负责生命周期
-和事件，不包含具体人物或产品词。
+的 SRAM/PSRAM 属性、通用 allocator、cycle counter 和 PM vote。可选 Media Trigger adapter
+只负责生命周期和事件，不包含具体人物、产品词或第二套资源 owner。
 
 验收不能只报 accuracy，至少覆盖：安静、音乐、车内、户外风噪、远场、扬声器回放、不同人
-声；记录 FAR/FRR、P50/P95 延迟、CPU 占用、峰值内存和连续运行稳定性。
+声；记录 FAR/FRR、P50/P95 延迟、CPU 占用、arena/heap 峰值、1 小时连续运行、PM 恢复和
+触发后 1 秒 pre-roll。在目标模型、许可、resolved config 和实板门全部通过前保留 PTT。
+
+#### 训练与推理契约
+
+当前 `bkvoice-microfrontend-v1` 直接复用仓库的 TFLM microfrontend 和固定点 KissFFT，
+替换此前自写的 `bkvoice-logmel-v1`。旧前端模型不能直接复用，须重新提取特征并训练。
+输入为 16 kHz 单声道 PCM16、2 秒窗口；30 ms/480 点帧长、20 ms/320 点步长，
+40 个滤波通道覆盖 125–7500 Hz。开启上游 log scale、`scale_shift=6`，关闭 PCAN；
+降噪 even/odd smoothing 为 0、min_signal_remaining 为 1。每帧重置状态，
+原始 `uint16` 特征转为 float，得到 `99×40`。窗口和 FFT 缩放由上游实现定义，
+不再套用旧版自然 `log1p` 公式。训练与设备编译相同源；metadata 记录源及依赖头哈希。
+前端初始化分配一次内存，释放时调用 uninitialize，逐帧不分配。流式端每 100 ms 推理，
+暂停清空历史，时间戳回退拒绝；
+门限、连续次数与冷却由调用者显式传入，尚无实测产品阈值。
+
+类别顺序固定为 `silence / unknown / nihao_openvela`。模型输入 `[1,99,40,1]`、输出 `[1,3]`，
+均为 INT8；只注册 Conv2D、DepthwiseConv2D、AveragePool2D、Reshape、FullyConnected 和
+Softmax。模型字节和 arena 由调用者管理；runner 做边界、FlatBuffer、shape 和量化校验，
+下载资产的签名/撤销校验由资产加载层承担，不能把 shape 相同当成可信模型。
+
+唯一维护入口：
+
+```sh
+python3 tools/bk7258/bk7258.py voice kws audit --manifest /private/kws/dataset.json
+python3 tools/bk7258/bk7258.py voice kws train --manifest /private/kws/dataset.json \
+  --output /private/kws/candidate --epochs 12 --batch-size 16 --seed 1337
+```
+
+训练依赖独立 Python 环境中的 TensorFlow CPU；已用 `tensorflow-cpu==2.15.1` 验证转换链路。
+`audit` 不需要 TensorFlow。manifest 使用 `schema: bkvoice-kws-dataset-v1`、上述 `frontend`、
+`labels`，以及 `entries` 列表；每项有相对 WAV `path`、匿名 `speaker`、
+`split`（train/validation/test）、`label`、文件 `sha256` 和 `consent: true`。
+工具拒绝路径逃逸、软链接、错误音频格式、跨集合说话人/PCM 重复、静音正样本及缺失类别；
+每段 WAV 必须含完整短语和前后留白，长度不足或超出 2 秒应在语料准备阶段人工复核，不能
+直接裁掉尾音。普通语音、噪声、近音短语属于反例；持续负例录音另用于 FAR/小时测量。
+
+校准只用 train 集；输出候选 `.tflite` 和模型/数据集/前端/训练源码哈希、版本、量化参数及
+独立 validation/test 的分类误拒率、unknown 误识别率。它们是单段 argmax 指标，不等同于
+加入阈值和连续命中后的流式 FAR/FRR。工具不会搜索、上传或复制私人语音。
+生成的非语音信号仅用于流水线验证，不能作为官方词有效模型或比赛验收依据。
 
 ### 11.2 动态对话与视觉
 
 板端发送 turn audio 和显式抓取的 JPEG；Gateway 完成 ASR/VLM/LLM，并以流式文本/PCM
 返回。长期记忆默认仅在用户主机保存，板端只保留短期 session 摘要和可撤销的匿名引用。
 位置来自手机时必须单独授权，不能从照片或网络信息静默推断并持久化。
+
+以上为现有 BKVoice 路线。官方 Agent 替代 profile 将对话编排交给 AP 的 Agent，Gateway
+作为模型代理与长期记忆服务；不能让两端同时编排同一个 turn。MiMo 对话/ASR/TTS 的适配、
+代理路由、音频格式转换和 owner 切换门统一见
+[主计划第 17.5 节](shaniu-master-plan.md#openvela-mimo-execution)。
+通用对话入口已有源码；火山语音的二进制 WebSocket 与 MiMo HTTP/SSE 契约不同，
+不能只换 URL。IndexTTS 的授权音色评测继续独立进行，不阻塞首条 MiMo 内置音色问答。
 
 ### 11.3 授权音色训练与播放
 
@@ -313,24 +406,24 @@ MIC -> AEC/NS/AGC -> VAD gate -> log-mel/MFCC -> TFLM(CMSIS-NN) -> debounce
 - train/validation/test 划分、模型/代码/环境版本、指标和失败样本；
 - 导出资产 hash、签名、有效期、撤销状态和合成声音披露。
 
-训练与推理分两级执行，不能只写“后续 benchmark”：
+训练与推理分层评测，不能因为完成训练就替换效果更好的零样本基线：
 
-1. 先用少量经抽检的干净参考音频建立零样本基线，首选支持 text/audio bi-stream 的
-   [Fun-CosyVoice 3 官方实现](https://github.com/QwenAudio/CosyVoice)，记录 RTX 5060
-   8 GiB 上的冷/热首包、RTF、显存、清晰度和相似度；
-2. 同一 train/validation/holdout 上启动 GPT-SoVITS few-shot 微调，F5-TTS 作为第二训练
-   候选；两者只使用 [GPT-SoVITS 官方仓库](https://github.com/RVC-Boss/GPT-SoVITS) 与
-   [F5-TTS 官方仓库](https://github.com/SWivid/F5-TTS)，模型仓库 commit、基础权重、
-   许可证、随机种子和每次 checkpoint 全部写入私有 worklog；
-3. 微调模型只有在 holdout 盲测和实时率均优于零样本基线时才成为 Gateway 默认；否则保留
-   零样本方案，不能为了“训练过”牺牲效果或首包速度。
+1. 所有候选使用同一固定句集、独立内容/CER 与 speaker-consistency hard gates；机器指标只
+   淘汰，不决定冠军；
+2. 至少两个候选通过客观门后，使用匿名标签完成全排序盲听；label mapping、reference、文本、
+   embedding、checkpoint 和生成音频只留在私有 worklog/run；
+3. 当前 IndexTTS-2.5 zero-shot BASE 与三个实验 LoRA checkpoint 均通过内容和一致性门，
+   人工盲听由 BASE 胜出；因此 LoRA 不作为 Gateway 默认，不能为了“已训练”牺牲年龄感、
+   语气、活泼度或自然度；
+4. 当前零样本 prompt profile 固定 `emotion_alpha=0.25`、`duration_factor=0.94`。改变 reference、
+   参数、模型文件或 runtime 必须建立新 profile 并重走客观门和盲听。
 
 RTX 5060 8 GiB 的首轮 GPT-SoVITS 配置固定为 V2Pro、单卡、FP16、`batch_size=1`。V2ProPlus
 通道更大，只能在 V2Pro 实测有显存余量后作为对照；V3 全量训练不进入 8 GiB 首轮。当前
 系统 CUDA 13/PyTorch 2.12 只作为隔离环境的兼容性 smoke，若准备脚本或首个 batch 不通过，
 回退到官方记录的 Python 3.11/PyTorch 2.7/CUDA 12.8 组合，不能把“CUDA 可见”当训练通过。
 
-2026-09-01 首轮真实执行结果如下，精确文本、音频、checkpoint 名称和 hash 只保存在被
+2026-09-01 的 GPT-SoVITS 历史 smoke 如下，精确文本、音频、checkpoint 名称和 hash 只保存在被
 Git 忽略的私有 audit/worklog 中：
 
 - 248 条训练片段的 text、HuBERT、32 kHz WAV、speaker embedding 和 semantic 特征全部
@@ -342,28 +435,34 @@ Git 忽略的私有 audit/worklog 中：
   6.48 秒（RTF 1.453），热请求 0.806 秒（RTF 0.181）；原生输出为 32 kHz/mono/S16，随后
   机械转换并验证为 AIDK 所需 16 kHz/mono/S16；
 - 这些数字只证明 isolated smoke 与格式/速度，不证明音色相似度、文本正确率、长句稳定性、
-  8 GiB 峰值余量或真人盲听效果。模型状态仍低于 `EVALUATED/SELECTED`。
+  8 GiB 峰值余量或真人盲听效果，不能覆盖后续 IndexTTS-2.5 盲听结论。
+
+当前模型结论是 `EVALUATED`，仍不是 `SELECTED`。进入 Gateway 产品服务前必须生成并签发
+`gateway-model-profile-v1`，至少绑定 backend/source revision、模型文件 lock、prompt profile
+hash、Python/Torch/Transformers runtime、16 kHz/mono/S16 delivery tuple、评测决定、授权/
+披露复核、有效期和撤销状态；不得把 reference hash、音频、文本或 label mapping 放入公开
+manifest。AIDK 只接收流式 PCM 和签名离线 voice pack，不加载 IndexTTS/GPT-SoVITS 权重。
 
 上述候选来自各自官方实现，但公开 benchmark 不能外推到本机。AIDK 只接收合成 PCM；离线
 时回退到本文件定义的签名 WAV voice pack。任何界面和播放入口都持续标明这是合成声音。
 
 主机侧流程现已抽取为通用开源项目 **ConsentVox**（仓库名 `ConsentVox`、Python 包与命令
-名 `consentvox`）。微信只是 `wechat-html` source adapter，GPT-SoVITS V2Pro 只是首个
-backend；core 不含 BK7258/AIDK 分支，AIDK 所需的 16 kHz/mono/S16 是参数化 delivery
-profile。独立仓的 `docs/SOP.zh-CN.md` 是“来源 -> 授权 worklog -> 质量门 -> ASR 草稿 ->
-显式转写接受 -> speaker consistency -> S2/S1 -> inference smoke -> 独立评测/选择”的唯一
-主机 SOP。
+名 `consentvox`）。微信只是 `wechat-html` source adapter；GPT-SoVITS V2Pro 与 IndexTTS-2.5
+zero-shot 是 backend，core 不含 BK7258/AIDK 分支，AIDK 所需的 16 kHz/mono/S16 是参数化
+delivery profile。独立仓的 `docs/SOP.zh-CN.md` 是“来源 -> 授权 worklog -> 质量门 -> ASR
+草稿 -> 显式转写接受 -> speaker consistency -> 候选生成 -> 客观门 -> 匿名盲听 -> 产品选择/
+签发”的唯一主机 SOP。
 
 独立仓已发布到 `https://github.com/Embracecactus/ConsentVox.git`。OpenVela manifest 不跟随
-浮动分支，而是固定到 `v0.1.1` 所指向的 40 位提交
-`d1fd0ebd7b92ad5ae48332ceb1dfef411fa5fa34`。当前接入状态为：
+浮动分支，而是固定到 `v0.2.0` 所指向的 40 位提交
+`ced2bb0daa7dafe5fb6b7b0d92be317a0a9d8c42`。当前接入状态为：
 
 1. 在 workspace 的 `.repo/manifests/contest2026_135_yongwangzhiqian.xml` 中增加
    独立 project，将其物化到 `third_party/consent-vox`；
 2. 用一个目录级 `linkfile` 把其 `src` 暴露到
    `vendor/openvela/tools/consent-vox`，通过
    `PYTHONPATH=vendor/openvela/tools/consent-vox python3 -m consentvox` 调用；
-3. 固定 checkout、tag、linkfile import、独立仓 13 项 synthetic tests 和当前 BK7258
+3. 固定 checkout、tag、linkfile import、独立仓 22 项 synthetic tests 和当前 BK7258
    微信 manifest host regression 均已验证通过；
 4. 该 host tool 不进入 CMake/Make source、固件 manifest、完整下载包或 OTA。迁移剩余
    调用方和历史证据后再删除 `tools/bkvoice`，避免在脏工作树中提前破坏复现入口。
@@ -401,25 +500,50 @@ MIC、camera、location、network 和 authorized-voice 分别授权；物理/屏
 
 ## 13. UI 与可用性
 
-双圆屏的首版 UI 只需要少量确定状态：
+两块实装 GC9D01 都是 160×160/RGB565，分别注册为 `/dev/fb0`、`/dev/fb1`。每块完整帧为
+51,200 bytes，双屏完整帧为 102,400 bytes；两块屏拥有独立 SPI transport 和 framebuffer，
+但共用同一路背光，不能分别调亮灭。物理左右与 fb 编号必须先用测试图在实板确认，再由
+Board 记录稳定映射，App 不根据编号猜左右。
 
-- 左屏：眼睛/情绪、唤醒、聆听、思考、说话、离线；
-- 右屏：连接、电池、隐私指示、字幕、相机确认、更新和错误码；
-- camera、location、声音授权使用二次确认，不依赖纯语音误触发；
-- UI 卡死不能阻塞音频 worker、healthd、OTA 或 supervisor heartbeat。
+首版把双圆屏优先当成一对协同的“眼睛”，而不是永久把一块屏浪费成仪表盘：
 
-先使用 LVGL 驱动 AIDK 已有的双 GC9D01 SPI framebuffer，限制刷新区域、帧率和缓冲上限；
+| 产品状态 | 双屏主画面 | 必须保留的提示 |
+|---|---|---|
+| `IDLE_LISTEN` | 对称眼睛、低频眨眼和轻微视线移动 | 网络/电量只作小角标 |
+| `CAPTURE/UPLINK` | 瞳孔聚焦、蓝色收音环 | MIC 占用指示与真实 reserve 同步 |
+| `THINKING` | 两眼协同扫视或三点节奏 | 弱网/离线状态不可隐藏 |
+| `DOWNLINK/PLAYBACK` | 由 Gateway 情绪标签选择表情并叠加说话节奏 | 合成声音提示可随时查看 |
+| `CAMERA_CAPTURE` | 双屏先显示明确确认态，再允许单帧抓取 | camera 指示覆盖整个占用期 |
+| `OFFLINE/ERROR/UPDATE` | 降级表情；需要时一屏临时显示短错误码 | 不显示长字幕，不阻塞恢复/OTA |
+
+板端不训练或运行生图模型。表情由 App 把有限标签（如 `neutral`、`happy`、`shy`、`sad`、
+`angry`、`surprised`、`thinking`、`listening`、`speaking`、`offline`、`error`）映射到
+参数化眼睛和少量关键帧；未知标签回退 `neutral`。刷新采用脏矩形、局部 RGB565 buffer 和
+事件驱动的低帧率动画，避免持续搬运双屏全帧。完整字幕不适合 160×160；只显示短词、确认
+和错误码，正文留给语音或手机。
+
+如需统一美术风格，先在主机侧用现成生图模型制作资产，不做专门训练。资产 brief 固定为
+160×160、圆形安全区、深色背景、无文字、左右视线一致、每个状态少量关键帧；生成的 PNG
+经人工挑选后离线转换成 RGB565 的调色板/RLE 或小 sprite。先用程序化占位眼睛通过双屏方向、
+颜色、局部刷新和 30 分钟稳定性，再开独立生图会话批量生产最终资产，避免在硬件门未过前
+反复重做图片。
+
+后续使用适合 SPI LCD 的标准 LVGL/NuttX framebuffer 路径驱动双屏，限制刷新区域、帧率和缓冲上限；
 不把 BK7258 RGB framebuffer 的 DMA2D/PSRAM scanout adapter 当作这块板已经具备的能力。
 UIKit 的完整 video/media 组合在独立 Media profile 通过后再启用。页面和动画属于 App，
 双屏器件、几何、背光和 reset 属于 Board；只有实际使用的 DMA/cache 加速归 Chip。
 
 ## 14. 分阶段实施计划
 
+本节保留原始 P0–P3 的功能拆分和适配记录；其中“下一步”和未接线描述属于当时阶段。
+当前优先级、模型候选和剩余实板工作统一由主计划第 17 节维护。
+
 ### P0：当前 standalone BKVoice 闭环
 
 1. 修通并 host-test `bkvoice-pack-v1` parser、WAV gate、RPMsg wire ABI 和微信方向清单；
 2. 完成 AIDK CP `bkvoice`、AP voice service、2 KiB streaming raw player 的直接构建；
-3. 实机先验 `status/verify/play/stress`：手工挂载、USB MSC 互斥、断 RPMsg、重复 request
+3. 实机先验 `status/tone-test/verify/play/stress`：先用不依赖存储的短 tone 验证 DAC/PA/喇叭，
+   再验证手工挂载、USB MSC 互斥、断 RPMsg、重复 request
    replay、50/100 次播放后的 heap/fd/mqueue/audio reserve 回收和 AP supervisor；
 4. 生成私有 `received` source manifest、source audit 和可复现质量门；Gateway worklog
    当前为 `VOICE_MODEL_SMOKE_COMPLETE`，但不冒充 `EVALUATED/SELECTED`；
@@ -456,13 +580,26 @@ UIKit 的完整 video/media 组合在独立 Media profile 通过后再启用。�
    host fake-media 已验证正常录放、MIC close recovery、DAC stop retry 和 DAC close recovery；
    recorder reader 还必须显式 attach/detach，reader 未退出时 drain/release 一律 `-EBUSY`，
    防止 close 销毁仍被阻塞 read 使用的句柄；AIDK 构建不等于实机资源闭环；
-4. 下一刀由 PTT 开始 capture，上传到用户 Gateway，由 ASR/LLM 和 P1 胜出的 TTS 热模型处理；
-   capture reader 必须由明确 owner 在 stop 后 join，再允许 arbiter drain/release，不能让
-   RPMsg/GPIO callback 直接阻塞读取或操作音频句柄；
-5. Gateway 首个生成 chunk 立即重采样为 16 kHz/mono/S16/20 ms，禁止等整句 WAV；
-6. AIDK 运行时接线必须继续满足 MIC 完全 release 后才允许 DAC reserve；
-7. 第一版只有 standalone BKVoice 会话/audio owner，断网回退固定 voice pack。AI Agent 若
-   替换它必须另做二选一 profile，不能并存第二套状态机。
+4. 已加入 task-neutral `bk7258_voice_capture` 和 joinable `bk7258_voice_ptt` worker owner：从 source
+   拼接固定 640-byte 帧，对 partial final frame 不补零，sink/start/audio/end/cancel 全部 fail closed；
+   PTT release 的强制顺序是 `interrupt recorder -> bounded join -> detach -> arbiter drain/release ->
+   sink TURN_END`，join 超时保留 worker/MIC 供安全重试。host fake source/sink 已覆盖正常、partial、
+   零长度、上行失败、start/cancel 清理和 join-timeout retry；owner 级主动 cancel、deadline
+   timeout、录音中 session close 和 sequence overflow 已统一按 stop/join/capture/turn 顺序清理。
+   voice-service 已用公共 recorder adapter 初始化空 owner；只有操作者显式执行
+   `bkvoice capture-test` 时才用 aggregate-only 本地 sink 开短会话，用于验证完整帧和非零 MIC
+   数据，不保存原始 PCM。产品 PTT 事件、真实 companion sink 与 Gateway transport 尚未接线；
+5. 下一刀将 CP 公共按键事件转换成有界 PTT control，AP worker 上传到用户 Gateway，由 ASR/LLM
+   和 P1 胜出的 TTS 热模型处理；不能让 RPMsg/GPIO callback 直接阻塞读取或操作音频句柄；
+6. Gateway 首个生成 chunk 立即重采样为 16 kHz/mono/S16/20 ms，禁止等整句 WAV；
+7. AIDK 运行时接线必须继续满足 MIC 完全 release 后才允许 DAC reserve；
+8. 当前基线只有 standalone BKVoice 会话/audio owner，断网回退固定 voice pack。优先验证
+   AI Agent 的替代 profile，通过清理、资源和实板门后切换，不能并存第二套状态机。
+
+BKVoice 的协议和清理门继续复用 [P2-A 单轮接话契约](shaniu-next-stage-single-turn-plan.md)，
+执行顺序以 [主计划第 17.5 节](shaniu-master-plan.md#openvela-mimo-execution) 为准，
+不重复已经完成的 host 纵切。产品 UART/串口功能明确不实现；只保留通用 provider seam，
+串口不进入运行路径、回退路径或验收门。
 
 本次 adapter 的 ownership 记录：
 
@@ -472,7 +609,7 @@ UIKit 的完整 video/media 组合在独立 Media profile 通过后再启用。�
 | 产品差异 | 16 kHz/mono/S16、半双工顺序、超时与恢复归 App |
 | 公共 ABI | 只调用 `media_recorder_*` / `media_player_*`，不 include Board 头、不访问寄存器或 SDK 私有 API |
 | 生命周期 | voice-service 启动只初始化空 context；会话 owner 才 acquire，release 成功才允许换向 |
-| 当前证据 | host fake-media 调用/故障测试和 AIDK build；尚无 PTT、Gateway 或实机 MIC/DAC turn 证据 |
+| 当前证据 | host fake-media、capture fake-source/sink、固定 tone PCM/partial-write/cancel 和 joinable PTT worker cancel/timeout/overflow 故障测试；AIDK CP/AP direct build、layer gate、ELF 存活检查和 build-manifest 生成通过；`capture-test` 与 `tone-test` 均仍缺实板 MIC、可听音/PA、物理按键、Gateway 或完整 MIC/DAC turn 证据 |
 
 ### P3：OpenVela 独立组件 profile
 
@@ -483,8 +620,9 @@ Chip 公共 API。`media-standard` 不与 P0 voice service 同启。
 
 ### P4：本地唤醒
 
-接入 TFLM+CMSIS-NN、1 秒 pre-roll、Media Trigger 插件、FAR/FRR 数据集和连续运行验收。
-首版保持 AP 常醒；低功耗唤醒另立 gate。
+接入 App-owned TFLM+CMSIS-NN KWS runner、1 秒 pre-roll、FAR/FRR 数据集和连续运行验收。
+Media Trigger adapter 只在独立 `media-standard` profile 中验证，不与当前 standalone BKVoice
+形成第二 owner。首版保持 AP 常醒；低功耗唤醒另立 gate。
 
 ### P5：相机、双屏与旅行场景
 
@@ -529,9 +667,10 @@ CI/交付门槛：
 
 无硬件阶段：
 
-- manifest/WAV/parser、RPMsg wire ABI、`companion-v1` codec/session、纯 turn-arbiter 和
-  public-media adapter host tests 通过；adapter 只证明 ABI 映射与故障回滚，尚未实现的 PTT、
-  capture reader/uplink、KWS、Gateway transport 和实机 audio turn 不得列为已通过；
+- manifest/WAV/parser、RPMsg wire ABI、`companion-v1` codec/session、纯 turn-arbiter、
+  public-media adapter、capture frame-pump 和 PTT worker owner host tests 通过；这些只证明
+  ABI 映射、完整帧与故障回滚，尚未实现的产品 PTT event、真实 companion sink、KWS、
+  Gateway transport 和实机 audio turn 不得列为已通过；
 - source audit 明确列出 `received/sent/collision` 数量与总时长，训练 worklog 明确区分
   `NOT_STARTED/PREPARED/TRAINING/EVALUATED/SELECTED`，双方音频绝不混合；
 - layer gate、Classic Make/CMake、AIDK AP/CP 及每个独立 component profile 构建通过；
@@ -540,15 +679,20 @@ CI/交付门槛：
 实机阶段：
 
 1. 合法 voice pack `VERIFY PASS`，缺授权、路径穿越、错误采样率稳定失败；
-2. standalone raw profile 连续播放 100 次无 reserve、fd、mqueue 或 heap 泄漏；标准 Media
+2. `bkvoice tone-test` 连续 10 次均可听到约 500 ms 的纯音，无明显爆音/削波，日志固定返回
+   25 帧、16000 字节和峰值 4096；示波或逻辑分析核对 PA P50 只覆盖播放生命周期，执行前后
+   无 reserve、fd、mqueue 或 heap 泄漏；
+3. `bkvoice capture-test 1000` 连续 10 次均返回完整帧、非零样本和非零峰值；静音/说话两组
+   记录用于检查峰值响应，前后 `bkvoice status` 与 `apctl health` 正常，且没有原始 PCM 文件；
+4. standalone raw profile 连续播放 100 次无 reserve、fd、mqueue 或 heap 泄漏；标准 Media
    是后续独立替换 profile，通过同等测试前不与之组合；
-3. `apctl status` 全程 HEALTHY，音频 P95 frame deadline、stack high-water 和 min-free 有记录；
-4. 高 8 MiB 若启用，跨核、DMA、camera、双屏、休眠恢复和 24 小时压力全部通过；
-5. KWS 在目标噪声集达到约定 FAR/FRR，触发时 pre-roll 连续且旧 generation 数据被拒绝；
-6. TLS 强校验，凭据撤销、错误证书、断网、Gateway 重启和重放攻击均 fail closed；
-7. camera 只有显式授权才工作，MIC/camera 指示与真实资源占用同步；
-8. 固件、模型、音色资产可独立升级/回滚，任一失败不改写 `sys_rf`；
-9. Gateway 用同一 holdout 对零样本与微调模型记录冷/热首包、RTF、显存和盲测；只有
+5. `apctl status` 全程 HEALTHY，音频 P95 frame deadline、stack high-water 和 min-free 有记录；
+6. 高 8 MiB 若启用，跨核、DMA、camera、双屏、休眠恢复和 24 小时压力全部通过；
+7. KWS 在目标噪声集达到约定 FAR/FRR，触发时 pre-roll 连续且旧 generation 数据被拒绝；
+8. TLS 强校验，凭据撤销、错误证书、断网、Gateway 重启和重放攻击均 fail closed；
+9. camera 只有显式授权才工作，MIC/camera 指示与真实资源占用同步；
+10. 固件、模型、音色资产可独立升级/回滚，任一失败不改写 `sys_rf`；
+11. Gateway 用同一 holdout 对零样本与微调模型记录冷/热首包、RTF、显存和盲测；只有
    `SELECTED` 资产才能服务 AIDK，撤销后 reference/cache/checkpoint/签发资产均不可再用；
-10. 最终只把通过 `BOARD_VERIFIED` 的板端能力和通过 `EVALUATED/SELECTED` 的模型能力写进
+12. 最终只把通过 `BOARD_VERIFIED` 的板端能力和通过 `EVALUATED/SELECTED` 的模型能力写进
     产品说明。

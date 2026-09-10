@@ -22,5 +22,14 @@ int bkvision_rpc_validate_frame(struct bkvision_rpc_response_s *response,
                                 uint32_t width, uint32_t height,
                                 uint32_t pixel_format,
                                 uint32_t capture_sequence);
+int bkvision_copy_jpeg_frame(struct bkvision_rpc_response_s *response,
+                             uint8_t *destination,
+                             size_t destination_capacity,
+                             size_t *destination_size,
+                             const uint8_t *frame, size_t frame_capacity,
+                             size_t bytes_used, uint32_t driver_flags,
+                             uint32_t width, uint32_t height,
+                             uint32_t pixel_format,
+                             uint32_t capture_sequence);
 
 #endif /* __APP_BK7258_BK7258_VISION_CORE_H */

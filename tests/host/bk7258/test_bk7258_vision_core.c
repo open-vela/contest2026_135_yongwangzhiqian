@@ -24,6 +24,8 @@ int main(void)
   const uint8_t jpeg[] = {0xff, 0xd8, 0x11, 0x22, 0xff, 0xd9};
   const uint8_t no_soi[] = {0x00, 0x01, 0x11, 0x22, 0xff, 0xd9};
   const uint8_t no_eoi[] = {0xff, 0xd8, 0x11, 0x22, 0x00, 0x01};
+  uint8_t copy[sizeof(jpeg)] = {0};
+  size_t copied = 99;
   assert(bkvision_rpc_request_valid(&q));
   bkvision_rpc_make_response(&r, &q, 0);
   assert(bkvision_rpc_validate_frame(&r, jpeg, sizeof(jpeg), sizeof(jpeg),
@@ -33,6 +35,29 @@ int main(void)
   assert(r.flags == (BKVISION_FLAG_JPEG_SOI | BKVISION_FLAG_JPEG_EOI));
   assert(r.session_id == 2 && r.sequence == 3 && r.reserved[0] == 0);
   assert(bkvision_rpc_response_valid(&r));
+  assert(bkvision_copy_jpeg_frame(&r, copy, sizeof(copy), &copied,
+                                  jpeg, sizeof(jpeg), sizeof(jpeg), 0,
+                                  640, 480, BKVISION_PIXEL_FORMAT_JPEG,
+                                  9) == 0);
+  assert(copied == sizeof(jpeg) && memcmp(copy, jpeg, sizeof(jpeg)) == 0);
+  copied = 99;
+  assert(bkvision_copy_jpeg_frame(&r, copy, sizeof(copy) - 1, &copied,
+                                  jpeg, sizeof(jpeg), sizeof(jpeg), 0,
+                                  640, 480, BKVISION_PIXEL_FORMAT_JPEG,
+                                  9) == -ENOSPC);
+  assert(copied == 0 && r.operation_status == -ENOSPC && r.bytes_used == 0);
+  copied = 99;
+  assert(bkvision_copy_jpeg_frame(&r, copy, sizeof(copy), &copied,
+                                  no_eoi, sizeof(no_eoi), sizeof(no_eoi), 0,
+                                  640, 480, BKVISION_PIXEL_FORMAT_JPEG,
+                                  9) == -EPROTO);
+  assert(copied == 0 && r.bytes_used == 0);
+  copied = 99;
+  assert(bkvision_copy_jpeg_frame(&r, NULL, sizeof(copy), &copied,
+                                  jpeg, sizeof(jpeg), sizeof(jpeg), 0,
+                                  640, 480, BKVISION_PIXEL_FORMAT_JPEG,
+                                  9) == -EINVAL);
+  assert(copied == 0);
   r.operation_status = 1;
   assert(!bkvision_rpc_response_valid(&r));
   assert(bkvision_rpc_validate_frame(&r, jpeg, sizeof(jpeg), sizeof(jpeg),

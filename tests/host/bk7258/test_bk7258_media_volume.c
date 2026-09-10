@@ -45,6 +45,11 @@ int main(void)
   assert(bk7258_media_volume_acquire(BK7258_MEDIA_VOLUME_DISPLAY) == 0);
   assert(bk7258_media_volume_acquire(BK7258_MEDIA_VOLUME_VISION) == -EBUSY);
   assert(bk7258_media_volume_release(BK7258_MEDIA_VOLUME_DISPLAY) == 0);
+  assert(bk7258_media_volume_acquire(BK7258_MEDIA_VOLUME_PREFERENCES) == 0);
+  assert(bk7258_media_volume_acquire(BK7258_MEDIA_VOLUME_DISPLAY) == -EBUSY);
+  assert(bk7258_media_volume_acquire(BK7258_MEDIA_VOLUME_VISION) == -EBUSY);
+  assert(bk7258_media_volume_release(BK7258_MEDIA_VOLUME_PREFERENCES) == 0);
+  assert(leases == 0);
   puts("BKVISION_VOLUME_HOST_TEST_PASS");
   return 0;
 }
