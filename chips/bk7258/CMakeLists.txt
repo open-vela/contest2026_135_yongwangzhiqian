@@ -21,6 +21,15 @@ set(BK7258_SDK_DIR "$ENV{BK7258_SDK_DIR}")
 set(BK7258_SDK_INCLUDE_DIR "${BK7258_SDK_DIR}/include")
 set(BK7258_SDK_CONFIG_DIR "${BK7258_SDK_DIR}/config")
 set(BK7258_SDK_LIBS_DIR "${BK7258_SDK_DIR}/libs")
+# SDK implementation details are owned by the chip, never by a board.
+foreach(BK7258_REQUIRED_SDK_PATH
+        "${BK7258_SDK_INCLUDE_DIR}" "${BK7258_SDK_CONFIG_DIR}"
+        "${BK7258_SDK_LIBS_DIR}")
+  if(NOT EXISTS "${BK7258_REQUIRED_SDK_PATH}")
+    message(FATAL_ERROR "BK7258 SDK input is missing: ${BK7258_REQUIRED_SDK_PATH}")
+  endif()
+endforeach()
+
 set(BK7258_NUTTX_OVERLAY_DIR "${NUTTX_DIR}/../vendor/beken/nuttx")
 
 if(CONFIG_CL_MFRC522_FRAME AND CONFIG_CL_MFRC522)
@@ -36,6 +45,14 @@ function(bk7258_wrap_sdk_symbol)
   foreach(BK7258_SYMBOL ${ARGN})
     target_link_options(nuttx PRIVATE
                         "LINKER:--wrap=${BK7258_SYMBOL}")
+  endforeach()
+endfunction()
+
+# Kernel compatibility is not an SDK ABI adapter. Applicability is checked
+# by kernel_compat.json at the sole build entry and by the private header.
+function(bk7258_wrap_kernel_symbol)
+  foreach(BK7258_SYMBOL ${ARGN})
+    target_link_options(nuttx PRIVATE "LINKER:--wrap=${BK7258_SYMBOL}")
   endforeach()
 endfunction()
 
@@ -676,11 +693,40 @@ target_include_directories(arch SYSTEM PRIVATE
 # authoritative.  Keep only OpenVela feature-local definitions here.
 
 if(NOT CONFIG_BK7258_AP_CORE)
-  bk7258_wrap_sdk_symbol(arm_doirq nxsched_resume_scheduler)
+  bk7258_wrap_kernel_symbol(arm_doirq nxsched_resume_scheduler)
 elseif(CONFIG_BK7258_AP_SMP_SCHED_ONLINE)
-  bk7258_wrap_sdk_symbol(arm_doirq nxsched_resume_scheduler nx_bringup)
+  bk7258_wrap_kernel_symbol(arm_doirq nxsched_resume_scheduler nx_bringup)
 endif()
 
 target_link_options(nuttx PRIVATE
                     "LINKER:--build-id=none"
                     "LINKER:--entry=_vectors")
+
+# CP owns Flash access. The SDK ABI adapters in common/bk7258_sdk_partition.c
+# consume the generated layout contract selected by the board.
+
+if(NOT CONFIG_BK7258_AP_CORE)
+  foreach(BK7258_PARTITION_SYMBOL
+          bk_flash_partition_get_info
+          bk_flash_partition_read
+          bk_flash_partition_write
+          bk_flash_partition_erase
+          bk_flash_partition_write_perm_check_by_addr)
+    target_link_options(nuttx PRIVATE
+                        "LINKER:--wrap=${BK7258_PARTITION_SYMBOL}")
+  endforeach()
+endif()
+
+# sdk rebuild resolves the profile-specific closure.  The chip links every
+# resulting input without repeating vendor library names or feature maps.
+file(GLOB BK7258_SDK_LINK_INPUTS CONFIGURE_DEPENDS
+     "${BK7258_SDK_LIBS_DIR}/*.a"
+     "${BK7258_SDK_LIBS_DIR}/*.o"
+     "${BK7258_SDK_LIBS_DIR}/*.obj")
+list(SORT BK7258_SDK_LINK_INPUTS)
+if(NOT BK7258_SDK_LINK_INPUTS)
+  message(FATAL_ERROR "BK7258 SDK profile has no resolved link inputs")
+endif()
+foreach(BK7258_SDK_LINK_INPUT ${BK7258_SDK_LINK_INPUTS})
+  nuttx_add_extra_library("${BK7258_SDK_LINK_INPUT}")
+endforeach()

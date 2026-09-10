@@ -52,6 +52,31 @@ Manifest 将团队维护的 chip、board、工具、应用和目标端测试映�
 标准扩展位置。Host 测试、`docs/` 和 `logs/` 只存在于团队仓；目标端
 CMocka 链接到官方 `apps/testing/bk7258` 自动发现点，串口用例只链接到官方 pytest 的测试子目录。
 
+开发者可在工作区顶层创建 `.repo/local_manifests/dolphin.xml`，以
+`extend-project` 覆盖已检出团队项目的来源和 revision；不复制团队项目已有的整套
+`linkfile`。Repo 的 [`extend-project` 与 local manifest
+说明](https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md) 确认该元素可
+覆盖既有项目的 `remote` 与 `revision`。
+
+```xml
+<manifest>
+  <remote name="team-dev" fetch="https://github.com/Embracecactus/"/>
+  <extend-project name="contest2026_135_yongwangzhiqian"
+                  path="contest2026_135_yongwangzhiqian"
+                  remote="team-dev"
+                  revision="refs/heads/feat/bk7258-dolphin"/>
+</manifest>
+```
+
+这类 local manifest 只服务本机开发，不是官方比赛交付的一部分。官方交付只能由远端
+已提交的 `contest2026_135_yongwangzhiqian.xml` 及其包含的 `openvela.xml` 复现：其中
+默认 remote 为 `openvela`、默认 revision 为 `dev-ai-contest-2026`，BK7258 SDK 固定为
+`Embracecactus/bk_avdk_smp@cb080de1655d579c7593ecf504c440997c4c137b`。开发分支 `feat/bk7258-dolphin` 包含 `app/dolphin/` 及对应linkfile；
+获取开发实现需使用上述local manifest覆盖，并记录实际提交。官方比赛清单仍指向官方
+接收仓，只有对应提交合入后才能用默认清单复现；本次发布不代表已执行完整repo sync。复现或交付前
+记录实际检出身份：`git -C contest2026_135_yongwangzhiqian rev-parse HEAD` 与
+`git -C contest2026_135_yongwangzhiqian remote -v`。
+
 ## 四、运行方式
 
 ### 1. 获取完整工作区
@@ -143,8 +168,12 @@ ZIP 同时包含 accepted-base/release/build manifest、板级发布策略、SHA
 正式签名发布。未接入量产写号与校准流程前，清单会明确标记工厂镜像
 `requires-provisioning`，不会伪造一个通用 factory BIN。
 
-`--boot mcuboot` 是正式签名链，但需要该次发布新生成的 BL1/MCUboot 公钥、私钥侧
-发布步骤和严格递增的回滚计数。不要复用历史私钥。完整流程和烧录边界见
+`--boot mcuboot` 是正式签名链：构建只接收受信 BL1/MCUboot 公钥，发布在批准的私钥
+签名边界完成，计数继续遵循当前 `+GENERATION` 映射及目标已启用的接受下限；
+独立产物号不改变这些规则。A8 持续受信身份以公钥指纹和批准的签名者
+引用标识；私钥不进入仓库、`out/`、命令记录或交付证据。创建、导入、轮换、撤销、迁移
+或销毁身份均须单独的所有者授权，不能由一次完整下载、profile 切换或 `--clean` 隐含触发。
+完整流程和烧录边界见
 [构建/烧录/调试 SOP](docs/platforms/bk7258/nuttx-port/bk7258-build-flash-debug-sop.md)。
 正式版本分别通过 `release full` 与 `release ota` 生成并验证，再使用
 `release product --full-release ... --base ... --ota-release ...

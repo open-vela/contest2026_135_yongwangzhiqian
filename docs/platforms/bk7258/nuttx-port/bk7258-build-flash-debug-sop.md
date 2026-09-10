@@ -67,10 +67,17 @@ a separately authorized hardware security design and provisioning review.
 
 ## MCUboot build and signed package
 
-`--boot mcuboot` additionally requires explicit BL1 and MCUboot public PEMs,
-OpenSSL and a rollback floor. It generates private defconfig overlays and
-public-only C sources under `out/`; no tracked key or boot-mode config exists.
-The build command prints the only manifest accepted by signed release.
+`--boot mcuboot` additionally requires the approved BL1 and MCUboot public
+PEMs, OpenSSL and a rollback floor. A8 uses a sustained trusted signing
+identity: its public fingerprints and approved signer reference are release
+evidence, while private signing material remains at an approved secure local
+PEM path. The current release interface accepts private PEM paths; a secret
+manager or HSM is only a possible authorized storage arrangement, not a
+verified signing-backend adapter in this workflow. The build consumes only
+public keys, generates
+private defconfig overlays and public-only C sources under `out/`, and never
+records a private-key path or value. The build command prints the only manifest
+accepted by signed release.
 
 Signed creation never accepts hand-entered artifact, ELF, member-name, SDK or
 counter lists. Use that manifest and one version whose `+GENERATION` equals the
@@ -123,7 +130,7 @@ tools/bk7258/bk7258.py release product \
 
 Omit both OTA arguments when no compatible OTA is available.  The product
 command accepts different full/OTA build manifests so a wired full release may
-rotate its fresh root while the OTA remains signed by the root installed on
+install a separately authorized replacement root while the OTA remains signed by the root installed on
 the source devices.  `release.json` records these separately as the recovery's
 `installed_root` and the OTA's `required_source_root`; they need not be equal.
 Board, layout and target version must still match.
@@ -180,31 +187,36 @@ tools/bk7258/bk7258.py verify delivery \
 The trust and signed-delivery commands verify both BL1 Manifests, packaged
 BL1/BL2 roots and CP/AP MCUboot signatures without private keys.
 
-## Fresh trust generation for every full download
+## A8 sustained trust identity and signing boundary
 
-Every owner-authorized full BK Loader download is a new trust generation,
-including a switch between diagnostic and performance profiles:
+An owner-authorized full BK Loader download does not create a new trust
+generation by itself. A8 maintains two independent trust layers, BL1 and
+MCUboot, under sustained identities identified by their public fingerprints and
+approved signer references. A normal release reuses their public keys and the
+approved private PEM signing input when boot components, configuration, toolchain,
+protected metadata and dependencies remain compatible.
 
-1. Create two new, independent P-256 keypairs in a new mode-0700 temporary
-   directory: one for BL1 and one for MCUboot.  Never reuse either private key
-   from a previous full download and never use one key for both trust layers.
-2. Keep private PEM files mode 0600.  Do not print them, copy them into tracked
-   files or ordinary logs, or record their temporary paths.  Retain only public
-   fingerprints and signed artifacts.
-3. Embed the new public keys in a `--boot mcuboot --clean` build and release
-   with the matching private keys. The version's `+GENERATION` is the single
-   BL1/MCUboot security-counter source and must be strictly higher than the
-   last accepted target.
-4. Before writing, independently pass package structure, public trust chain,
-   selected-layout flash contract and materialization verification.  The new
-   public key is not expected to match the old target before it is installed.
-5. After package, download and board acceptance, delete that generation's
-   temporary private-key directory.  A later full download starts again at
-   step 1, even when the firmware content is otherwise unchanged.
+The build/sign boundary is deliberate:
 
-The OTA path is different: it remains bound to the public trust root
-already installed on the target and must not be used as a shortcut around the
-fresh-generation full-download rule.
+1. Build with the approved public PEMs only. The build manifest records public
+   trust inputs and is the sole input accepted by release creation.
+2. The current release CLI signs from approved private PEM paths. A secret
+   manager or HSM may be an authorized storage arrangement before that input is
+   supplied, but no adapter integration is claimed here. Private key values and
+   paths must not be placed in the repository, `out/`, ordinary logs, package
+   evidence or operator handoff.
+3. Record the signer reference and public fingerprints in release evidence;
+   public verification validates the resulting chain without private keys.
+4. Creation, import, rotation, revocation, migration or destruction of either
+   identity is a separately owner-authorized identity operation. Neither a
+   full download, diagnostic/performance switch, `--clean`, nor a source rebuild
+   grants that authorization.
+
+An authorized identity transition embeds the replacement public key in the
+affected boot chain and follows the package, rollback, selected-layout and
+materialization checks before writing. The OTA path remains bound to the public
+root installed on its source target. Its eligibility, and the recovery method
+for an identity transition, are separate decisions pending their own validation.
 
 ## Persistence
 
@@ -267,8 +279,8 @@ Read only the stage relevant to the requested delivery.
 - **Hardware-fast debug iteration:** follow the repository's hardware-fast
   loop, build only the affected target and hand off the exact debug artifact
   with minimum integrity checks. Defer broad regression and release assembly.
-  A whole-device BIN still requires accepted-base, fresh-key, signature,
-  rollback and exact-Flash-size checks; prefer the permitted installed
+  A whole-device BIN still requires accepted-base, approved signing identity,
+  signature, rollback and exact-Flash-size checks; prefer the permitted installed
   apps-only contract where applicable.
 - **Final source acceptance:** run `git diff --check`, the host BK7258
   regression and header audit, validate manifest and local documentation
@@ -294,10 +306,11 @@ Read only the stage relevant to the requested delivery.
   products use `release product`. The verified ZIP includes `release.json`,
   `SHA256SUMS`, `FLASHING.md`, accepted-base/build/release-policy evidence,
   the complete device-bound recovery BIN and any compatible OTA package.
-  OTA updates CP/AP, declares the accepted source version and installed root;
-  wired recovery separately declares the new root it installs. A root, BL2 or
-  layout transition requires wired full recovery. A universal factory image
-  requires the reviewed per-device provisioner; otherwise declare
+  OTA updates CP/AP and declares the accepted source version and installed root.
+  The eligibility and recovery method for a root, BL2 or layout transition are
+  separate decisions pending their own validation; this SOP does not prescribe
+  wired full recovery. A universal factory image requires the reviewed
+  per-device provisioner; otherwise declare
   `requires-provisioning`.
 - **Atomic publication:** publish release directories and ZIPs with no-replace
   semantics; even an existing empty destination is an error. Packaged

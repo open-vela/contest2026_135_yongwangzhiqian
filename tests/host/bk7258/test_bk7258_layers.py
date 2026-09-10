@@ -61,6 +61,30 @@ def _fixture(root: Path) -> None:
         "int bk7258_chip_initialize(void) { return 0; }\n",
     )
     _write(root, "app/bk7258/app.c", "int main(void) { return 0; }\n")
+    _write(
+        root,
+        "app/dolphin/dolphin_main.c",
+        "#include <arch/chip/bk7258_gpio.h>\n"
+        "#include <nuttx/config.h>\n"
+        "int dolphin_main(void) { return bk7258_gpio_initialize(); }\n",
+    )
+    _write(
+        root,
+        "boards/bk7258/test/CMakeLists.txt",
+        "target_link_libraries(board PRIVATE nuttx)\n",
+    )
+    _write(
+        root,
+        "boards/bk7258/test/scripts/build.sh",
+        "# --wrap=bk_flash_partition_read is an SDK-private linker option\n"
+        "target_link_libraries(board PRIVATE nuttx) # --wrap,bk_flash_partition_read\n"
+        "exec \"$@\"\n",
+    )
+    _write(
+        root,
+        "app/dolphin/Link.defs",
+        "INCLUDES += -I$(TOPDIR)/chips/bk7258/include\n",
+    )
     _exceptions(root, [])
 
 
@@ -75,7 +99,7 @@ def test_clean_fixture() -> None:
         _fixture(root)
         issues, report = layers.audit(root)
         assert not issues, issues
-        assert report.source_files == 3
+        assert report.source_files == 4
         assert report.kconfig_symbols == 2
 
 
@@ -137,6 +161,47 @@ def test_all_boundary_failures() -> None:
         assert expected <= found, expected - found
 
 
+def test_app_and_board_build_sdk_boundaries() -> None:
+    with tempfile.TemporaryDirectory(prefix="bk7258-layers-build-") as temporary:
+        root = Path(temporary)
+        _fixture(root)
+        assert not _codes(root)
+
+        _write(
+            root,
+            "app/dolphin/private_sdk.c",
+            "#include <driver/gpio.h>\n"
+            "int f(void) { return __wrap_bk_flash_partition_read() + "
+            "__real_bk_flash_partition_read() + sys_drv_aud_select_clock(); }\n",
+        )
+        _write(
+            root,
+            "boards/bk7258/test/CMakeLists.txt",
+            "set(BK7258_SDK_LIBS_DIR \"/sdk/libs\")\n"
+            "target_include_directories(board PRIVATE /sdk/include)\n"
+            "target_link_libraries(board PRIVATE /sdk/libbk_driver.a)\n",
+        )
+        _write(
+            root,
+            "boards/bk7258/test/scripts/board.sh",
+            "ldflags='-Wl,--wrap,bk_flash_partition_read'\n"
+            "sdk_root=armino_as_lib/components\n",
+        )
+        _write(
+            root,
+            "app/dolphin/Make.defs",
+            "DOLPHIN_SDK_HOOK = bk_flash_partition_get_info\n"
+            "LDFLAGS += --wrap=${DOLPHIN_SDK_HOOK}\n",
+        )
+        found = _codes(root)
+        assert "SDK_INCLUDE" in found
+        assert "CHIP_LINK_INTERCEPT" in found
+        assert "SDK_SYMBOL" in found
+        assert "SDK_BUILD_PRIVATE" in found
+        assert "SDK_BUILD_SYMBOL" in found
+        assert "SDK_LINK_WRAP" in found
+
+
 def test_nuttx_gpio_force_feedback_contract() -> None:
     with tempfile.TemporaryDirectory(prefix="bk7258-layers-ff-") as temporary:
         root = Path(temporary)
@@ -180,6 +245,7 @@ def main() -> int:
     test_clean_fixture()
     test_all_boundary_failures()
     test_nuttx_gpio_force_feedback_contract()
+    test_app_and_board_build_sdk_boundaries()
     test_legacy_exception_is_hash_bound()
     print("BK7258_LAYER_TEST_PASS")
     return 0

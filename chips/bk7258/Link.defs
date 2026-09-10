@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: Apache-2.0
+# Public final-link contract; implementation and vendor inputs are chip-owned.
+
+ifndef BK7258_LINK_DEFS_INCLUDED
+BK7258_LINK_DEFS_INCLUDED := y
+
+# CP-only SDK partition adapters, implemented by the chip.
+
+ifneq ($(CONFIG_BK7258_AP_CORE),y)
+LDFLAGS += --wrap=bk_flash_partition_get_info
+LDFLAGS += --wrap=bk_flash_partition_read
+LDFLAGS += --wrap=bk_flash_partition_write
+LDFLAGS += --wrap=bk_flash_partition_erase
+LDFLAGS += --wrap=bk_flash_partition_write_perm_check_by_addr
+endif
+
+# The unified builder supplies one already-resolved SDK profile closure.
+BK7258_SDK_LIBS_DIR := $(BK7258_SDK_DIR)$(DELIM)libs
+
+# Link the profile-resolved SDK closure without naming vendor libraries.
+BK_SDK_LIBS_DIR := $(realpath $(BK7258_SDK_DIR)$(DELIM)libs)
+ifeq ($(BK_SDK_LIBS_DIR),)
+$(error BK7258_SDK_DIR has no libs directory)
+endif
+BK7258_SDK_LINK_INPUTS := $(sort $(wildcard $(BK_SDK_LIBS_DIR)/*.a) $(wildcard $(BK_SDK_LIBS_DIR)/*.o) $(wildcard $(BK_SDK_LIBS_DIR)/*.obj))
+ifeq ($(BK7258_SDK_LINK_INPUTS),)
+$(error BK7258 SDK profile has no resolved link inputs)
+endif
+EXTRA_LIBS += $(BK7258_SDK_LINK_INPUTS)
+
+endif # BK7258_LINK_DEFS_INCLUDED

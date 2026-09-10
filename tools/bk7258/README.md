@@ -4,6 +4,37 @@
 verifies, packages and deploys artifacts; command implementations live in
 `_lib/`.
 
+
+## Responsibility and reproduction boundaries
+
+The public CLI parses arguments, dispatches operations and prints results. The
+existing modules own their domain rules; module count is not a cleanup target.
+
+| Responsibility | Existing owner |
+| --- | --- |
+| Build/configuration, layout, SDK and toolchain | `build.py`, `layout.py`, `sdk.py`, `toolchain.py`; official build backend executes dependencies |
+| Image encoding, `.bkpack` and verification | `image.py`, `package.py`, `trust.py` |
+| Artifact identity/name, release-directory evidence, delivery and recovery policy | `product.py`; `release_product` receives an explicit verification callback, never CLI arguments or device control |
+| Transport and console control | `deploy.py`, `deploy_usb.py`, `deploy_console.py`; not prerequisites for compilation |
+| Static ownership checks | `layers.py`; kernel compatibility checks stay in the existing dedicated implementation |
+| Voice provisioning/KWS and display asset preparation | `voice.py`, `voice_kws.py`, `display_assets.py`; product tools, not build policy |
+
+`build.validate_provenance` is the shared public evidence validator. Consumers
+do not call a private build helper or independently recalculate the schema.
+This change moves the reviewed release rules; it does not claim every CLI
+operation is now free of orchestration. Eager command registration/imports
+remain unchanged; command-specific lazy loading is not a measured speedup or a
+prerequisite for this iteration.
+
+Team-authored firmware stays in the team repository. The local Dolphin sources
+live in `app/dolphin`, while existing Shaniu services remain in `app/bk7258`.
+IndexTTS/server/phone/training components do not acquire a NuttX link merely by
+being part of the product; source ownership and build registration are separate.
+No new Git repository or `ttsindex` manifest project is introduced here.
+Existing `frameworks`/`external` links retain their patch-integration purpose.
+For the explicit development remote override and official delivery distinction,
+see the root [README](../../README.md).
+
 ## Source-layer gate
 
 Every `bk7258.py build` runs the board/chip/app ownership gate before it
@@ -14,11 +45,17 @@ python3 tools/bk7258/bk7258.py verify layers
 ```
 
 The gate rejects raw Beken SDK headers, calls and types in `boards/bk7258` or
-`app/bk7258`; chip-to-board dependencies; physical pin/bus ownership in app;
+`app` (including `app/dolphin`); chip-to-board dependencies; physical pin/bus ownership in app;
 CP-only Kconfig symbols nested in AP-only menus (and the reverse); and new
 product GATT/UUID policy in the chip layer.  Product protocol belongs in app,
 physical and calibration facts belong in board, and SDK/controller mechanics
 belong in chip.
+
+The current working-tree gate also scans CMake/Make and related scripts under
+`boards/bk7258` and `app` for private SDK paths, libraries, symbols and linker
+wrapping. It is a static lexical check, not a CMake interpreter or proof of ELF
+resolution, runtime behavior or every Kconfig dependency. New app subdirectories
+are enumerated; dynamic/generated dependencies still need targeted review.
 
 `layer_exceptions.json` contains only hash-bound legacy product-protocol files.
 Changing one invalidates the gate and requires a deliberate layer review; it

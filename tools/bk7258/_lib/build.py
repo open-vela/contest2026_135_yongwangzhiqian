@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from _lib import image as image_domain
+from _lib import kernel_compat as kernel_compat_domain
 from _lib import layout as layout_domain
 from _lib import sdk as sdk_domain
 from _lib import toolchain as toolchain_domain
@@ -1178,7 +1179,8 @@ def _source_tree_state(repository: Path, scopes: list[str], *,
             "input_tree_sha256": tree.hexdigest(), "input_count": count}
 
 
-def _validate_provenance(value: object) -> dict[str, object]:
+def validate_provenance(value: object) -> dict[str, object]:
+    """Validate the shared build-source evidence contract for consumers."""
     row = _manifest_mapping(value, {"source_commit", "dirty", "input_tree_sha256",
                                    "input_count", "scope", "product", "profiles", "dependencies"},
                             "provenance")
@@ -1633,7 +1635,7 @@ def load_build_manifest(repository: Path, path: Path) -> BuildManifest:
         role_identities=role_identities,
         rollback_floor=rollback_floor,
         trust_fingerprints=trust_fingerprints,
-        provenance=_validate_provenance(document["provenance"])
+        provenance=validate_provenance(document["provenance"])
         if manifest_format == BUILD_MANIFEST_FORMAT else None,
     )
 
@@ -1650,6 +1652,13 @@ def build(repository: Path, cp_config: Path, ap_config: Path, partition: Path,
         raise BuildError("jobs must be positive")
     repository = _directory(repository, "contest repository")
     workspace = _build_workspace(repository, workspace)
+    try:
+        kernel_compat_domain.verify_sources(
+            repository, workspace / "nuttx",
+            provenance_root=repository.parent / "nuttx",
+        )
+    except kernel_compat_domain.KernelCompatError as error:
+        raise BuildError(str(error)) from error
     official_build = _official_entry(workspace / "build.sh", workspace)
     toolchain = resolve_toolchain(repository, workspace)
     cp = config_profile(repository, cp_config, "cp")
@@ -1702,11 +1711,19 @@ def build(repository: Path, cp_config: Path, ap_config: Path, partition: Path,
         repository, workspace, official_build, cp, cp_build_config,
         selected_layout, toolchain, jobs, clean
     )
+    try:
+        kernel_compat_domain.verify_role_config("cp", cp_result.dotconfig)
+    except kernel_compat_domain.KernelCompatError as error:
+        raise BuildError(str(error)) from error
     ap_result = _role_build(
         repository, workspace, official_build, ap, ap_build_config,
         selected_layout, toolchain, jobs, clean,
         public_sources.catalog_source if public_sources is not None else None,
     )
+    try:
+        kernel_compat_domain.verify_role_config("ap", ap_result.dotconfig)
+    except kernel_compat_domain.KernelCompatError as error:
+        raise BuildError(str(error)) from error
     _verify_storage_topology(cp_result, ap_result, selected_layout)
     if boot == "direct":
         bl2 = None

@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "nuttx": {
+    "commit": "76354c637858ecb0aa4601629327acb6f44a26bb",
+    "provenance": "OpenVela NuttX Git HEAD reviewed for retained BK7258 wrappers"
+  },
+  "source_files": [
+    {"path": "arch/arm/src/arm_m/arm_exception.S", "sha256": "fddf5ff017002bf342357bf6d21a86c66116a5a75988a1dac074b16fd34f1127"},
+    {"path": "arch/arm/src/armv8-m/arm_doirq.c", "sha256": "7d043a0022d2e5fe2df3a0715de7f527f95c5bc7075951732658df1dd7e9593e"},
+    {"path": "arch/arm/src/armv8-m/arm_initialstate.c", "sha256": "f65df5a03fbc384e070d49395d084fb3cbf3084779dbb22b29e97a4fd7ea9348"},
+    {"path": "arch/arm/include/arm_m/irq.h", "sha256": "2353d2a5224b26c823602757d8dd240c3f61732bd04549b9a784fc003d5952b1"},
+    {"path": "arch/arm/include/irq.h", "sha256": "8342ecba8a8394f1e947db96f7c87a6fffb9cca47ba7e10f719968318b294fef"},
+    {"path": "sched/sched/sched_switchcontext.c", "sha256": "f08bf1f34fca4164f40b858a689242b667951d439aeb37aaead9cc08933ba49b"},
+    {"path": "sched/init/nx_start.c", "sha256": "2b7179bf54c3fd0b5a1ecaa0a40a650fe663135da0635485c13cf6ca315fb1b8"},
+    {"path": "sched/init/nx_bringup.c", "sha256": "804a514de526369fdeeda95c45527b1902b057ef9bed20568024ed3c3f2b68d1"},
+    {"path": "sched/init/nx_smpstart.c", "sha256": "f251ffc0cb9cdf231fcda00a0d31380cd8d734734474918263c472c3eff80e1a"}
+  ],
+  "wrappers": {
+    "__wrap_arm_doirq": {"disposition": "C", "physical_validation": "pending", "roles": ["ap", "cp"]},
+    "__wrap_nxsched_resume_scheduler": {"disposition": "C", "physical_validation": "pending", "roles": ["ap", "cp"]},
+    "__wrap_nx_bringup": {"disposition": "C", "physical_validation": "pending", "roles": ["ap"]}
+  }
+}

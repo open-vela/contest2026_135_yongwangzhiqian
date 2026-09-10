@@ -118,7 +118,7 @@ class BuildWorkspaceTest(unittest.TestCase):
         self.assertTrue(changed["dirty"])
         self.assertNotEqual(original["input_tree_sha256"], changed["input_tree_sha256"])
         self.assertNotEqual(original["dependencies"]["nuttx"], changed["dependencies"]["nuttx"])
-        self.assertEqual(build_domain._validate_provenance(changed), changed)
+        self.assertEqual(build_domain.validate_provenance(changed), changed)
 
     def test_missing_signing_identity_never_starts_a_tool(self) -> None:
         with mock.patch.object(trust_domain, "_run") as runner:

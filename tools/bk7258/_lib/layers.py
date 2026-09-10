@@ -21,7 +21,10 @@ SDK_INCLUDE_ROOTS = {
     "posix",
     "soc",
 }
+SDK_PRIVATE_INCLUDE_ROOTS = {"armino_as_lib", "bk_avdk", "bk_idk"}
 SOURCE_SUFFIXES = {".c", ".h", ".cc", ".cpp"}
+BUILD_FILENAMES = {"CMakeLists.txt", "Makefile", "Make.defs"}
+BUILD_SUFFIXES = {".cmake", ".defs", ".mk", ".sh", ".py"}
 EXCEPTIONS = Path("tools/bk7258/layer_exceptions.json")
 
 _INCLUDE = re.compile(
@@ -29,8 +32,9 @@ _INCLUDE = re.compile(
     re.MULTILINE,
 )
 _RAW_SDK_SYMBOL = re.compile(
-    r"\b(?:bk_(?!7258)|gpio_|rtos_)[A-Za-z0-9_]+\b"
+    r"\b(?:bk_(?!7258)|gpio_|rtos_|sys_drv_)[A-Za-z0-9_]+\b"
 )
+_CHIP_LINK_INTERCEPT = re.compile(r"\b__(?:wrap|real)_[A-Za-z0-9_]+\b")
 # These exact names belong to the generic NuttX input overlay, not the
 # Beken GPIO ABI.  Do not exempt the gpio_ prefix or an entire source file.
 _NUTTX_GPIO_FF_SYMBOLS = {
@@ -58,6 +62,18 @@ _PRODUCT_PROTOCOL = re.compile(
     r"\bBT_GATT_(?:PRIMARY_SERVICE|CHARACTERISTIC|DESCRIPTOR|CCC)\s*\("
     r"|\b[A-Z0-9_]*(?:SERVICE|CONTROL|STATUS)_UUID\b"
 )
+_SDK_BUILD_HANDLE = re.compile(r"\b(?:BK7258_)?SDK_[A-Z0-9_]+\b")
+_SDK_PRIVATE_PATH = re.compile(
+    r"(?:^|[\"'${(=/\\s])(?:bk_idk|armino_as_lib|bk_avdk|"
+    r"(?:beken_)?sdk)(?:[/\\\\]|\b)",
+    re.IGNORECASE,
+)
+_SDK_PRIVATE_LIBRARY = re.compile(
+    r"(?:^|[/\\\\])lib(?:bk|armino|driver|middleware)[A-Za-z0-9_.-]*\.(?:a|o|obj)\b"
+    r"|(?<![A-Za-z0-9_])-l(?:bk|armino|driver|middleware)[A-Za-z0-9_.-]*\b",
+    re.IGNORECASE,
+)
+_LINKER_WRAP = re.compile(r"(?<![A-Za-z0-9_-])--wrap\b")
 _HEX_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
@@ -113,12 +129,89 @@ def _relative(repository: Path, path: Path) -> str:
     return path.relative_to(repository).as_posix()
 
 
+def _build_files(root: Path) -> list[Path]:
+    """Return layer build descriptions and their build helper scripts."""
+
+    if not root.is_dir():
+        return []
+    return sorted(
+        path for path in root.rglob("*")
+        if path.is_file() and
+        (path.name in BUILD_FILENAMES or path.suffix in BUILD_SUFFIXES)
+    )
+
+
+def _build_issues(repository: Path) -> list[Issue]:
+    """Reject SDK implementation ownership in board and app build descriptions."""
+
+    issues: list[Issue] = []
+    for layer in ("boards/bk7258", "app"):
+        for path in _build_files(repository / layer):
+            relative = _relative(repository, path)
+            text = path.read_text(encoding="utf-8", errors="surrogateescape")
+            for offset, line in _active_build_lines(text):
+                for pattern, code, message in (
+                    (_SDK_BUILD_HANDLE, "SDK_BUILD_PRIVATE",
+                     "board/app build files must not own an SDK path, include, or library closure"),
+                    (_SDK_PRIVATE_PATH, "SDK_BUILD_PRIVATE",
+                     "board/app build files must not name a private SDK path"),
+                    (_SDK_PRIVATE_LIBRARY, "SDK_BUILD_PRIVATE",
+                     "board/app build files must not link a private SDK library"),
+                    (_RAW_SDK_SYMBOL, "SDK_BUILD_SYMBOL",
+                     "board/app build files must not name a raw Beken SDK symbol"),
+                    (_LINKER_WRAP, "SDK_LINK_WRAP",
+                     "board/app build files must not wrap an SDK symbol"),
+                ):
+                    for match in pattern.finditer(line):
+                        issues.append(Issue(
+                            relative,
+                            _line_number(text, offset + match.start()),
+                            code,
+                            message,
+                        ))
+    return issues
+
+
+def _active_build_lines(text: str) -> list[tuple[int, str]]:
+    """Return build lines with comments removed and offsets preserved."""
+
+    active: list[tuple[int, str]] = []
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        active.append((offset, _without_build_comments(line)))
+        offset += len(line)
+    return active
+
+
+def _without_build_comments(line: str) -> str:
+    """Strip a shell/CMake/Make comment while preserving quoted values."""
+
+    quote = ""
+    escaped = False
+    for index, character in enumerate(line):
+        if escaped:
+            escaped = False
+            continue
+        if character == "\\":
+            escaped = True
+            continue
+        if quote:
+            if character == quote:
+                quote = ""
+            continue
+        if character in {"'", '\"'}:
+            quote = character
+        elif character == "#":
+            return line[:index]
+    return line
+
+
 def _source_issues(repository: Path) -> tuple[list[Issue], int, set[str]]:
     issues: list[Issue] = []
     product_files: set[str] = set()
     count = 0
 
-    for layer in ("boards/bk7258", "app/bk7258", "chips/bk7258"):
+    for layer in ("boards/bk7258", "app", "chips/bk7258"):
         for path in _sources(repository / layer):
             count += 1
             relative = _relative(repository, path)
@@ -131,7 +224,8 @@ def _source_issues(repository: Path) -> tuple[list[Issue], int, set[str]]:
                         continue
                     include = match.group("name")
                     if include == "sdkconfig.h" or \
-                            include.split("/", 1)[0] in SDK_INCLUDE_ROOTS:
+                            include.split("/", 1)[0] in SDK_INCLUDE_ROOTS or \
+                            include.split("/", 1)[0] in SDK_PRIVATE_INCLUDE_ROOTS:
                         issues.append(Issue(
                             relative,
                             _line_number(text, match.start()),
@@ -142,6 +236,7 @@ def _source_issues(repository: Path) -> tuple[list[Issue], int, set[str]]:
 
                 for pattern, name in (
                     (_RAW_SDK_SYMBOL, "SDK_SYMBOL"),
+                    (_CHIP_LINK_INTERCEPT, "CHIP_LINK_INTERCEPT"),
                     (_RAW_SDK_TYPE, "SDK_TYPE"),
                     (_RAW_REGISTER, "RAW_REGISTER"),
                 ):
@@ -153,7 +248,9 @@ def _source_issues(repository: Path) -> tuple[list[Issue], int, set[str]]:
                             relative,
                             _line_number(code, match.start()),
                             name,
-                            "board/app code must not depend on the raw Beken SDK ABI",
+                            "board/app code must not depend on the raw Beken SDK ABI"
+                            if name != "CHIP_LINK_INTERCEPT" else
+                            "board/app code must not own chip linker interception",
                         ))
 
             if layer == "chips/bk7258":
@@ -171,7 +268,8 @@ def _source_issues(repository: Path) -> tuple[list[Issue], int, set[str]]:
                     if path.parent.name == "include" and \
                             path.name.startswith("bk7258_") and \
                             (include == "sdkconfig.h" or
-                             include.split("/", 1)[0] in SDK_INCLUDE_ROOTS):
+                             include.split("/", 1)[0] in SDK_INCLUDE_ROOTS or
+                             include.split("/", 1)[0] in SDK_PRIVATE_INCLUDE_ROOTS):
                         issues.append(Issue(
                             relative,
                             _line_number(text, match.start()),
@@ -197,7 +295,7 @@ def _source_issues(repository: Path) -> tuple[list[Issue], int, set[str]]:
                 if _PRODUCT_PROTOCOL.search(code):
                     product_files.add(relative)
 
-            if layer == "app/bk7258":
+            if layer == "app":
                 for match in _APP_PHYSICAL_TOKEN.finditer(code):
                     issues.append(Issue(
                         relative,
@@ -346,7 +444,8 @@ def audit(repository: Path) -> tuple[list[Issue], Report]:
     source_issues, source_files, product_files = _source_issues(repository)
     kconfig_issues, symbols = _kconfig_issues(repository)
     exception_issues, exceptions = _exception_issues(repository, product_files)
-    issues = sorted(source_issues + kconfig_issues + exception_issues)
+    build_issues = _build_issues(repository)
+    issues = sorted(source_issues + build_issues + kconfig_issues + exception_issues)
     return issues, Report(source_files, symbols, exceptions)
 
 

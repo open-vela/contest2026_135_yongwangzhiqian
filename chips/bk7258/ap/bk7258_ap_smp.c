@@ -17,6 +17,8 @@
 
 #include <nuttx/config.h>
 
+#include "bk7258_kernel_compat.h"
+
 #ifdef CONFIG_BK7258_AP_SMP_BOOTSTRAP
 
 #include <errno.h>
