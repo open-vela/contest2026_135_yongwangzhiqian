@@ -39,7 +39,7 @@ def require_aidk_product_profile(p):
     for command in REQUIRED_COMMANDS:
         result = p.sendCommand("help", command, p.PROMPT, timeout=20)
         assert result == 0, (
-            "AIDK product HIL requires the normal openvela_cp image; "
+            "AIDK product HIL requires the normal app image; "
             f"missing command: {command}"
         )
 
