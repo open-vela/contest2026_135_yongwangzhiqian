@@ -1,7 +1,6 @@
 # NuttX board-level CMake for the Beken BK7258 logical board.
 
 foreach(BK7258_REQUIRED_INPUT
-        BK7258_SDK_DIR
         BK7258_PARTITION_HEADER
         BK7258_PARTITION_LINKER
         BK7258_PARTITION_SDK_CSV
@@ -13,10 +12,6 @@ foreach(BK7258_REQUIRED_INPUT
   endif()
 endforeach()
 
-set(BK7258_SDK_DIR "$ENV{BK7258_SDK_DIR}")
-set(BK7258_SDK_INCLUDE_DIR "${BK7258_SDK_DIR}/include")
-set(BK7258_SDK_CONFIG_DIR "${BK7258_SDK_DIR}/config")
-set(BK7258_SDK_LIBS_DIR "${BK7258_SDK_DIR}/libs")
 set(BK7258_PARTITION_HEADER "$ENV{BK7258_PARTITION_HEADER}")
 set(BK7258_PARTITION_LINKER "$ENV{BK7258_PARTITION_LINKER}")
 set(BK7258_PARTITION_LAYOUT_ID "$ENV{BK7258_PARTITION_ID}")
@@ -30,9 +25,6 @@ get_filename_component(BK7258_PARTITION_INCLUDE_DIR
                        "${BK7258_PARTITION_HEADER}" DIRECTORY)
 
 foreach(BK7258_REQUIRED_PATH
-        "${BK7258_SDK_INCLUDE_DIR}"
-        "${BK7258_SDK_CONFIG_DIR}"
-        "${BK7258_SDK_LIBS_DIR}"
         "${BK7258_PARTITION_HEADER}"
         "${BK7258_PARTITION_LINKER}")
   if(NOT EXISTS "${BK7258_REQUIRED_PATH}")
@@ -85,23 +77,6 @@ nuttx_include_directories_for_all_apps("${BK7258_BOARD_COMMON_INCLUDE}")
 
 add_subdirectory(src)
 
-# Keep the immutable SDK Flash mechanism in the chip layer while replacing
-# its build-time partition table with the product layout owned by this logical
-# board.  CP is the only Flash owner and the matching wrappers live in the
-# board archive.
-
-if(NOT CONFIG_BK7258_AP_CORE)
-  foreach(BK7258_PARTITION_SYMBOL
-          bk_flash_partition_get_info
-          bk_flash_partition_read
-          bk_flash_partition_write
-          bk_flash_partition_erase
-          bk_flash_partition_write_perm_check_by_addr)
-    target_link_options(nuttx PRIVATE
-                        "LINKER:--wrap=${BK7258_PARTITION_SYMBOL}")
-  endforeach()
-endif()
-
 # Pin the role-specific linker script for the CMake backend.  The generated
 # wrapper embeds the layout identity, so CMake's normal source dependency
 # rebuilds the preprocessed script whenever the selected contract changes.
@@ -120,17 +95,3 @@ file(CONFIGURE OUTPUT "${BK7258_LDSCRIPT_WRAPPER}" CONTENT
      @ONLY NEWLINE_STYLE UNIX)
 set_property(GLOBAL PROPERTY LD_SCRIPT
              "${BK7258_LDSCRIPT_WRAPPER}")
-
-# sdk rebuild resolves the profile-specific closure.  The board links every
-# resulting input without repeating vendor library names or feature maps.
-file(GLOB BK7258_SDK_LINK_INPUTS CONFIGURE_DEPENDS
-     "${BK7258_SDK_LIBS_DIR}/*.a"
-     "${BK7258_SDK_LIBS_DIR}/*.o"
-     "${BK7258_SDK_LIBS_DIR}/*.obj")
-list(SORT BK7258_SDK_LINK_INPUTS)
-if(NOT BK7258_SDK_LINK_INPUTS)
-  message(FATAL_ERROR "BK7258 SDK profile has no resolved link inputs")
-endif()
-foreach(BK7258_SDK_LINK_INPUT ${BK7258_SDK_LINK_INPUTS})
-  nuttx_add_extra_library("${BK7258_SDK_LINK_INPUT}")
-endforeach()

@@ -1,0 +1,180 @@
+# SPDX-License-Identifier: Apache-2.0
+
+"""Pinned source and configuration applicability for BK7258 kernel wrappers."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import stat
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+
+
+CONTRACT = Path("chips/bk7258/kernel_compat.json")
+HEX = re.compile(r"[0-9a-f]{64}")
+FILES = frozenset({
+    "arch/arm/src/arm_m/arm_exception.S",
+    "arch/arm/src/armv8-m/arm_doirq.c",
+    "arch/arm/src/armv8-m/arm_initialstate.c",
+    "arch/arm/include/arm_m/irq.h",
+    "arch/arm/include/irq.h",
+    "sched/sched/sched_switchcontext.c",
+    "sched/init/nx_start.c",
+    "sched/init/nx_bringup.c",
+    "sched/init/nx_smpstart.c",
+})
+WRAPPERS = {
+    "__wrap_arm_doirq": ("ap", "cp"),
+    "__wrap_nxsched_resume_scheduler": ("ap", "cp"),
+    "__wrap_nx_bringup": ("ap",),
+}
+
+
+class KernelCompatError(RuntimeError):
+    """The pinned kernel implementation or its applicable config drifted."""
+
+
+@dataclass(frozen=True)
+class Contract:
+    commit: str
+    files: dict[str, str]
+
+
+def _digest(path: Path) -> str:
+    value = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            value.update(block)
+    return value.hexdigest()
+
+
+def _regular(path: Path, label: str) -> Path:
+    try:
+        mode = path.lstat().st_mode
+    except OSError as error:
+        raise KernelCompatError(f"missing {label}: {path}") from error
+    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+        raise KernelCompatError(f"{label} must be a regular non-symlink file: {path}")
+    return path.resolve(strict=True)
+
+
+def load(repository: Path) -> Contract:
+    path = _regular(repository / CONTRACT, "kernel compatibility contract")
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise KernelCompatError(f"invalid kernel compatibility contract: {error}") from error
+    if not isinstance(document, dict) or set(document) != {"schema", "nuttx", "source_files", "wrappers"} \
+            or document["schema"] != 1:
+        raise KernelCompatError("invalid kernel compatibility contract schema")
+    nuttx = document["nuttx"]
+    if not isinstance(nuttx, dict) or set(nuttx) != {"commit", "provenance"} \
+            or not isinstance(nuttx["commit"], str) or not re.fullmatch(r"[0-9a-f]{40}", nuttx["commit"]) \
+            or not isinstance(nuttx["provenance"], str) or not nuttx["provenance"].strip():
+        raise KernelCompatError("invalid NuttX provenance in kernel compatibility contract")
+    rows = document["source_files"]
+    files: dict[str, str] = {}
+    if not isinstance(rows, list):
+        raise KernelCompatError("kernel compatibility source_files must be a list")
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {"path", "sha256"}:
+            raise KernelCompatError("invalid kernel compatibility source file row")
+        name, digest = row["path"], row["sha256"]
+        pure = PurePosixPath(name) if isinstance(name, str) else None
+        if not isinstance(name, str) or pure.is_absolute() or not pure.parts \
+                or ".." in pure.parts or "." in pure.parts or "\\" in name \
+                or not isinstance(digest, str) or HEX.fullmatch(digest) is None \
+                or name in files:
+            raise KernelCompatError("unsafe or malformed kernel compatibility source path")
+        files[name] = digest
+    if set(files) != FILES:
+        raise KernelCompatError("kernel compatibility source file set is not the reviewed set")
+    wrappers = document["wrappers"]
+    if not isinstance(wrappers, dict) or set(wrappers) != set(WRAPPERS):
+        raise KernelCompatError("kernel compatibility wrapper set is not the reviewed set")
+    for symbol, roles in WRAPPERS.items():
+        row = wrappers[symbol]
+        if not isinstance(row, dict) or set(row) != {"disposition", "physical_validation", "roles"} \
+                or row["disposition"] != "C" or row["physical_validation"] != "pending" \
+                or row["roles"] != list(roles):
+            raise KernelCompatError(f"invalid reviewed disposition for {symbol}")
+    return Contract(nuttx["commit"], files)
+
+
+def verify_sources(repository: Path, nuttx: Path, *,
+                   provenance_root: Path | None = None) -> Contract:
+    """Verify copied build sources and their canonical Git provenance separately."""
+
+    contract = load(repository)
+    source_root = nuttx.resolve(strict=True)
+    provenance = source_root if provenance_root is None else provenance_root.resolve(strict=True)
+    try:
+        actual_commit = subprocess.run(
+            ["git", "-C", str(provenance), "rev-parse", "HEAD"], check=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise KernelCompatError(f"cannot read NuttX Git provenance: {provenance}") from error
+    if actual_commit != contract.commit:
+        raise KernelCompatError(
+            f"NuttX compatibility drift: commit {actual_commit} does not match "
+            f"reviewed {contract.commit}; review and update {CONTRACT} explicitly"
+        )
+    roots = (("workspace build source", source_root),)
+    if provenance != source_root:
+        roots += (("canonical provenance source", provenance),)
+    for label, root in roots:
+        for relative, expected in sorted(contract.files.items()):
+            source = root.joinpath(*PurePosixPath(relative).parts)
+            source = _regular(source, f"{label} {relative}")
+            try:
+                source.relative_to(root)
+            except (OSError, ValueError) as error:
+                raise KernelCompatError(f"{label} escapes NuttX: {relative}") from error
+            actual = _digest(source)
+            if actual != expected:
+                raise KernelCompatError(
+                    f"NuttX compatibility drift in {label}: {relative} sha256={actual}, "
+                    f"expected {expected}; review and update {CONTRACT} explicitly"
+                )
+    return contract
+
+
+def _config(path: Path) -> dict[str, str | None]:
+    values: dict[str, str | None] = {}
+    for line in _regular(path, "resolved NuttX config").read_text(encoding="utf-8").splitlines():
+        if line.startswith("CONFIG_") and "=" in line:
+            key, value = line.split("=", 1)
+            values[key] = value
+        else:
+            match = re.fullmatch(r"# (CONFIG_[A-Z0-9_]+) is not set", line)
+            if match:
+                values[match.group(1)] = None
+    return values
+
+
+def verify_role_config(role: str, dotconfig: Path) -> None:
+    """Check only configurations that compile one of the retained wrappers."""
+
+    if role not in {"ap", "cp"}:
+        raise KernelCompatError(f"invalid kernel compatibility role: {role}")
+    values = _config(dotconfig)
+    enabled = lambda name: values.get(name) == "y"
+    wrappers_active = role == "cp" or enabled("CONFIG_BK7258_AP_SMP_SCHED_ONLINE")
+    if not wrappers_active:
+        return
+    missing = [name for name in ("CONFIG_BUILD_FLAT", "CONFIG_ARCH_ARMV8M", "CONFIG_ARCH_CHIP_BK7258", "CONFIG_LTO_NONE")
+               if not enabled(name)]
+    if missing:
+        raise KernelCompatError("kernel wrappers require resolved config: " + ", ".join(missing))
+    if enabled("CONFIG_LTO_FULL"):
+        raise KernelCompatError("kernel wrappers require CONFIG_LTO_FULL disabled")
+    if enabled("CONFIG_ARCH_HIPRI_INTERRUPT"):
+        raise KernelCompatError("kernel wrappers require CONFIG_ARCH_HIPRI_INTERRUPT disabled")
+    if role == "cp" and enabled("CONFIG_SMP"):
+        raise KernelCompatError("CP kernel wrappers require non-SMP resolved config")
+    if role == "ap" and not enabled("CONFIG_SMP"):
+        raise KernelCompatError("AP SMP_ONLINE wrappers require CONFIG_SMP=y")

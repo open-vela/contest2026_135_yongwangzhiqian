@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import io
 import json
@@ -199,7 +200,7 @@ class ProductDeliveryTest(unittest.TestCase):
         build["provenance"] = provenance
 
         version = "18.6.351+415"
-        expected_identity = bk7258_cli._artifact_identity(
+        expected_identity = product_domain.artifact_identity(
             "test_board", provenance, version, "shaniu", "A4"
         )
         assert expected_identity is not None
@@ -215,7 +216,7 @@ class ProductDeliveryTest(unittest.TestCase):
             encoding="utf-8",
         )
         member_name = package_name or (
-            bk7258_cli._artifact_stem(expected_identity, "ota") + ".bkpack"
+            product_domain.artifact_stem(expected_identity, "ota") + ".bkpack"
         )
         release_package = package_dir / member_name
         release_package.write_bytes(package.read_bytes())
@@ -320,6 +321,72 @@ class ProductDeliveryTest(unittest.TestCase):
             package_verifier=fixture_verifier,
         )
         return output
+
+    def test_release_product_preserves_verification_and_output_guards(self) -> None:
+        # Exercise the moved orchestration using existing unsigned fixtures;
+        # the callback is deliberately not evidence of cryptographic acceptance.
+        package, manifest = self._inputs("product-entry")
+        release = self.root / "product-entry-release"
+        release.mkdir()
+        package = package.rename(release / package.name)
+        manifest = manifest.rename(release / manifest.name)
+        recovery = product_domain.materialize_recovery(
+            package, self.policy, self.base, self.base_evidence
+        )
+        operator = release / "operator.bin"
+        operator.write_bytes(recovery.data)
+        evidence = release / "accepted-base.json"
+        evidence.write_bytes(self.base_evidence_path.read_bytes())
+
+        def member(path: Path) -> dict[str, object]:
+            return {"path": path.name, "size": path.stat().st_size,
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+
+        build = json.loads(manifest.read_text())
+        base_row = member(evidence)
+        base_row["device_id"] = self.base_evidence.device_id
+        summary = {
+            "format": "bk7258.release/2", "mode": "full",
+            "version": "1.2.3+4", "generation": 4,
+            "target": build["target"], "layout": build["layout"],
+            "package": member(package), "build_manifest": member(manifest),
+            "operator": member(operator),
+            "materialization": {"accepted_base": base_row, "flash_offset": 0,
+                                "flash_end": self.layout.flash_size,
+                                "flash_size": self.layout.flash_size},
+        }
+        bk7258_cli._release_summary(release, summary)
+        preset = mock.Mock(partition=self.layout.source,
+                           release_policy=self.policy.source)
+        output = self.root / "product-entry.zip"
+        verifier = mock.Mock(side_effect=package_domain.verify)
+        kwargs = dict(full_release=release, base=self.base, output=output,
+                      ota_release=None, ota_required_source_version=None,
+                      package_verifier=verifier)
+        with mock.patch.object(build_domain, "board_preset", return_value=preset):
+            report = product_domain.release_product(REPOSITORY, **kwargs)
+            self.assertEqual(report["physical_board"], "test_board")
+            verifier.assert_any_call(package)
+            original = output.read_bytes()
+            with self.assertRaises(ValueError):
+                product_domain.release_product(REPOSITORY, **kwargs)
+            self.assertEqual(output.read_bytes(), original)
+            kwargs["output"] = self.root / "rejected.zip"
+            verifier.side_effect = ValueError("untrusted fixture")
+            with self.assertRaisesRegex(ValueError, "untrusted fixture"):
+                product_domain.release_product(REPOSITORY, **kwargs)
+            self.assertFalse(kwargs["output"].exists())
+            verifier.side_effect = package_domain.verify
+            with mock.patch.object(bk7258_cli, "_verify_package_trust",
+                                   side_effect=lambda candidate, _: verifier(candidate)), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                status = bk7258_cli.main([
+                    "release", "product", "--full-release", str(release),
+                    "--base", str(self.base), "--openssl", "unused-fixture-tool",
+                    "--output", str(self.root / "cli-product.zip"),
+                ])
+            self.assertEqual(status, 0)
+            self.assertEqual((self.root / "cli-product.zip").read_bytes(), original)
 
     def test_delivery_is_deterministic_and_complete_flash(self) -> None:
         first = self._delivery("first")
@@ -474,7 +541,7 @@ class ProductDeliveryTest(unittest.TestCase):
             },
         }
 
-        identity = bk7258_cli._release_identity(
+        identity = product_domain.release_identity(
             manifest, "18.6.351+415", "shaniu", "A4"
         )
 
@@ -482,7 +549,7 @@ class ProductDeliveryTest(unittest.TestCase):
         self.assertEqual(identity["artifact_id"], "A4")
         self.assertEqual(identity["security_counter"], 415)
         self.assertEqual(
-            bk7258_cli._artifact_stem(identity, "ota"),
+            product_domain.artifact_stem(identity, "ota"),
             "shaniu-bk7258-aidk_ai_toy-cp-aidk__ap-aidk-"
             "v18.6.351+415-bA4-ota",
         )
@@ -499,16 +566,16 @@ class ProductDeliveryTest(unittest.TestCase):
         }
 
         with self.assertRaisesRegex(ValueError, "differs from build provenance"):
-            bk7258_cli._release_identity(
+            product_domain.release_identity(
                 manifest, "18.6.351+415", "other", "A4"
             )
         manifest.provenance["product"] = None
         with self.assertRaisesRegex(ValueError, "requires an explicit --product"):
-            bk7258_cli._release_identity(
+            product_domain.release_identity(
                 manifest, "18.6.351+415", "Shaniu!", "A4"
             )
         with self.assertRaisesRegex(ValueError, "artifact-id"):
-            bk7258_cli._release_identity(
+            product_domain.release_identity(
                 manifest, "18.6.351+415", "shaniu", "A4/bad"
             )
 
@@ -516,7 +583,7 @@ class ProductDeliveryTest(unittest.TestCase):
         release = self._release_input_fixture("release-input-valid")
 
         summary, package, build_manifest, operator, base = \
-            bk7258_cli._release_input(release, "ota")
+            product_domain.load_release(release, "ota")
 
         self.assertEqual(summary["identity"]["product"], "shaniu")
         self.assertEqual(summary["generation"], 415)
@@ -544,21 +611,21 @@ class ProductDeliveryTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError,
                                     "identity differs from build evidence"):
-            bk7258_cli._release_input(identity_release, "ota")
+            product_domain.load_release(identity_release, "ota")
 
         counter_release = self._release_input_fixture(
             "release-input-counter", generation=414
         )
         with self.assertRaisesRegex(ValueError,
                                     "identity differs from build evidence"):
-            bk7258_cli._release_input(counter_release, "ota")
+            product_domain.load_release(counter_release, "ota")
 
         name_release = self._release_input_fixture(
             "release-input-name", package_name="renamed.bkpack"
         )
         with self.assertRaisesRegex(ValueError,
                                     "package name differs from artifact identity"):
-            bk7258_cli._release_input(name_release, "ota")
+            product_domain.load_release(name_release, "ota")
 
     def test_delivery_rejects_changed_operator(self) -> None:
         valid = self._delivery("valid")

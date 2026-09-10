@@ -12,6 +12,8 @@
 
 #include <nuttx/config.h>
 
+#include "bk7258_kernel_compat.h"
+
 #include <stdint.h>
 
 #include <nuttx/arch.h>

@@ -661,8 +661,10 @@ endif
 # provides an SMP-safe per-core wrapper from bk7258_ap_vectors.c.
 
 ifneq ($(CONFIG_BK7258_AP_CORE),y)
+# Retained NuttX kernel compatibility; not SDK ABI wrappers.
 LDFLAGS += --wrap=arm_doirq --wrap=nxsched_resume_scheduler
 else ifeq ($(CONFIG_BK7258_AP_SMP_SCHED_ONLINE),y)
+# Retained NuttX kernel compatibility; not SDK ABI wrappers.
 LDFLAGS += --wrap=arm_doirq --wrap=nxsched_resume_scheduler
 LDFLAGS += --wrap=nx_bringup
 endif

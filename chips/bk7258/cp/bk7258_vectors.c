@@ -62,6 +62,8 @@
  ****************************************************************************/
 
 #include <nuttx/config.h>
+
+#include "bk7258_kernel_compat.h"
 #include <nuttx/arch.h>
 #include <nuttx/sched.h>
 

@@ -12,7 +12,7 @@ import re
 import tempfile
 import zipfile
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Callable, Mapping
 
 from _lib import build as build_domain
@@ -545,7 +545,7 @@ def _validate_build_manifest(
         raise ProductError("build manifest does not match the package target")
     if document["format"] == build_domain.BUILD_MANIFEST_FORMAT:
         try:
-            build_domain._validate_provenance(document.get("provenance"))
+            build_domain.validate_provenance(document.get("provenance"))
         except build_domain.BuildError as error:
             raise ProductError(str(error)) from error
     build_layout = document.get("layout")
@@ -1545,3 +1545,268 @@ def create_gateway_release_registry(
         "releases": len(releases),
         "sha256": _digest(data),
     }
+
+
+def release_identity(manifest: build_domain.BuildManifest, version: str,
+                      product: str | None, artifact_id: str | None) -> dict[str, object] | None:
+    return artifact_identity(manifest.physical_board, manifest.provenance,
+                              version, product, artifact_id)
+
+
+def artifact_identity(board: str, provenance: dict[str, object] | None,
+                       version: str, product: str | None,
+                       artifact_id: str | None) -> dict[str, object] | None:
+    if provenance is None:
+        if product is not None or artifact_id is not None:
+            raise ValueError("new artifact identity requires a build manifest with actual profiles")
+        return None  # Historical /2 invocation retains its names.
+    selected = product or provenance["product"]
+    if provenance["product"] is not None and selected != provenance["product"]:
+        raise ValueError("release product differs from build provenance")
+    if not isinstance(selected, str) or re.fullmatch(r"[a-z][a-z0-9_-]{0,47}", selected) is None:
+        raise ValueError("release requires an explicit --product or build product")
+    identifier = artifact_id
+    if not isinstance(identifier, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,47}", identifier) is None:
+        raise ValueError("artifact-id must be a safe stable identifier")
+    profiles = provenance["profiles"]
+    profile = "__".join(PurePosixPath(profiles[role]).name for role in ("cp", "ap"))
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,95}", profile) is None:
+        raise ValueError("profile cannot form a safe artifact name")
+    return {"product": selected, "chip": "bk7258", "board": board,
+            "profile": profile, "version": version, "artifact_id": identifier,
+            "security_counter": version_generation(version),
+            "counter_policy": "legacy-version-build-equals-security-counter"}
+
+
+def artifact_stem(identity: dict[str, object], kind: str) -> str:
+    if kind not in {"full", "ota"}:
+        raise ValueError("unsupported artifact kind")
+    return (f"{identity['product']}-{identity['chip']}-{identity['board']}-"
+            f"{identity['profile']}-v{identity['version']}-b{identity['artifact_id']}-{kind}")
+
+
+def load_release(
+    root: Path, expected_mode: str
+) -> tuple[dict[str, object], Path, Path, Path | None, Path | None]:
+    """Load one atomic signed-release directory without trusting its paths."""
+
+    root = root.absolute()
+    if root.is_symlink() or not root.is_dir():
+        raise package_domain.PackageError(
+            f"{expected_mode} release must be a non-symlink directory: {root}"
+        )
+    summary = root / "release.json"
+    if summary.is_symlink() or not summary.is_file():
+        raise package_domain.PackageError(
+            f"{expected_mode} release has no regular release.json"
+        )
+    data = summary.read_bytes()
+    try:
+        document = json.loads(data.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise package_domain.PackageError(
+            f"{expected_mode} release.json is malformed"
+        ) from error
+    canonical = (
+        json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+    if not isinstance(document, dict) or data != canonical \
+            or document.get("format") != "bk7258.release/2" \
+            or document.get("mode") != expected_mode:
+        raise package_domain.PackageError(
+            f"unsupported {expected_mode} release directory"
+        )
+
+    def member(row: object, label: str) -> Path:
+        if not isinstance(row, dict) or not isinstance(row.get("path"), str) \
+                or not isinstance(row.get("sha256"), str) \
+                or re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is None:
+            raise package_domain.PackageError(
+                f"{expected_mode} release {label} metadata is malformed"
+            )
+        relative = PurePosixPath(row["path"])
+        if relative.is_absolute() or not relative.parts \
+                or any(part in {"", ".", ".."} for part in relative.parts):
+            raise package_domain.PackageError(
+                f"{expected_mode} release {label} path is unsafe"
+            )
+        selected = root.joinpath(*relative.parts)
+        if selected.is_symlink() or not selected.is_file():
+            raise package_domain.PackageError(
+                f"{expected_mode} release {label} is not a regular file"
+            )
+        try:
+            selected.resolve(strict=True).relative_to(root.resolve(strict=True))
+        except (OSError, ValueError) as error:
+            raise package_domain.PackageError(
+                f"{expected_mode} release {label} escapes its directory"
+            ) from error
+        digest = hashlib.sha256()
+        with selected.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        if digest.hexdigest() != row["sha256"]:
+            raise package_domain.PackageError(
+                f"{expected_mode} release {label} hash changed"
+            )
+        if "size" in row and row["size"] != selected.stat().st_size:
+            raise package_domain.PackageError(
+                f"{expected_mode} release {label} size changed"
+            )
+        return selected
+
+    package = member(document.get("package"), "package")
+    build_manifest = member(document.get("build_manifest"), "build manifest")
+    if "identity" in document:
+        identity = document["identity"]
+        if not isinstance(identity, dict):
+            raise ValueError("release artifact identity is malformed")
+        copied_build = json.loads(build_manifest.read_text(encoding="utf-8"))
+        provenance = build_domain.validate_provenance(copied_build.get("provenance"))
+        target = copied_build.get("target")
+        if not isinstance(target, dict) or target != document.get("target"):
+            raise ValueError("release artifact target differs from build evidence")
+        expected = artifact_identity(target.get("physical_board"), provenance,
+                                      document.get("version"), identity.get("product"),
+                                      identity.get("artifact_id"))
+        if identity != expected or identity["security_counter"] != document.get("generation"):
+            raise ValueError("release artifact identity differs from build evidence")
+        if package.name != artifact_stem(identity, expected_mode) + ".bkpack":
+            raise ValueError("release package name differs from artifact identity")
+    operator = (
+        member(document.get("operator"), "operator")
+        if expected_mode == "full" else None
+    )
+    materialization = document.get("materialization")
+    base_evidence = None
+    if expected_mode == "full":
+        if not isinstance(materialization, dict):
+            raise package_domain.PackageError(
+                "full release has no materialization evidence"
+            )
+        base_evidence = member(
+            materialization.get("accepted_base"), "accepted-base evidence"
+        )
+    return document, package, build_manifest, operator, base_evidence
+
+
+def release_product(
+    repository: Path, *, full_release: Path, base: Path, output: Path,
+    ota_release: Path | None, ota_required_source_version: str | None,
+    package_verifier: Callable[[Path], object],
+) -> dict[str, object]:
+    """Validate existing release evidence and assemble one product delivery.
+
+    Verification is supplied by the caller; this operation never signs or
+    provisions keys and has no CLI, transport or device-control dependency.
+    """
+    full, full_package, build_manifest, operator, base_evidence_path = load_release(
+        full_release, "full"
+    )
+    if operator is None or base_evidence_path is None:
+        raise package_domain.PackageError(
+            "full release has no recovery operator/base evidence"
+        )
+    materialization = full.get("materialization")
+    if not isinstance(materialization, dict) \
+            or set(materialization) != {
+                "accepted_base", "flash_end", "flash_offset", "flash_size",
+            } or materialization.get("flash_offset") != 0 \
+            or materialization.get("flash_end") != materialization.get("flash_size") \
+            or operator.stat().st_size != materialization.get("flash_size"):
+        raise package_domain.PackageError(
+            "full release is not a complete-Flash recovery release"
+        )
+    manifest = validate_build_manifest_evidence(
+        build_manifest, full_package
+    )
+    target = full.get("target")
+    layout = full.get("layout")
+    manifest_target = manifest.get("target")
+    manifest_layout = manifest.get("layout")
+    if not isinstance(target, dict) or not isinstance(layout, dict) \
+            or not isinstance(manifest_target, dict) \
+            or not isinstance(manifest_layout, dict) \
+            or target != manifest_target \
+            or layout.get("identity") != manifest_layout.get("identity") \
+            or layout.get("sha256") != manifest_layout.get("sha256") \
+            or full.get("version") is None:
+        raise package_domain.PackageError(
+            "full release summary/build manifest identity changed"
+        )
+    package_verifier(full_package)
+    physical_board = target.get("physical_board")
+    if not isinstance(physical_board, str):
+        raise package_domain.PackageError("full release target is malformed")
+    preset = build_domain.board_preset(repository, physical_board)
+    selected_layout = layout_domain.load(preset.partition)
+    if selected_layout.identity != layout.get("identity") \
+            or selected_layout.sha256 != layout.get("sha256"):
+        raise package_domain.PackageError(
+            "full release layout differs from the selected board declaration"
+        )
+    policy = load_policy(preset.release_policy, selected_layout)
+    base_evidence = load_base_evidence(
+        base_evidence_path, target, selected_layout
+    )
+    accepted_base = materialization.get("accepted_base")
+    if not isinstance(accepted_base, dict) \
+            or set(accepted_base) != {"device_id", "path", "sha256", "size"} \
+            or accepted_base.get("device_id") != base_evidence.device_id \
+            or accepted_base.get("sha256") != base_evidence.sha256 \
+            or accepted_base.get("size") != len(base_evidence.data):
+        raise package_domain.PackageError(
+            "full release accepted-base identity changed"
+        )
+    recovery = materialize_recovery(
+        full_package, policy, base, base_evidence
+    )
+    if recovery.data != operator.read_bytes():
+        raise package_domain.PackageError(
+            "full release operator differs from policy materialization"
+        )
+
+    ota_package = None
+    if ota_release is None:
+        if ota_required_source_version is not None:
+            raise package_domain.PackageError(
+                "--ota-required-source-version requires --ota-release"
+            )
+    else:
+        ota, ota_package, ota_manifest, ota_operator, ota_base = load_release(
+            ota_release, "ota"
+        )
+        ota_build = validate_build_manifest_evidence(
+            ota_manifest, ota_package
+        )
+        ota_target = ota_build.get("target")
+        ota_layout = ota_build.get("layout")
+        if ota_operator is not None or ota_base is not None \
+                or ota_target != target \
+                or not isinstance(ota_layout, dict) \
+                or ota_layout.get("identity") != selected_layout.identity \
+                or ota_layout.get("sha256") != selected_layout.sha256 \
+                or ota.get("target") != target or ota.get("layout") != layout \
+                or ota.get("version") != full.get("version"):
+            raise package_domain.PackageError(
+                "full and OTA release identities are incompatible"
+            )
+        if ota_required_source_version is None:
+            raise package_domain.PackageError(
+                "--ota-release requires --ota-required-source-version"
+            )
+        package_verifier(ota_package)
+
+    report = create_delivery(
+        package=full_package,
+        build_manifest=build_manifest,
+        policy=policy,
+        recovery=recovery,
+        base_evidence=base_evidence,
+        version=str(full["version"]),
+        output=output,
+        ota_package=ota_package,
+        ota_required_source_version=ota_required_source_version,
+        package_verifier=package_verifier,
+    )
+    return report
