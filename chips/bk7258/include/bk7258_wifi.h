@@ -109,6 +109,16 @@ struct bk7258_wifi_scan_result_s
   struct bk7258_wifi_scan_ap_s aps[BK7258_WIFI_SCAN_MAX_RESULTS];
 };
 
+/* Local AP diagnostics only: never serialized into the CP wire message. */
+#define BK7258_WIFI_CHANNEL_STATS_MAX 13u
+struct bk7258_wifi_channel_stats_s
+{
+  int32_t status;
+  uint32_t returned;
+  uint32_t dwell_ms;
+  struct bk7258_wifi_monitor_result_s channels[BK7258_WIFI_CHANNEL_STATS_MAX];
+};
+
 /****************************************************************************
  * Public Function Prototypes
  ****************************************************************************/
@@ -135,6 +145,17 @@ int bk7258_wifi_connect_async(const char *ssid, const char *password,
 int bk7258_wifi_connect_poll(uint32_t ticket,
                              struct bk7258_wifi_result_s *result);
 int bk7258_wifi_connect_cancel(uint32_t ticket);
+/* Scan completion is consumed with scan_poll, including after leaving a UI
+ * page. It shares the worker with connect/CP requests and returns -EBUSY
+ * while reserved. Scanning stops at timeout; navigation need not block. */
+int bk7258_wifi_scan_async(uint32_t timeout_ms, uint32_t *ticket);
+int bk7258_wifi_scan_poll(uint32_t ticket,
+                         struct bk7258_wifi_scan_result_s *result);
+int bk7258_wifi_channels_async(uint32_t dwell_ms, uint32_t *ticket);
+int bk7258_wifi_channels_poll(uint32_t ticket,
+                             struct bk7258_wifi_channel_stats_s *result);
+/* Stop is cooperative: poll the matching result until completed before restart. */
+int bk7258_wifi_diagnostic_cancel(uint32_t ticket);
 /* A trial retains exclusive control after connect completion. Consume the
  * start completion with connect_poll, then finish with commit=true only after
  * durable product publication; otherwise restore the previous worker-owned

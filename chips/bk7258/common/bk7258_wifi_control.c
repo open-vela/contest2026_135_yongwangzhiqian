@@ -24,6 +24,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#include <syslog.h>
 
 #include <nuttx/clock.h>
 #include <nuttx/mutex.h>
@@ -145,6 +146,14 @@ struct bk7258_wifi_control_dev_s
   bool busy;
   bool request_local;
   bool local_pending;
+  bool local_scan;
+  bool local_channels;
+  bool local_monitor_cleanup;
+  bool scan_cleanup_pending;
+  bool scan_callback_registered;
+  bool scan_started;
+  struct bk7258_wifi_channel_stats_s local_channel_result;
+  struct bk7258_wifi_scan_result_s local_scan_result;
   bool local_done;
   bool local_cancel;
   bool trial_active;
@@ -600,12 +609,6 @@ static int bk7258_wifi_monitor_start_capture(uint32_t channel)
       goto err_release;
     }
 
-  ret = bk7258_wifi_monitor_set_channel(channel);
-  if (ret < 0)
-    {
-      goto err_release;
-    }
-
   ret = bk7258_wifi_vendor_result(
     bk_wifi_monitor_register_cb(bk7258_wifi_monitor_callback));
   if (ret < 0)
@@ -632,8 +635,23 @@ static int bk7258_wifi_monitor_start_capture(uint32_t channel)
   ret = bk7258_wifi_vendor_result(bk_wifi_monitor_start());
   if (ret < 0)
     {
+      /* A failed start may still have enabled the controller. Keep the
+       * lease if disabling it fails; a local diagnostic can retry cleanup. */
+      int stop_ret = bk7258_wifi_vendor_result(bk_wifi_monitor_stop());
+      if (stop_ret < 0) return stop_ret;
       __atomic_store_n(&monitor->active, 0u, __ATOMIC_RELEASE);
-      (void)bk_wifi_monitor_stop();
+      goto err_release;
+    }
+
+  /* The pinned SDK initializes its RW driver in monitor_start. Its own
+   * CLI also starts monitor before setting the channel: set_channel calls
+   * rwnxl_reset_evt and must not run against an uninitialized monitor. */
+  ret = bk7258_wifi_monitor_set_channel(channel);
+  if (ret < 0)
+    {
+      int stop_ret = bk7258_wifi_vendor_result(bk_wifi_monitor_stop());
+      if (stop_ret < 0) return stop_ret;
+      __atomic_store_n(&monitor->active, 0u, __ATOMIC_RELEASE);
       goto err_release;
     }
 
@@ -741,93 +759,71 @@ static void bk7258_wifi_scan_select_strongest(
   result->truncated = result->found - result->returned;
 }
 
+static int bk7258_wifi_scan_cleanup(void)
+{
+  struct bk7258_wifi_control_dev_s *priv = &g_bk7258_wifi_control;
+  int ret;
+  if (!priv->scan_cleanup_pending) return OK;
+  if (priv->scan_started)
+    {
+      ret = bk7258_wifi_vendor_result(bk_wifi_scan_stop());
+      if (ret < 0) return ret;
+      priv->scan_started = false;
+    }
+  if (priv->scan_callback_registered)
+    {
+      ret = bk7258_wifi_vendor_result(
+        bk_event_unregister_cb(BK7258_WIFI_EVENT_MOD_WIFI,
+                               BK7258_WIFI_EVENT_SCAN_DONE,
+                               bk7258_wifi_scan_event));
+      if (ret < 0) return ret;
+      priv->scan_callback_registered = false;
+    }
+  ret = bk7258_radio_mode_release(BK7258_RADIO_MODE_WIFI_SCAN);
+  if (ret == OK) priv->scan_cleanup_pending = false;
+  return ret;
+}
+
 static int bk7258_wifi_scan(uint32_t timeout_ms,
                             FAR struct bk7258_wifi_scan_result_s *result)
 {
-  FAR struct bk7258_wifi_control_dev_s *priv = &g_bk7258_wifi_control;
+  struct bk7258_wifi_control_dev_s *priv = &g_bk7258_wifi_control;
   struct bk7258_wifi_scan_result_sdk_s sdk;
-  bool callback_registered = false;
-  bool scan_started = false;
   int cleanup_ret;
   int ret;
-
   memset(result, 0, sizeof(*result));
   memset(&sdk, 0, sizeof(sdk));
+  ret = bk7258_wifi_scan_cleanup();
+  if (ret < 0) return ret;
   ret = bk7258_radio_mode_acquire(BK7258_RADIO_MODE_WIFI_SCAN);
-  if (ret < 0)
-    {
-      return ret;
-    }
-
-  while (nxsem_trywait(&priv->scan_sem) == OK)
-    {
-    }
-
+  if (ret < 0) return ret;
+  priv->scan_cleanup_pending = true;
+  while (nxsem_trywait(&priv->scan_sem) == OK) {}
   ret = bk7258_wifi_vendor_result(
     bk_event_register_cb(BK7258_WIFI_EVENT_MOD_WIFI,
                          BK7258_WIFI_EVENT_SCAN_DONE,
                          bk7258_wifi_scan_event, priv));
-  if (ret < 0)
-    {
-      goto out;
-    }
-
-  callback_registered = true;
+  if (ret < 0) goto out;
+  priv->scan_callback_registered = true;
+  priv->scan_started = true;
   ret = bk7258_wifi_vendor_result(bk_wifi_scan_start(NULL));
-  if (ret < 0)
+  if (ret < 0) goto out;
+  for (uint32_t elapsed = 0; elapsed < timeout_ms; elapsed += 100)
     {
-      goto out;
+      if (priv->request_local &&
+          __atomic_load_n(&priv->local_cancel, __ATOMIC_ACQUIRE))
+        { ret = -ECANCELED; goto out; }
+      ret = nxsem_tickwait_uninterruptible(&priv->scan_sem, MSEC2TICK(100));
+      if (ret != -ETIMEDOUT) break;
     }
-
-  scan_started = true;
-  ret = nxsem_tickwait_uninterruptible(&priv->scan_sem,
-                                        MSEC2TICK(timeout_ms));
-  if (ret < 0)
-    {
-      goto out;
-    }
-
-  scan_started = false;
+  if (ret < 0) goto out;
+  priv->scan_started = false;
   ret = bk7258_wifi_vendor_result(bk_wifi_scan_get_result(&sdk));
-  if (ret >= 0)
-    {
-      bk7258_wifi_scan_select_strongest(result, &sdk);
-    }
-
+  if (ret >= 0) bk7258_wifi_scan_select_strongest(result, &sdk);
 out:
-  if (sdk.aps != NULL)
-    {
-      bk_wifi_scan_free_result(&sdk);
-    }
-
-  if (scan_started)
-    {
-      cleanup_ret = bk7258_wifi_vendor_result(bk_wifi_scan_stop());
-      if (ret >= 0 && cleanup_ret < 0)
-        {
-          ret = cleanup_ret;
-        }
-    }
-
-  if (callback_registered)
-    {
-      cleanup_ret = bk7258_wifi_vendor_result(
-        bk_event_unregister_cb(BK7258_WIFI_EVENT_MOD_WIFI,
-                               BK7258_WIFI_EVENT_SCAN_DONE,
-                               bk7258_wifi_scan_event));
-      if (ret >= 0 && cleanup_ret < 0)
-        {
-          ret = cleanup_ret;
-        }
-    }
-
-  cleanup_ret =
-    bk7258_radio_mode_release(BK7258_RADIO_MODE_WIFI_SCAN);
-  if (ret >= 0 && cleanup_ret < 0)
-    {
-      ret = cleanup_ret;
-    }
-
+  if (sdk.aps != NULL) bk_wifi_scan_free_result(&sdk);
+  cleanup_ret = bk7258_wifi_scan_cleanup();
+  if (cleanup_ret < 0) ret = cleanup_ret;
   result->status = ret;
   return ret;
 }
@@ -1445,9 +1441,58 @@ out_close:
 }
 
 /* Private worker operations: never accepted from the CP request wire. */
+#define BK7258_WIFI_LOCAL_CHANNELS 0x0fffu
 #define BK7258_WIFI_TRIAL_CONNECT 0x1000u
 #define BK7258_WIFI_TRIAL_COMMIT  0x1001u
 #define BK7258_WIFI_TRIAL_RESTORE 0x1002u
+
+static int bk7258_wifi_channels_run(uint32_t dwell_ms)
+{
+  struct bk7258_wifi_control_dev_s *priv = &g_bk7258_wifi_control;
+  struct bk7258_wifi_channel_stats_s *result = &priv->local_channel_result;
+  struct bk7258_wifi_result_s link;
+  int ret;
+  int stop_ret;
+  memset(result, 0, sizeof(*result));
+  result->dwell_ms = dwell_ms;
+  if (priv->local_monitor_cleanup)
+    {
+      ret = bk7258_wifi_monitor_stop_capture();
+      if (ret < 0) return ret;
+      priv->local_monitor_cleanup = false;
+    }
+  ret = bk7258_wifi_read_link(&link);
+  if (ret < 0) return ret;
+  /* Do not silently disconnect a user's existing STA connection. */
+  if (link.link_state == BK7258_WIFI_LINK_CONNECTED) return -EBUSY;
+  for (uint32_t channel = 1; channel <= BK7258_WIFI_CHANNEL_STATS_MAX; channel++)
+    {
+      if (__atomic_load_n(&priv->local_cancel, __ATOMIC_ACQUIRE))
+        return -ECANCELED;
+      ret = bk7258_wifi_monitor_start_capture(channel);
+      if (ret < 0)
+        {
+          /* EALREADY belongs to another monitor client; never stop it. */
+          if (ret != -EALREADY &&
+              __atomic_load_n(&g_bk7258_wifi_monitor.active, __ATOMIC_ACQUIRE))
+            priv->local_monitor_cleanup = true;
+          return ret;
+        }
+      for (uint32_t elapsed = 0; elapsed < dwell_ms; elapsed += 25)
+        {
+          if (__atomic_load_n(&priv->local_cancel, __ATOMIC_ACQUIRE)) break;
+          nxsig_usleep(25000);
+        }
+      bk7258_wifi_monitor_snapshot(&result->channels[result->returned]);
+      stop_ret = bk7258_wifi_monitor_stop_capture();
+      result->channels[result->returned].status = stop_ret;
+      result->returned++;
+      if (stop_ret < 0)
+        { priv->local_monitor_cleanup = true; return stop_ret; }
+    }
+  return __atomic_load_n(&priv->local_cancel, __ATOMIC_ACQUIRE) ?
+         -ECANCELED : OK;
+}
 
 static int bk7258_wifi_submit_connect(const char *ssid, const char *password,
                                       uint32_t timeout_ms, uint32_t *ticket,
@@ -1482,6 +1527,8 @@ static int bk7258_wifi_submit_connect(const char *ssid, const char *password,
   memcpy(priv->request.ssid,ssid,ssid_size);
   memcpy(priv->request.password,password,password_size);
   priv->request_local = true;
+  priv->local_scan = false;
+  priv->local_channels = false;
   priv->local_pending = true;
   priv->local_done = false;
   __atomic_store_n(&priv->local_cancel,false,__ATOMIC_RELEASE);
@@ -1504,6 +1551,123 @@ static int bk7258_wifi_submit_connect(const char *ssid, const char *password,
       __atomic_store_n(&priv->busy,false,__ATOMIC_RELEASE);
     }
 out:
+  nxmutex_unlock(&g_bk7258_wifi_local_lock);
+  return ret;
+}
+
+/* AP callers use the same pinned worker and reservation as CP requests. */
+static int bk7258_wifi_diagnostic_submit(uint32_t timeout_ms,
+                                           uint32_t *ticket, bool channels)
+{
+  struct bk7258_wifi_control_dev_s *priv = &g_bk7258_wifi_control;
+  bool expected = false;
+  int ret;
+
+  if (ticket == NULL ||
+      (channels ? (timeout_ms < 100u || timeout_ms > 1000u) :
+       (timeout_ms < BK7258_WIFI_SCAN_MIN_MS ||
+        timeout_ms > BK7258_WIFI_CONNECT_MAX_MS))) return -EINVAL;
+  if (!priv->initialized) return -EAGAIN;
+  ret = nxmutex_lock(&g_bk7258_wifi_local_lock);
+  if (ret < 0) return ret;
+  if (priv->local_pending) { ret = -EBUSY; goto out; }
+  if (priv->local_ticket == UINT32_MAX) { ret = -EOVERFLOW; goto out; }
+  if (!__atomic_compare_exchange_n(&priv->busy, &expected, true, false,
+                                   __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+    { ret = -EBUSY; goto out; }
+  memset(&priv->request, 0, sizeof(priv->request));
+  priv->request.operation = channels ? BK7258_WIFI_LOCAL_CHANNELS :
+                                     BK7258_WIFI_OPERATION_SCAN;
+  priv->request.timeout_ms = timeout_ms;
+  priv->request_local = true;
+  priv->local_scan = true;
+  priv->local_channels = channels;
+  priv->local_pending = true;
+  priv->local_done = false;
+  __atomic_store_n(&priv->local_cancel, false, __ATOMIC_RELEASE);
+  *ticket = ++priv->local_ticket;
+  __asm volatile ("dmb sy" ::: "memory");
+  ret = nxsem_post(&priv->request_sem);
+  if (ret < 0)
+    {
+      memset(&priv->request, 0, sizeof(priv->request));
+      priv->local_pending = false;
+      __atomic_store_n(&priv->busy, false, __ATOMIC_RELEASE);
+    }
+out:
+  nxmutex_unlock(&g_bk7258_wifi_local_lock);
+  return ret;
+}
+
+int bk7258_wifi_scan_async(uint32_t timeout_ms, uint32_t *ticket)
+{
+  return bk7258_wifi_diagnostic_submit(timeout_ms, ticket, false);
+}
+
+int bk7258_wifi_channels_async(uint32_t dwell_ms, uint32_t *ticket)
+{
+  return bk7258_wifi_diagnostic_submit(dwell_ms, ticket, true);
+}
+
+int bk7258_wifi_diagnostic_cancel(uint32_t ticket)
+{
+  struct bk7258_wifi_control_dev_s *priv = &g_bk7258_wifi_control;
+  int ret = nxmutex_lock(&g_bk7258_wifi_local_lock);
+  if (ret < 0) return ret;
+  if (!priv->local_pending || !priv->local_scan ||
+      ticket != priv->local_ticket) ret = -ESTALE;
+  else if (priv->local_done) ret = -EALREADY;
+  else
+    {
+      __atomic_store_n(&priv->local_cancel, true, __ATOMIC_RELEASE);
+      ret = 0;
+    }
+  nxmutex_unlock(&g_bk7258_wifi_local_lock);
+  return ret;
+}
+
+int bk7258_wifi_channels_poll(uint32_t ticket,
+                             struct bk7258_wifi_channel_stats_s *result)
+{
+  struct bk7258_wifi_control_dev_s *priv = &g_bk7258_wifi_control;
+  int ret;
+  if (result == NULL || ticket == 0) return -EINVAL;
+  ret = nxmutex_lock(&g_bk7258_wifi_local_lock);
+  if (ret < 0) return ret;
+  if (!priv->local_pending || !priv->local_channels ||
+      ticket != priv->local_ticket) ret = -ESTALE;
+  else if (!priv->local_done) ret = -EAGAIN;
+  else
+    {
+      *result = priv->local_channel_result;
+      memset(&priv->local_channel_result, 0, sizeof(priv->local_channel_result));
+      priv->local_pending = false;
+      priv->local_done = false;
+      ret = 0;
+    }
+  nxmutex_unlock(&g_bk7258_wifi_local_lock);
+  return ret;
+}
+
+int bk7258_wifi_scan_poll(uint32_t ticket,
+                         struct bk7258_wifi_scan_result_s *result)
+{
+  struct bk7258_wifi_control_dev_s *priv = &g_bk7258_wifi_control;
+  int ret;
+  if (result == NULL || ticket == 0) return -EINVAL;
+  ret = nxmutex_lock(&g_bk7258_wifi_local_lock);
+  if (ret < 0) return ret;
+  if (!priv->local_pending || !priv->local_scan || priv->local_channels ||
+      ticket != priv->local_ticket) ret = -ESTALE;
+  else if (!priv->local_done) ret = -EAGAIN;
+  else
+    {
+      *result = priv->local_scan_result;
+      memset(&priv->local_scan_result, 0, sizeof(priv->local_scan_result));
+      priv->local_pending = false;
+      priv->local_done = false;
+      ret = 0;
+    }
   nxmutex_unlock(&g_bk7258_wifi_local_lock);
   return ret;
 }
@@ -1559,7 +1723,8 @@ int bk7258_wifi_connect_poll(uint32_t ticket,
   if (result == NULL || ticket == 0) return -EINVAL;
   ret = nxmutex_lock(&g_bk7258_wifi_local_lock);
   if (ret < 0) return ret;
-  if (!priv->local_pending || ticket != priv->local_ticket) ret = -ESTALE;
+  if (!priv->local_pending || priv->local_scan ||
+      ticket != priv->local_ticket) ret = -ESTALE;
   else if (!priv->local_done) ret = -EAGAIN;
   else
     {
@@ -1578,7 +1743,8 @@ int bk7258_wifi_connect_cancel(uint32_t ticket)
   struct bk7258_wifi_control_dev_s *priv = &g_bk7258_wifi_control;
   int ret = nxmutex_lock(&g_bk7258_wifi_local_lock);
   if (ret < 0) return ret;
-  if (!priv->local_pending || ticket != priv->local_ticket) ret = -ESTALE;
+  if (!priv->local_pending || priv->local_scan ||
+      ticket != priv->local_ticket) ret = -ESTALE;
   else if (priv->local_done) ret = -EALREADY;
   else
     {
@@ -1867,6 +2033,12 @@ static FAR void *bk7258_wifi_control_worker(FAR void *arg)
         {
           status = -ESTALE;
         }
+      else if (request.operation == BK7258_WIFI_LOCAL_CHANNELS)
+        {
+          status = priv->request_local ?
+                   bk7258_wifi_channels_run(request.timeout_ms) : -EPERM;
+          priv->local_channel_result.status = status;
+        }
       else if (request.operation >= BK7258_WIFI_TRIAL_CONNECT)
         {
           if (!priv->request_local || !priv->trial_active ||
@@ -1976,6 +2148,14 @@ static FAR void *bk7258_wifi_control_worker(FAR void *arg)
         {
           nxmutex_lock(&g_bk7258_wifi_local_lock);
           priv->local_result = report.result;
+          priv->local_scan_result = report.scan_result;
+          if (priv->local_scan)
+            {
+              syslog(LOG_INFO, "wifi-diagnostic: channels=%u status=%d count=%lu\n",
+                     priv->local_channels ? 1u : 0u, status,
+                     (unsigned long)(priv->local_channels ?
+                       priv->local_channel_result.returned : report.scan_result.returned));
+            }
           /* Release/retain busy before publishing completion so finish cannot
            * enqueue a new job that the old worker tail accidentally unlocks. */
           __atomic_store_n(&priv->busy, priv->trial_active, __ATOMIC_RELEASE);

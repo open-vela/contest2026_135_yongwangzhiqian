@@ -11,6 +11,9 @@ endif()
 
 if(CONFIG_BK7258_AP_APPLICATION_LIFECYCLE)
   target_sources(apps PRIVATE bk7258_product_lifecycle.c)
+  if(CONFIG_DOLPHIN_UI)
+    target_include_directories(apps PRIVATE ${NUTTX_APPS_DIR}/system/dolphin)
+  endif()
 endif()
 
 if(CONFIG_BK7258_APP_AGENT)

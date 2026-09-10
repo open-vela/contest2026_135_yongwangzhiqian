@@ -1,0 +1,7 @@
+############################################################################
+# SPDX-License-Identifier: Apache-2.0
+############################################################################
+
+ifneq ($(strip $(CONFIG_DOLPHIN) $(CONFIG_DOLPHIN_UI)),)
+CONFIGURED_APPS += $(APPDIR)/system/dolphin
+endif

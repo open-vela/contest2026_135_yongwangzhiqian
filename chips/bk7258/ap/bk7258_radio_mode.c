@@ -12,7 +12,8 @@
 
 #if defined(CONFIG_BK7258_AP_CORE) && \
     (defined(CONFIG_BK7258_WIFI_VNET) || \
-     defined(CONFIG_BK7258_BT_IPC_TEST))
+     defined(CONFIG_BK7258_BT_IPC_TEST) || \
+     (defined(CONFIG_BK7258_BT_IPC) && defined(CONFIG_WIRELESS_BLUETOOTH_HOST)))
 
 #include <errno.h>
 #include <string.h>

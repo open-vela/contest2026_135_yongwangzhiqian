@@ -18,6 +18,9 @@ endif
 
 ifeq ($(CONFIG_BK7258_AP_APPLICATION_LIFECYCLE),y)
 CSRCS += bk7258_product_lifecycle.c
+ifeq ($(CONFIG_DOLPHIN_UI),y)
+CFLAGS += ${INCDIR_PREFIX}$(APPDIR)$(DELIM)system$(DELIM)dolphin
+endif
 endif
 
 ifeq ($(CONFIG_BK7258_VISION_SERVICE),y)
