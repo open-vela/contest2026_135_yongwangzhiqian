@@ -26,7 +26,7 @@ contract for `drivercheck`, performance, or production-only profiles.
 
 ## AIDK normal-product HIL
 
-`test_aidk_app.py` drives the normal AIDK `openvela_cp` + `openvela_ap` pair.
+`test_aidk_app.py` drives the normal AIDK `app` + `openvela_ap` pair.
 The default subset is read-only or observational: AP supervisor, native Wi-Fi
 lease plus configured-gateway ping, BKVoice/BKDisplay status, ETA4322 battery
 plus chip-temperature status, two live SC7A20H samples, and two NFC presence
@@ -40,7 +40,7 @@ machine-readable report with
 cd <workspace>/tests/scripts
 pytest script/test_bk7258/test_aidk_app.py \
   -D <Linux-visible-UART0-device> -B aidk_ai_toy -U cp \
-  -P <directory-containing-the-openvela_cp-.config> \
+  -P <directory-containing-the-app-.config> \
   -L <new-log-directory> -F /data -R target -M serial \
   --junitxml=<new-log-directory>/aidk-app-safe.xml
 ```
@@ -52,7 +52,7 @@ Run them only with an operator present:
 BK7258_AIDK_HIL_ACTIVE=1 pytest \
   script/test_bk7258/test_aidk_app.py \
   -D <Linux-visible-UART0-device> -B aidk_ai_toy -U cp \
-  -P <directory-containing-the-openvela_cp-.config> \
+  -P <directory-containing-the-app-.config> \
   -L <new-log-directory> -F /data -R target -M serial \
   --junitxml=<new-log-directory>/aidk-app-full.xml
 ```
