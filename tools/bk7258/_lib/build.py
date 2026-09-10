@@ -27,7 +27,9 @@ class BuildError(RuntimeError):
 
 
 BUILD_MANIFEST_FORMAT_V1 = "bk7258.build-manifest/1"
-BUILD_MANIFEST_FORMAT = "bk7258.build-manifest/2"
+BUILD_MANIFEST_FORMAT_V2 = "bk7258.build-manifest/2"
+BUILD_MANIFEST_FORMAT = "bk7258.build-manifest/3"
+TARGET_BOUND_FORMATS = {BUILD_MANIFEST_FORMAT_V2, BUILD_MANIFEST_FORMAT}
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -157,6 +159,7 @@ class BuildManifest:
     role_identities: dict[str, str]
     rollback_floor: int | None
     trust_fingerprints: dict[str, str]
+    provenance: dict[str, object] | None = None
 
 
 def _regular(path: Path, label: str) -> Path:
@@ -406,6 +409,8 @@ def _atomic_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.is_symlink() or (path.exists() and not path.is_file()):
         raise BuildError(f"generated text target is not a regular file: {path}")
+    if path.is_file() and path.read_bytes() == content.encode("utf-8"):
+        return
     descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temporary = Path(name)
     try:
@@ -420,6 +425,8 @@ def _atomic_bytes(path: Path, content: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.is_symlink() or (path.exists() and not path.is_file()):
         raise BuildError(f"generated binary target is not a regular file: {path}")
+    if path.is_file() and path.read_bytes() == content:
+        return
     descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temporary = Path(name)
     try:
@@ -794,6 +801,13 @@ def _build_config_root(workspace: Path, cp: ConfigProfile, ap: ConfigProfile,
         else "# CONFIG_BK7258_MCUBOOT_IMAGE is not set"
     )
     lines.extend(("", boot_setting))
+    # NuttX otherwise touches lib_utsname.c on every invocation, forcing a
+    # relink even with unchanged inputs.  Provenance lives in the manifest.
+    # An explicit profile setting still takes precedence.
+    if not any(line.startswith("CONFIG_LIBC_UNAME_DISABLE_TIMESTAMP=") or
+               line == "# CONFIG_LIBC_UNAME_DISABLE_TIMESTAMP is not set"
+               for line in lines):
+        lines.append("CONFIG_LIBC_UNAME_DISABLE_TIMESTAMP=y")
     _atomic_text(root / "defconfig", "\n".join(lines) + "\n")
     selector = f"CONFIG_BK7258_BOARD_{selected.board.upper()}"
     if f"{selector}=y" not in lines:
@@ -909,6 +923,14 @@ def _build_bl2(repository: Path, workspace: Path, cp: RoleBuild, ap: RoleBuild,
     initial_copy_size = selected_layout.logical_size(
         selected_layout.artifact("bl2_a")
     )
+    previous_binary = root / "bl2.bin"
+    if not clean and previous_binary.exists():
+        previous_size = _regular(previous_binary, "previous BL2 binary").stat().st_size
+        aligned_size = (previous_size + 31) // 32 * 32
+        if 0 < aligned_size <= initial_copy_size:
+            # A starting estimate only: the final-size rebuild and bounds
+            # checks below still validate changed code/configuration.
+            initial_copy_size = aligned_size
     _atomic_text(
         config_header, _bl2_config(cp, rollback_floor, initial_copy_size)
     )
@@ -1077,12 +1099,119 @@ def _manifest_record(pair_root: Path, path: Path, kind: str,
     }
 
 
+def _source_provenance(repository: Path, cp: ConfigProfile, ap: ConfigProfile,
+                       product: str | None, workspace: Path | None = None) -> dict[str, object]:
+    """Hash only source/config inputs; never collect diffs, logs or key files."""
+    if product is not None and re.fullmatch(r"[a-z][a-z0-9_-]{0,47}", product) is None:
+        raise BuildError("product must be a stable lowercase identifier")
+    scopes = ["chips/bk7258", "boards/bk7258/common",
+              f"boards/bk7258/{cp.board}", "nuttx", "app/bk7258",
+              "app/dolphin", "tools/bk7258"]
+    state = _source_tree_state(repository, scopes)
+    workspace = workspace or repository.parent
+    dependencies = {}
+    for name in ("nuttx", "apps"):
+        # The commit identifies unchanged dependency files; read only changed
+        # source/config files, not a second complete canonical source tree.
+        actual = (workspace / name).resolve()
+        reference = actual if (actual / ".git").exists() else (repository.parent / name).resolve()
+        dependencies[name] = _source_tree_state(actual, ["."], changed_only=True,
+                                                 git_repository=reference)
+    return {**state, "scope": scopes, "product": product,
+            "dependencies": dependencies,
+            "profiles": {"cp": cp.root.relative_to(repository).as_posix(),
+                         "ap": ap.root.relative_to(repository).as_posix()}}
+
+
+def _source_tree_state(repository: Path, scopes: list[str], *,
+                       changed_only: bool = False,
+                       git_repository: Path | None = None) -> dict[str, object]:
+    def git(*args: str) -> bytes:
+        # Isolated NuttX copies may omit .git. Compare their actual work tree
+        # with the canonical repository without refreshing its index.
+        result = subprocess.run(["git", "--no-optional-locks",
+                                 "-c", "diff.autoRefreshIndex=false", "-C",
+                                 str(git_repository or repository),
+                                 "--work-tree=" + str(repository), *args],
+                                capture_output=True, check=False)
+        if result.returncode != 0:
+            raise BuildError("cannot establish build source provenance")
+        return result.stdout
+    commit = git("rev-parse", "HEAD").decode().strip()
+    # --name-only can report stat-only differences when index refresh is
+    # disabled. --numstat compares content without writing the source index.
+    changed = {row.split(b"\t", 2)[2] for row in git(
+        "diff", "HEAD", "--numstat", "--no-renames", "-z", "--", *scopes
+    ).split(b"\0") if row}
+    changed.update(git("ls-files", "-z", "--others", "--exclude-standard",
+                       "--", *scopes).split(b"\0"))
+    candidates = changed if changed_only else git(
+        "ls-files", "-z", "--cached", "--others", "--exclude-standard",
+        "--", *scopes).split(b"\0")
+    suffixes = {".c", ".h", ".S", ".s", ".cpp", ".cc", ".cxx", ".hpp",
+                ".py", ".sh", ".cmake", ".mk", ".defs", ".ld", ".csv",
+                ".conf", ".json"}
+    names = {"Makefile", "CMakeLists.txt", "Kconfig", "defconfig", "Make.defs", "rcS"}
+    tree = hashlib.sha256()
+    dirty = False
+    count = 0
+    for raw in sorted(set(candidates) - {b""}):
+        relative = raw.decode("utf-8")
+        path = repository / relative
+        if path.suffix not in suffixes and path.name not in names:
+            continue
+        if any(part in {"__pycache__", "out", "logs", "credentials", "secrets",
+                        "device-bases", "backups"} for part in path.relative_to(repository).parts):
+            continue
+        if path.is_symlink():
+            payload = b"symlink:" + os.readlink(path).encode()
+        elif path.is_file():
+            payload = hashlib.sha256(path.read_bytes()).digest()
+        elif not path.exists():
+            payload = b"deleted"
+        else:
+            raise BuildError("source provenance input is not a file")
+        tree.update(raw + b"\0" + payload + b"\0")
+        dirty |= raw in changed
+        count += 1
+    return {"source_commit": commit, "dirty": dirty,
+            "input_tree_sha256": tree.hexdigest(), "input_count": count}
+
+
+def _validate_provenance(value: object) -> dict[str, object]:
+    row = _manifest_mapping(value, {"source_commit", "dirty", "input_tree_sha256",
+                                   "input_count", "scope", "product", "profiles", "dependencies"},
+                            "provenance")
+    if not isinstance(row["source_commit"], str) or not re.fullmatch(r"[0-9a-f]{40}", row["source_commit"]):
+        raise BuildError("invalid source commit")
+    _manifest_digest(row["input_tree_sha256"], "source input tree")
+    if type(row["dirty"]) is not bool or type(row["input_count"]) is not int or row["input_count"] < 1:
+        raise BuildError("invalid source input state")
+    if row["product"] is not None and (not isinstance(row["product"], str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,47}", row["product"])):
+        raise BuildError("invalid product identity")
+    if not isinstance(row["scope"], list) or not row["scope"]:
+        raise BuildError("invalid provenance scope")
+    profiles = _manifest_mapping(row["profiles"], {"cp", "ap"}, "profiles")
+    for path in [*row["scope"], *profiles.values()]:
+        _manifest_relative_path(path, "provenance path")
+    dependencies = _manifest_mapping(row["dependencies"], {"nuttx", "apps"}, "source dependencies")
+    for name, value in dependencies.items():
+        dependency = _manifest_mapping(value, {"source_commit", "dirty", "input_tree_sha256", "input_count"}, name)
+        if not isinstance(dependency["source_commit"], str) or not re.fullmatch(r"[0-9a-f]{40}", dependency["source_commit"]):
+            raise BuildError(f"invalid {name} source commit")
+        _manifest_digest(dependency["input_tree_sha256"], f"{name} changed inputs")
+        if type(dependency["dirty"]) is not bool or type(dependency["input_count"]) is not int or dependency["input_count"] < 0:
+            raise BuildError(f"invalid {name} source input state")
+    return row
+
+
 def _write_build_manifest(
     repository: Path, workspace: Path, boot: str,
     selected_layout: layout_domain.Layout, cp: RoleBuild, ap: RoleBuild,
     bl1: BootBuild, bl2: Bl2Build | None,
     artifacts: tuple[BuiltArtifact, ...], rollback_floor: int | None,
     public_sources: trust_domain.PublicSources | None, toolchain: Toolchain,
+    provenance: dict[str, object],
 ) -> Path:
     """Publish one atomic, hash-bound handoff from build to release."""
 
@@ -1140,6 +1269,7 @@ def _write_build_manifest(
             for row in sorted(artifacts, key=lambda item: item.name)
         },
         "format": BUILD_MANIFEST_FORMAT,
+        "provenance": provenance,
         "inputs": {
             name: _manifest_record(
                 pair_root, path, "raw-build", f"raw {name} input"
@@ -1278,15 +1408,17 @@ def load_build_manifest(repository: Path, path: Path) -> BuildManifest:
         "layout", "roles", "rollback_floor", "sdk", "toolchain",
         "trust",
     }
-    if manifest_format == BUILD_MANIFEST_FORMAT:
+    if manifest_format in TARGET_BOUND_FORMATS:
         root_fields.add("target")
+        if manifest_format == BUILD_MANIFEST_FORMAT:
+            root_fields.add("provenance")
     elif manifest_format != BUILD_MANIFEST_FORMAT_V1:
         raise BuildError("build manifest format is unsupported")
     document = _manifest_mapping(document, root_fields, "root")
     if document["boot"] != boot:
         raise BuildError("build manifest format or boot mode is invalid")
 
-    if manifest_format == BUILD_MANIFEST_FORMAT:
+    if manifest_format in TARGET_BOUND_FORMATS:
         target = _manifest_mapping(
             document["target"], {"board_family", "physical_board"}, "target"
         )
@@ -1501,6 +1633,8 @@ def load_build_manifest(repository: Path, path: Path) -> BuildManifest:
         role_identities=role_identities,
         rollback_floor=rollback_floor,
         trust_fingerprints=trust_fingerprints,
+        provenance=_validate_provenance(document["provenance"])
+        if manifest_format == BUILD_MANIFEST_FORMAT else None,
     )
 
 
@@ -1508,7 +1642,8 @@ def build(repository: Path, cp_config: Path, ap_config: Path, partition: Path,
           *, boot: str, bl1_public_key: Path | None,
           mcuboot_public_key: Path | None, openssl: Path | None,
           rollback_floor: int | None, jobs: int, clean: bool,
-          workspace: Path | None = None) -> BuildResult:
+          workspace: Path | None = None,
+          product: str | None = None) -> BuildResult:
     """Build CP then AP through the official OpenVela out-of-tree entry."""
 
     if jobs <= 0:
@@ -1519,6 +1654,7 @@ def build(repository: Path, cp_config: Path, ap_config: Path, partition: Path,
     toolchain = resolve_toolchain(repository, workspace)
     cp = config_profile(repository, cp_config, "cp")
     ap = config_profile(repository, ap_config, "ap")
+    provenance = _source_provenance(repository, cp, ap, product, workspace)
     if (cp.board, cp.compatibility) != (ap.board, ap.compatibility):
         raise BuildError("CP/AP config profiles are not a compatible pair")
     if boot not in {"direct", "mcuboot"}:
@@ -1601,6 +1737,8 @@ def build(repository: Path, cp_config: Path, ap_config: Path, partition: Path,
         )
         artifacts = ()
         preserved_external = ()
+    if _source_provenance(repository, cp, ap, product, workspace) != provenance:
+        raise BuildError("build source inputs changed during compilation; retry stable inputs")
     manifest = _write_build_manifest(
         repository,
         workspace,
@@ -1614,6 +1752,7 @@ def build(repository: Path, cp_config: Path, ap_config: Path, partition: Path,
         rollback_floor if boot == "mcuboot" else None,
         public_sources,
         toolchain,
+        provenance,
     )
     return BuildResult(
         selected_layout.identity,

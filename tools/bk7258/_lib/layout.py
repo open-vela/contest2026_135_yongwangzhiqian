@@ -433,6 +433,10 @@ def _linker(layout: Layout) -> str:
 
 def _atomic_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise LayoutError(f"generated layout target is not a regular file: {path}")
+    if path.is_file() and path.read_bytes() == content.encode("utf-8"):
+        return
     descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temporary = Path(name)
     try:

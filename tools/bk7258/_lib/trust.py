@@ -102,6 +102,8 @@ def _atomic_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.is_symlink() or (path.exists() and not path.is_file()):
         raise TrustError(f"generated public source target is invalid: {path}")
+    if path.is_file() and path.read_bytes() == content.encode("utf-8"):
+        return
     descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temporary = Path(name)
     try:
@@ -116,6 +118,8 @@ def _atomic_bytes(path: Path, content: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.is_symlink() or (path.exists() and not path.is_file()):
         raise TrustError(f"generated binary target is invalid: {path}")
+    if path.is_file() and path.read_bytes() == content:
+        return
     descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temporary = Path(name)
     try:

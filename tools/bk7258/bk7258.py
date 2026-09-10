@@ -62,6 +62,7 @@ def _parser() -> argparse.ArgumentParser:
         "--workspace", type=Path,
         help="use an isolated OpenVela root whose vendor/beken links resolve to this repository",
     )
+    build.add_argument("--product", help="explicit product identity; manifest metadata only")
     build.add_argument("--jobs", type=int, default=min(os.cpu_count() or 1, 8))
     build.add_argument("--bl1-public-key", type=Path)
     build.add_argument("--mcuboot-public-key", type=Path)
@@ -147,6 +148,8 @@ def _parser() -> argparse.ArgumentParser:
         "flash-contract", help="print the verified sparse write contract"
     )
     flash_contract.add_argument("--package", type=Path, required=True)
+    flash_contract.add_argument("--transport", choices=("full-bin", "ota"),
+                                help="report actual transport and data impact")
     materialize = package_commands.add_parser(
         "materialize", help="create one trust-verified BKFIL full image"
     )
@@ -169,6 +172,8 @@ def _parser() -> argparse.ArgumentParser:
     full.add_argument("--bl1-key", type=Path, required=True)
     full.add_argument("--mcuboot-key", type=Path, required=True)
     full.add_argument("--version", required=True)
+    full.add_argument("--product", help="explicit product; defaults to build provenance")
+    full.add_argument("--artifact-id", help="explicit immutable identity required for new /3 releases")
     full.add_argument("--base", type=Path, required=True)
     full.add_argument("--base-evidence", type=Path, required=True)
     full.add_argument("--openssl", type=Path, required=True)
@@ -179,6 +184,8 @@ def _parser() -> argparse.ArgumentParser:
     ota.add_argument("--build-manifest", type=Path, required=True)
     ota.add_argument("--mcuboot-key", type=Path, required=True)
     ota.add_argument("--version", required=True)
+    ota.add_argument("--product", help="explicit product; defaults to build provenance")
+    ota.add_argument("--artifact-id", help="explicit immutable identity required for new /3 releases")
     ota.add_argument("--openssl", type=Path, required=True)
     ota.add_argument("--output-dir", type=Path, required=True)
     product = release_commands.add_parser(
@@ -294,19 +301,45 @@ def _sha256_file(path: Path) -> str:
 
 
 def _release_generation(version: str) -> int:
-    match = re.fullmatch(
-        r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\."
-        r"(0|[1-9][0-9]*)\+([1-9][0-9]*)",
-        version,
-    )
-    if match is None:
-        raise ValueError(
-            "release version must be MAJOR.MINOR.REVISION+GENERATION"
-        )
-    generation = int(match.group(4), 10)
-    if generation > 0xffffffff:
-        raise ValueError("release generation exceeds the MCUboot counter range")
-    return generation
+    return product_domain.version_generation(version)
+
+
+def _release_identity(manifest: build_domain.BuildManifest, version: str,
+                      product: str | None, artifact_id: str | None) -> dict[str, object] | None:
+    return _artifact_identity(manifest.physical_board, manifest.provenance,
+                              version, product, artifact_id)
+
+
+def _artifact_identity(board: str, provenance: dict[str, object] | None,
+                       version: str, product: str | None,
+                       artifact_id: str | None) -> dict[str, object] | None:
+    if provenance is None:
+        if product is not None or artifact_id is not None:
+            raise ValueError("new artifact identity requires a build manifest with actual profiles")
+        return None  # Historical /2 invocation retains its names.
+    selected = product or provenance["product"]
+    if provenance["product"] is not None and selected != provenance["product"]:
+        raise ValueError("release product differs from build provenance")
+    if not isinstance(selected, str) or re.fullmatch(r"[a-z][a-z0-9_-]{0,47}", selected) is None:
+        raise ValueError("release requires an explicit --product or build product")
+    identifier = artifact_id
+    if not isinstance(identifier, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,47}", identifier) is None:
+        raise ValueError("artifact-id must be a safe stable identifier")
+    profiles = provenance["profiles"]
+    profile = "__".join(PurePosixPath(profiles[role]).name for role in ("cp", "ap"))
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,95}", profile) is None:
+        raise ValueError("profile cannot form a safe artifact name")
+    return {"product": selected, "chip": "bk7258", "board": board,
+            "profile": profile, "version": version, "artifact_id": identifier,
+            "security_counter": _release_generation(version),
+            "counter_policy": "legacy-version-build-equals-security-counter"}
+
+
+def _artifact_stem(identity: dict[str, object], kind: str) -> str:
+    if kind not in {"full", "ota"}:
+        raise ValueError("unsupported artifact kind")
+    return (f"{identity['product']}-{identity['chip']}-{identity['board']}-"
+            f"{identity['profile']}-v{identity['version']}-b{identity['artifact_id']}-{kind}")
 
 
 def _release_output(path: Path) -> tuple[Path, Path]:
@@ -405,6 +438,22 @@ def _release_input(
 
     package = member(document.get("package"), "package")
     build_manifest = member(document.get("build_manifest"), "build manifest")
+    if "identity" in document:
+        identity = document["identity"]
+        if not isinstance(identity, dict):
+            raise ValueError("release artifact identity is malformed")
+        copied_build = json.loads(build_manifest.read_text(encoding="utf-8"))
+        provenance = build_domain._validate_provenance(copied_build.get("provenance"))
+        target = copied_build.get("target")
+        if not isinstance(target, dict) or target != document.get("target"):
+            raise ValueError("release artifact target differs from build evidence")
+        expected = _artifact_identity(target.get("physical_board"), provenance,
+                                      document.get("version"), identity.get("product"),
+                                      identity.get("artifact_id"))
+        if identity != expected or identity["security_counter"] != document.get("generation"):
+            raise ValueError("release artifact identity differs from build evidence")
+        if package.name != _artifact_stem(identity, expected_mode) + ".bkpack":
+            raise ValueError("release package name differs from artifact identity")
     operator = (
         member(document.get("operator"), "operator")
         if expected_mode == "full" else None
@@ -563,11 +612,14 @@ def _release(args: argparse.Namespace) -> None:
             f"sha256={report['sha256']}"
         )
         return
+    for name in (("bl1_key", "mcuboot_key") if args.release_command == "full"
+                 else ("mcuboot_key",)):
+        trust_domain._regular(getattr(args, name), "configured signing identity")
     manifest = build_domain.load_build_manifest(
         REPOSITORY, _workspace_input(args.build_manifest)
     )
     manifest_sha256 = _sha256_file(manifest.source)
-    if manifest.format != build_domain.BUILD_MANIFEST_FORMAT:
+    if manifest.format not in build_domain.TARGET_BOUND_FORMATS:
         raise build_domain.BuildError(
             "signed releases require a target-bound build manifest"
         )
@@ -576,6 +628,7 @@ def _release(args: argparse.Namespace) -> None:
             "signed releases require one MCUboot build manifest"
         )
     generation = _release_generation(args.version)
+    identity = _release_identity(manifest, args.version, args.product, args.artifact_id)
     if args.release_command == "full" \
             and generation != manifest.rollback_floor:
         raise trust_domain.TrustError(
@@ -695,6 +748,7 @@ def _release(args: argparse.Namespace) -> None:
                 )
 
         package_path = package_root / (
+            _artifact_stem(identity, suffix) + ".bkpack" if identity is not None else
             f"firmware-{manifest.physical_board}-v{args.version}-{suffix}.bkpack"
         )
         package_report = package_domain.create(
@@ -716,19 +770,16 @@ def _release(args: argparse.Namespace) -> None:
 
         operator_report = None
         materialization = None
+        preset = build_domain.board_preset(REPOSITORY, manifest.physical_board)
+        release_policy = product_domain.load_policy(preset.release_policy, manifest.layout)
         if args.release_command == "full":
             assert accepted_base is not None
             assert accepted_base_copy is not None
             flash_root = staging / "flash"
             flash_root.mkdir()
             operator_path = flash_root / (
+                _artifact_stem(identity, "full") + ".bin" if identity is not None else
                 f"operator-{manifest.physical_board}-v{args.version}.bin"
-            )
-            preset = build_domain.board_preset(
-                REPOSITORY, manifest.physical_board
-            )
-            release_policy = product_domain.load_policy(
-                preset.release_policy, manifest.layout
             )
             operator_report = package_domain.materialize_full_image(
                 package_path,
@@ -778,6 +829,12 @@ def _release(args: argparse.Namespace) -> None:
             },
             "version": args.version,
         }
+        if identity is not None:
+            summary["identity"] = identity
+        summary["data_impact"] = product_domain.operation_impact(
+            package_path, release_policy,
+            transport="full-bin" if args.release_command == "full" else "ota",
+        )
         if operator_report is not None:
             operator_path = Path(str(operator_report["output"]))
             summary["operator"] = {
@@ -821,6 +878,7 @@ def _build(args: argparse.Namespace) -> None:
         jobs=args.jobs,
         clean=args.clean,
         workspace=args.workspace,
+        product=args.product,
     )
     print(f"bk7258 build: PASS layout={result.partition_identity}")
     print(f"bl1 elf={result.bl1.elf} bin={result.bl1.binary} map={result.bl1.map_file}")
@@ -923,7 +981,7 @@ def _create_unsigned_package(
     manifest = build_domain.load_build_manifest(
         REPOSITORY, _workspace_input(build_manifest)
     )
-    if manifest.format != build_domain.BUILD_MANIFEST_FORMAT:
+    if manifest.format not in build_domain.TARGET_BOUND_FORMATS:
         raise package_domain.PackageError(
             "diagnostic packaging requires a target-bound build manifest"
         )
@@ -992,8 +1050,19 @@ def _package(args: argparse.Namespace) -> None:
         return
     if args.package_command == "flash-contract":
         import json
-        print(json.dumps(package_domain.flash_contract(args.package),
-                         sort_keys=True, separators=(",", ":")))
+        contract = package_domain.flash_contract(args.package)
+        if args.transport is not None:
+            board = contract["device"].get("physical_board")
+            if not isinstance(board, str):
+                raise ValueError("operation impact requires an explicit physical board")
+            preset = build_domain.board_preset(REPOSITORY, board)
+            layout = layout_domain.load(preset.partition)
+            if contract["layout"] != {"identity": layout.identity, "sha256": layout.sha256}:
+                raise ValueError("package layout differs from the target board")
+            policy = product_domain.load_policy(preset.release_policy, layout)
+            contract = product_domain.operation_impact(args.package, policy,
+                                                       transport=args.transport)
+        print(json.dumps(contract, sort_keys=True, separators=(",", ":")))
         return
     if args.package_command == "materialize":
         report = package_domain.verify(args.package)
