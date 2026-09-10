@@ -9,7 +9,7 @@
 
 - During active BK7258 work, do not use N17 or another historical trust domain as a source, baseline, key candidate, or fallback unless the owner explicitly reactivates it.
 - Every owner-authorized full download starts a fresh trust generation: create new ephemeral P-256 key pairs independently for BL1 and MCUboot, embed their public keys in a clean build, and use their private keys to sign the complete BL1/BL2/CP/AP chain. Never reuse a previous generation's private keys for another full download.
-- Keep fresh private keys in a mode-0600 temporary directory only, never print or record their contents or paths in tracked files, and remove them after package verification and hardware acceptance. The signed package retains only public trust evidence.
+- Keep fresh private keys as mode-0600 files in a mode-0700 temporary directory only, never print or record their contents or paths in tracked files, and remove them after package verification and hardware acceptance. The signed package retains only public trust evidence.
 - Before a fresh-key full download, the non-halting target preflight must match the latest accepted base generation, while the new package must independently pass its complete internal trust verification and use strictly increasing rollback counters. After download, fresh boot/readback evidence must identify the new generation. Do not require the not-yet-installed public key to match the pre-download target.
 - The apps-only loader path remains bound to the already-installed public-only trust contract and its exact target fingerprint. Do not mix it with the fresh-key full-download path or add a parallel key resolver, trust gate, or download policy.
 
@@ -40,14 +40,23 @@
   passed.  Then run the deferred regression, multi-board, provenance and final
   delivery checks before claiming completion.
 
+## BK7258 delegation boundaries
+
+- Follow the user-level T0–T3 routing policy. Hardware/Flash/trust, release,
+  chip/board and AP/CP decisions remain owned by the current root agent.
+- UART/debug/download access, a board build tree and a GPU training run are
+  exclusive resources. Child agents may collect bounded logs, hashes,
+  manifests, symbols and configuration evidence; the root chooses the
+  hypothesis and owns each hardware-fast iteration and acceptance decision.
+
 ## BK7258 architecture
 
-- Before using an old implementation as design input, define the target public commands, internal domain boundaries, authoritative source for each mutable fact, and deletion set. Stop at architecture analysis if any is unknown.
+- Before redesigning legacy public entry points or domain ownership, define the target commands, ownership, authoritative mutable facts and deletion set. Resolve material architecture gaps before implementing that redesign; a narrow fix need not invent a complete redesign plan.
 - Historical scripts, schemas, tests, and documents are evidence, not requirements. Preserve behavior only when a current build, package, verification, or hardware path consumes it; do not create one-file compatibility moves.
-- `tools/bk7258/bk7258.py` is the only tracked public entry.  Its top-level commands are `build`, `toolchain`, `sdk`, `package`, `release`, `deploy`, and `verify`; nested commands are `toolchain install|verify`, `sdk list|verify|install|rebuild`, `package accept-base|create|delivery|extract|flash-contract|materialize`, `release full|ota|product`, and `verify layout|image|build-manifest|package|delivery|trust`.  Domain implementation belongs under `_lib`.
+- `tools/bk7258/bk7258.py` is the only tracked public entry; domain implementation belongs under `_lib`. Consult its help for command syntax and the maintained build/package SOP for the requested workflow.
 - The team manifest owns SDK/toolchain identity, CP/AP profiles own board/role compatibility, `--boot` is explicit input, and the selected partition CSV owns geometry, topology, roles, and build/write policy.  The board-selected release-policy CSV owns only product update semantics (`replace`, `preserve`, `device-unique`, `transactional`, `factory-init`, `immutable`) and must cover every partition by name without repeating offsets or sizes.  Consumers must not duplicate these facts.
 - Descriptor-only board extension applies to the current BK7258 dual-core BL1/BL2 and MCUboot A/B product model.  A different boot/update model requires a separately reviewed product-mode contract; never implement it as a physical-board-name branch or silently reinterpret the current `boot`/`cp`/`ap`/BL2/manifest/`persistent_data` contract.
-- Accept cleanup only after reporting deleted layers, confirming tracked top-level file count did not grow, and checking for duplicate version, profile, path, layout, or build-policy truths.
+- For an authorized cleanup, report retired layers and ensure no duplicate public entry, version, profile, path, layout or build-policy owner was introduced. File count alone is not a quality gate.
 
 ## Upstream-oriented peripheral drivers
 
@@ -206,10 +215,11 @@
   helpers for a UART peripheral, touch optional data pins in one-bit SDIO mode,
   or infer wiring from another board.  Record the schematic-derived mapping in
   the board documentation/config and verify the selected pinmux in the image.
-- A change under shared chip/common/test/build code affects all three BK7258
-  boards and requires clean-build coverage for each supported board/profile.
-  A board-only wiring change requires that board's clean build plus the shared
-  host regression; never claim multi-board support from one successful image.
+- At final acceptance, shared chip/common/test/build changes require clean-build
+  coverage for every supported board/profile; a board-only wiring change
+  requires that board's clean build plus shared host regression. During
+  hardware-fast iteration, defer these broad checks as described above.
+  Never claim multi-board support from one successful image.
 
 ## Portable paths and build integration
 
@@ -265,58 +275,10 @@
   official repository or a board build without checking it in the current
   worktree.  Source counts include intended untracked additions and exclude
   deleted paths, ignored SDK/toolchain payloads and AI logs.
-- Before handoff, run `git diff --check`, the host BK7258 regression and header
-  audit, validate all manifest links and local documentation links, confirm
-  official repositories have no team-owned tracked edits, and clean-build
-  every affected board/profile.  For a downloadable artifact, also verify the
-  build manifest, required ELF symbols and the resulting package with the sole
-  BK7258 CLI.
-- Build and package are separate acceptance gates.  Always hand off the exact
-  package path, board/profile/boot identity, manifest identity and verification
-  result; do not call a loose pair of binaries a verified full package.  A
-  direct or unsigned diagnostic artifact must be labelled as such and must not
-  be presented as a fresh-key full-trust download.
-- Every whole-device download handoff must include one dense, single-input
-  operator `.bin` for Flash offset zero whose size equals the complete Flash
-  capacity declared by the selected partition CSV.  A `.bkpack`/`.bkpkg`,
-  `pair.bin`, sparse fragments or a build directory is supporting evidence,
-  never the sole downloadable artifact.  Do not concatenate, pad or archive
-  release bytes outside the maintained CLI.
-- A normal wired recovery is device-bound: materialize it from one exact
-  complete readback of that same unit, replace firmware partitions, reset only
-  transactional state, and preserve `preserve`, `factory-init`,
-  `device-unique`, `immutable` and unmapped bytes.  Its ZIP must record the
-  canonical `package accept-base` evidence binding the hash/size to the board,
-  layout, stable device ID and capture method, and warn that it cannot be
-  copied to another unit.  A caller-supplied raw hash alone is not acceptance
-  evidence; the operator or controlled fixture remains responsible for proving
-  which unit produced the readback.
-- A universal factory image is a different product.  Generate one only when a
-  reviewed manufacturing provisioner assigns per-device MAC/RF/Bluetooth and
-  calibration state.  Until then, the product manifest must say
-  `requires-provisioning`; never turn a board readback or an all-`0xff` tail
-  into a purported universal factory image.
-- Direct diagnostics use `package delivery` with an explicit version, complete
-  base and accepted-base evidence.  Signed full/OTA releases are combined with
-  `release product`; the resulting verified ZIP contains `release.json`,
-  `SHA256SUMS`, `FLASHING.md`, accepted-base/build/release-policy evidence, the complete
-  device-bound recovery BIN and any compatible OTA package.  OTA updates only
-  CP/AP and state their accepted source version plus the root required on the
-  source device.  Wired recovery separately states the new root it installs;
-  these roots may differ during intentional key rotation.  OTA never claims to
-  be a whole-device download.  A root/BL2/layout transition remains a wired
-  full recovery rather than an apps-only OTA.
-- Publish release directories and product ZIPs atomically with no-replace
-  semantics; an existing target, including an empty directory, is an error.
-  A copied `evidence/build-manifest.json` must validate against its packaged
-  target/layout/security facts without depending on the original `out/` path.
-  Only initial release construction may consume the path-bound build handoff.
-
-
-<claude-mem-context>
-# Memory Context
-
-# [contest2026_135_yongwangzhiqian] recent context, 2026-08-31 11:30am GMT+8
-
-No previous sessions found.
-</claude-mem-context>
+- Debug-artifact and final-acceptance handoffs have different gates. Use the
+  hardware-fast loop above for debug iteration. For final source acceptance or
+  any downloadable artifact, read only the matching stage in the maintained
+  [handoff policy](docs/platforms/bk7258/nuttx-port/bk7258-build-flash-debug-sop.md#handoff-gates-by-stage).
+- Always preserve the exact target's data, trust and artifact-identity gates
+  for a download. Build, package, transport, boot and functional acceptance
+  are separate claims; a diagnostic BIN is not a verified signed release.

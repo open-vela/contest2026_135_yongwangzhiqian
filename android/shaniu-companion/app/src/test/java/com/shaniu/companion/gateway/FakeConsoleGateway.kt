@@ -67,6 +67,9 @@ class FakeConsoleGateway(
             TurnPhase.LISTENING -> TurnPhase.THINKING
             TurnPhase.THINKING -> TurnPhase.SPEAKING
             TurnPhase.SPEAKING -> TurnPhase.IDLE
+            TurnPhase.CANCELLING -> TurnPhase.CANCELLING
+            TurnPhase.CANCEL_UNCONFIRMED -> TurnPhase.CANCEL_UNCONFIRMED
+            TurnPhase.PLAYBACK_UNCONFIRMED -> TurnPhase.PLAYBACK_UNCONFIRMED
         }
         report = report.copy(turn = next)
         return event(ConsoleEvent.TurnChanged(next))
@@ -87,7 +90,7 @@ class FakeConsoleGateway(
 
     /** Simulates device-confirmed preference state; a receipt alone never updates the UI. */
     fun setPreferences(
-        volumePercent: Int = report.volumePercent,
+        volumePercent: Int = requireNotNull(report.volumePercent),
         personaMode: PersonaMode = report.personaMode,
     ): ConsoleEventEnvelope {
         require(volumePercent in 0..100)
@@ -100,7 +103,7 @@ class FakeConsoleGateway(
         return event(
             ConsoleEvent.SettingsChanged(
                 revision = report.revision,
-                volumePercent = report.volumePercent,
+                volumePercent = volumePercent,
                 personaMode = report.personaMode,
             ),
         )

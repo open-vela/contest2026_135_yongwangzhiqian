@@ -29,8 +29,13 @@ BOARD_PERIPHERAL_MARKERS = {
     "aidk_ai_toy": (
         "BDAC BOOT PASS board=AIDK AI Toy",
         "BMIC BOOT PASS board=AIDK AI Toy",
+        "BSDIO BOOT PASS slot=0",
         "AIDK LCD BOOT PASS",
+        "AIDK GC2145 registered: /dev/video0 640x480@30 MJPEG",
+        "AIDK SC7A20H registered: /dev/uorb/sensor_accel0",
+        "AIDK MFRC522 registered: /dev/nfc0 via UART1",
         "AIDK ETA4322 registered: /dev/bat0",
+        "AIDK DEFERRED DONE failures=0",
     ),
 }
 

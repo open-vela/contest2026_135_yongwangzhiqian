@@ -8,7 +8,7 @@ enum class Presence { UNCLAIMED, OFFLINE, ONLINE }
 
 enum class GatewayConnection { NOT_CONFIGURED, OFFLINE, ONLINE, SYNCING }
 
-enum class TurnPhase { IDLE, LISTENING, THINKING, SPEAKING, OFFLINE, ERROR }
+enum class TurnPhase { IDLE, LISTENING, THINKING, SPEAKING, CANCELLING, CANCEL_UNCONFIRMED, PLAYBACK_UNCONFIRMED, OFFLINE, ERROR }
 
 enum class PrivacyCapability {
     MICROPHONE,
@@ -23,9 +23,10 @@ enum class PermissionState { NOT_GRANTED, ALLOWED, DENIED }
 enum class PersonaMode { GENTLE, PLAYFUL, QUIET, SERIOUS, TSUNDERE_LITE }
 
 /** Model/device-reported affect. Android displays it but never sets it directly. */
-enum class Emotion { NEUTRAL, HAPPY, SHY, SAD, SURPRISED, THINKING }
+enum class Emotion { UNKNOWN, NEUTRAL, HAPPY, SHY, SAD, SURPRISED, THINKING }
 
 enum class UpdatePhase {
+    UNKNOWN,
     IDLE,
     AWAITING_LOCAL_CONFIRMATION,
     DOWNLOADING,
@@ -49,10 +50,15 @@ enum class ConsoleErrorCode(val wireValue: String) {
     LOCAL_CONFIRMATION_REQUIRED("local_confirmation_required"),
     EVENT_GAP("event_gap"),
     UNSUPPORTED_OPERATION("unsupported_operation"),
+    VOLUME_NOT_SUPPORTED("volume_not_supported"),
+    VOLUME_BUSY("volume_busy"),
+    VOLUME_TIMEOUT("volume_timeout"),
+    VOLUME_DEVICE_ERROR("volume_device_error"),
     UPDATE_MANIFEST_INVALID("update_manifest_invalid"),
     UPDATE_SIGNATURE_INVALID("update_signature_invalid"),
     UPDATE_PAIR_MISMATCH("update_pair_mismatch"),
     UPDATE_TRIAL_FAILED("update_trial_failed"),
+    UPDATE_DEVICE_ERROR("update_device_error"),
 }
 
 data class UpdateState(
@@ -74,11 +80,11 @@ data class DeviceReport(
     val presence: Presence,
     val gateway: GatewayConnection,
     val batteryPercent: Int?,
-    val charging: Boolean,
+    val charging: Boolean?,
     val firmwareVersion: String?,
     val revision: Long,
     val turn: TurnPhase,
-    val volumePercent: Int,
+    val volumePercent: Int?,
     val personaMode: PersonaMode,
     val emotion: Emotion,
     val permissions: Map<PrivacyCapability, PermissionState>,
@@ -86,7 +92,7 @@ data class DeviceReport(
 ) {
     init {
         require(batteryPercent == null || batteryPercent in 0..100)
-        require(volumePercent in 0..100)
+        require(volumePercent == null || volumePercent in 0..100)
         require(revision >= 0)
     }
 }
@@ -160,10 +166,10 @@ data class CompanionState(
     val presence: Presence = Presence.UNCLAIMED,
     val gateway: GatewayConnection = GatewayConnection.NOT_CONFIGURED,
     val batteryPercent: Int? = null,
-    val charging: Boolean = false,
+    val charging: Boolean? = null,
     val firmwareVersion: String? = null,
     val turn: TurnPhase = TurnPhase.OFFLINE,
-    val volumePercent: Int = 50,
+    val volumePercent: Int? = null,
     val personaMode: PersonaMode = PersonaMode.GENTLE,
     val emotion: Emotion = Emotion.NEUTRAL,
     val permissions: Map<PrivacyCapability, PermissionState> = emptyMap(),

@@ -119,9 +119,32 @@ int bk7258_wifi_initialize(void);
 int bk7258_wifi_read_link(struct bk7258_wifi_result_s *result);
 int bk7258_wifi_refresh_carrier(void);
 int bk7258_wifi_retire_link(void);
+bool bk7258_wifi_native_lease_matches(
+  const struct bk7258_wifi_result_s *result);
 int bk7258_wifi_set_native_lease(
   const struct bk7258_wifi_result_s *result);
 int bk7258_wifi_clear_native_lease(void);
+/* Nonblocking AP product access to the existing logical-CPU0 control worker.
+ * Credentials are copied on submit and wiped by the worker. poll consumes
+ * one completion; -EAGAIN means pending, otherwise result.status is the
+ * connection outcome. Cancellation is cooperative and must be polled/joined
+ * before reusing the network. Tickets never wrap or match an old completion.
+ */
+int bk7258_wifi_connect_async(const char *ssid, const char *password,
+                              uint32_t timeout_ms, uint32_t *ticket);
+int bk7258_wifi_connect_poll(uint32_t ticket,
+                             struct bk7258_wifi_result_s *result);
+int bk7258_wifi_connect_cancel(uint32_t ticket);
+/* A trial retains exclusive control after connect completion. Consume the
+ * start completion with connect_poll, then finish with commit=true only after
+ * durable product publication; otherwise restore the previous worker-owned
+ * credentials. Finish itself is asynchronous and returns a new poll ticket.
+ * A failed restore retains the lease; retry restore or restart, never reuse
+ * the network under another owner. Unknown pre-existing credentials are not
+ * overwritten. */
+int bk7258_wifi_trial_start(const char *ssid, const char *password,
+                            uint32_t timeout_ms, uint32_t *lease);
+int bk7258_wifi_trial_finish(uint32_t lease, bool commit, uint32_t *ticket);
 #  else
 int bk7258_wifi_controller_initialize(void);
 bool bk7258_wifi_controller_active(void);

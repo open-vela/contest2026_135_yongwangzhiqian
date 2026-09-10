@@ -115,12 +115,21 @@ static void run_case(enum bk7258_reset_source_e requested,
 
 int main(void)
 {
+#ifdef CONFIG_BK7258_PM_SOFT_OFF
+  run_case(BK7258_RESET_SOURCE_FORCE_DEEPSLEEP,
+           BK7258_RESET_SOURCE_FORCE_DEEPSLEEP, false);
+#else
+  run_case(BK7258_RESET_SOURCE_FORCE_DEEPSLEEP,
+           BK7258_RESET_SOURCE_REBOOT, false);
+#endif
   run_case(BK7258_RESET_SOURCE_REBOOT,
            BK7258_RESET_SOURCE_REBOOT, false);
   run_case(BK7258_RESET_SOURCE_WATCHDOG,
            BK7258_RESET_SOURCE_WATCHDOG, false);
   run_case(BK7258_RESET_SOURCE_NMI_WDT,
            BK7258_RESET_SOURCE_NMI_WDT, false);
+  run_case(BK7258_RESET_SOURCE_HARD_FAULT,
+           BK7258_RESET_SOURCE_HARD_FAULT, false);
 
   /* POWERON and unknown values are observations, not valid reset intents. */
 

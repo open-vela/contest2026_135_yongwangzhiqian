@@ -201,3 +201,64 @@ int bkvision_rpc_validate_frame(struct bkvision_rpc_response_s *response,
   response->operation_status = 0;
   return 0;
 }
+
+int bkvision_copy_jpeg_frame(struct bkvision_rpc_response_s *response,
+                             uint8_t *destination,
+                             size_t destination_capacity,
+                             size_t *destination_size,
+                             const uint8_t *frame, size_t frame_capacity,
+                             size_t bytes_used, uint32_t driver_flags,
+                             uint32_t width, uint32_t height,
+                             uint32_t pixel_format,
+                             uint32_t capture_sequence)
+{
+  int ret;
+
+  if (destination_size != NULL)
+    {
+      *destination_size = 0;
+    }
+
+  if (destination == NULL || destination_size == NULL)
+    {
+      if (response != NULL)
+        {
+          response->operation_status = -EINVAL;
+          response->width = 0;
+          response->height = 0;
+          response->pixel_format = 0;
+          response->bytes_used = 0;
+          response->capture_sequence = 0;
+          response->flags = 0;
+          response->reserved[0] = 0;
+          response->reserved[1] = 0;
+        }
+      return -EINVAL;
+    }
+
+  ret = bkvision_rpc_validate_frame(response, frame, frame_capacity,
+                                    bytes_used, driver_flags, width, height,
+                                    pixel_format, capture_sequence);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  if (bytes_used > destination_capacity)
+    {
+      response->operation_status = -ENOSPC;
+      response->width = 0;
+      response->height = 0;
+      response->pixel_format = 0;
+      response->bytes_used = 0;
+      response->capture_sequence = 0;
+      response->flags = 0;
+      response->reserved[0] = 0;
+      response->reserved[1] = 0;
+      return -ENOSPC;
+    }
+
+  memcpy(destination, frame, bytes_used);
+  *destination_size = bytes_used;
+  return 0;
+}

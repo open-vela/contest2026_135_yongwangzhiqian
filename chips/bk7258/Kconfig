@@ -496,6 +496,20 @@ config BK7258_PM_CLOCK
 		reference-counts each clock.  This is the clock-ownership foundation;
 		The CP image also selects the board PM policy below.
 
+config BK7258_PM_SOFT_OFF
+	bool "Board-key wakeable low-power soft off"
+	default n
+	depends on BK7258_PM_CLOCK
+	depends on BK7258_AP_CORE || (BK7258_SDK_IPC_RUNTIME && BK7258_OTA)
+	select SCHED_LPWORK if !BK7258_AP_CORE
+	select BK7258_CP_GPIO_INPUT if !BK7258_AP_CORE
+	select BOARDCTL_RESET_CAUSE if !BK7258_AP_CORE
+	---help---
+		After owners drain and sync, CP resets the whole chip with the SDK
+		sleep intent. Early boot enters super deep sleep before AP/radio
+		startup. The board supplies an analog wake GPIO. This does not
+		physically disconnect VBAT; wake and current require board testing.
+
 config BK7258_TEMPERATURE
 	bool "CP-owned on-die temperature sensor"
 	default n
@@ -709,6 +723,29 @@ config BK7258_OTA_RPMSG_CONTROL_TIMEOUT_MS
 		to finish one source-driven staging session.  It does not change the
 		Pair Installer or MCUboot trial timeout.
 
+config BK7258_USBMODE_RPMSG
+	bool "Independent CP-to-AP USB mode control transport"
+	default n
+	depends on BK7258_RPTUN
+	depends on !BK7258_AP_CORE || BK7258_USBMODE
+	help
+		Expose a small versioned endpoint for querying and switching the AP-owned
+		USB0 CDC/MSC mode manager.  This transport is independent of MCUboot and
+		OTA so direct diagnostic images can provision board storage without
+		enabling any Flash writer.  Enable it in both CP and AP images.
+
+config BK7258_USBMODE_RPMSG_PRIORITY
+	int "USB mode RPMsg AP worker priority"
+	default 90
+	range 1 223
+	depends on BK7258_USBMODE_RPMSG && BK7258_AP_CORE
+
+config BK7258_USBMODE_RPMSG_STACKSIZE
+	int "USB mode RPMsg AP worker stack size"
+	default 3072
+	range 2048 8192
+	depends on BK7258_USBMODE_RPMSG && BK7258_AP_CORE
+
 config BK7258_OTA_MANAGER
 	bool "AP unified OTA manager"
 	default n
@@ -890,7 +927,7 @@ config BK7258_RPMSGFS
 	bool "N11 AP access to CP LittleFS through RPMsgFS"
 	default n
 	depends on BK7258_RPTUN
-	depends on BK7258_AP_CORE || BK7258_STORAGE_ONCHIP_PERSISTENT
+	depends on BK7258_AP_CORE || BK7258_ONCHIP_DATAFS
 	select FS_RPMSGFS if BK7258_AP_CORE
 	select FS_RPMSGFS_SERVER if !BK7258_AP_CORE
 	---help---
@@ -968,6 +1005,7 @@ config BK7258_WIFI_VNET
 	select NETUTILS_NETLIB if BK7258_AP_CORE
 	select NET_ICMP_SOCKET if BK7258_AP_CORE
 	select NET_SOCKOPTS if BK7258_AP_CORE
+	select BK7258_SDK_SRAM_HEAP if BK7258_AP_CORE && BK7258_PSRAM_SYSTEM_HEAP
 	---help---
 		Keep the official Beken v3.1.1.9 Wi-Fi controller, RF/PHY,
 		supplicant and mailbox data plane on CP.  On AP, use the official
@@ -1399,6 +1437,15 @@ config BK7258_GPIO_LOWERHALF
 		P0/P1 SWD route, /dev/gpio0 is omitted without remuxing that pin.
 		A validation application is selected separately.
 
+config BK7258_CP_GPIO_INPUT
+	bool
+	default n
+	depends on ARCH_CHIP_BK7258 && !BK7258_AP_CORE
+	help
+		Provide the public BK7258 GPIO input configure/read interfaces on CP
+		for selected-board polled consumers. This uses the official SDK GPIO
+		driver and does not provide GPIO interrupts or a NuttX GPIO lower half.
+
 config BK7258_SARADC_SERVER
 	bool "CP SAR ADC mailbox server"
 	default n
@@ -1598,18 +1645,43 @@ config BK7258_MIC_STACKSIZE
 		headroom for its DSP and setjmp call chains.
 
 config BK7258_AUDIO_PREPROCESS
-	bool "AEC/NS/AGC/VAD microphone preprocessing"
+	bool "AEC v3/AGC microphone preprocessing"
 	default n
 	depends on BK7258_MIC && BK7258_AP_CORE && ARCH_SETJMP_H
+	depends on SMP && BK7258_AP_SMP_SCHED_ONLINE
 	help
 		Process a board-declared MIC1 near-end plus MIC2 speaker-reference
-		pair through the pinned SDK's AEC/NS, AGC and VAD libraries.  A mono
+		pair through the pinned SDK's maintained AEC v3 backend and AGC.  The
+		capture/DSP worker is pinned to AP logical CPU1, matching the official
+		SDK audio pipeline task placement.  A mono
 		upper-half request receives processed 16-kHz, 20-ms PCM frames; a
 		stereo request continues to expose the unmodified diagnostic pair.
 		Boards without an explicit MIC2 AEC-reference flag remain unchanged.
 		Per-input analog gain and AEC reference delay are physical-board
 		calibration values supplied through bk7258_mic_config_s.  Runtime
 		digital gain remains an application-controlled NuttX audio feature.
+
+config BK7258_AUDIO_PREPROCESS_INTEGRATED_NS
+	bool "Enable AEC v3 integrated noise suppression"
+	default n
+	depends on BK7258_AUDIO_PREPROCESS
+	help
+		Enable the noise-suppression stage inside the pinned SDK AEC v3
+		backend.  Keep this disabled until the selected AP CPU frequency and
+		worker placement can process every 20-ms frame in real time.  Disabling
+		this stage matches the SDK's AEC NS_CLOSE flag policy and leaves the
+		other selected AEC stages unchanged.
+
+config BK7258_AUDIO_PREPROCESS_POSTFILTERS
+	bool "Enable AEC v3 BPF/DRC/comfort-noise stages"
+	default n
+	depends on BK7258_AUDIO_PREPROCESS
+	help
+		Enable the BPF, dynamic-range-control and comfort-noise stages inside
+		the pinned SDK AEC v3 backend.  Echo cancellation and the external AGC
+		remain enabled when this option is disabled.  Enable these postfilters
+		only after real-board capture proves that the selected combination can
+		meet every 20-ms frame deadline.
 
 config BK7258_MIC_LIFECYCLE_VALIDATION
 	bool "Run bounded microphone capture lifecycle validation"
@@ -1752,6 +1824,23 @@ config BK7258_DVP_H264_COMPAT
 		Internal v3.1.1.9 compatibility path for the reviewed DVP/H.264
 		startup ordering and standard V4L2 H.264 format translation. A board
 		binding must select this only for a matching SDK sensor pipeline.
+
+config BK7258_DVP_JPEG_STREAM_IRQ_GUARD
+	bool
+	default n
+	depends on BK7258_DVP && !BK7258_DVP_H264_COMPAT
+	help
+		Internal v3.1.1.9 compatibility path for a reviewed JPEG sensor
+		pipeline.  Preserve the immutable SDK's original JPEG-start order,
+		disable the sensor-FIFO-full interrupt while a JPEG handle owns the YUV
+		block.  Park the SoC group-2 route and all YUV interrupt delivery while the
+		SDK stream is suspended, clear peripheral and local-NVIC pending state,
+		reapply the park after the YUV soft-reset restores its interrupt register,
+		and restore the reviewed mask and route only after V4L2 has queued its first
+		buffer and resume has completed.
+		This prevents the fitted pipeline from reasserting YUV sources before
+		STREAMON owns the capture lifecycle.  SDK close resets and powers down the
+		YUV block; the next open programs a fresh interrupt configuration.
 
 config BK7258_DMA2D
 	bool "BK7258 DMA2D graphics accelerator helper"
@@ -2103,6 +2192,52 @@ config BK7258_SDIO
 		soldered device.  HPWORK remains required by NuttX's unconditional SDIO
 		callback-registration ABI.
 
+config BK7258_SDIO_CAPACITY_PROBE
+	bool "Read-only SD capacity boundary probe at boot"
+	default n
+	depends on BK7258_SDIO && MMCSD_SDIO && BK7258_AP_CORE
+	help
+		Diagnostic only: read single sectors at the beginning, middle and end
+		of reported geometry through the NuttX block driver. Never access past
+		the reported end, write, format or override geometry. Log the first 32
+		CMD17 responses and
+		stop probing if a sector-zero control read fails. Disable in products.
+
+config BK7258_SDIO_SDK_REFERENCE
+	bool "Compare SDK card initialization before the NuttX capacity probe"
+	default n
+	depends on BK7258_SDIO_CAPACITY_PROBE
+	help
+		Diagnostic only. Before registering the NuttX MMC/SD slot, run the
+		pinned SDK card initialization and log its reported sector count.
+		Deinitialize that card driver before reinitializing the host for
+		NuttX. No SDK block I/O is exposed to applications or run by this
+		comparison. Disable in products.
+
+config BK7258_SDIO_CAPACITY_WRITE_PROBE
+	bool "DESTRUCTIVE reported SD capacity verification at every boot"
+	default n
+	depends on BK7258_SDIO_CAPACITY_PROBE
+	depends on !BK7258_DISPLAY_SERVICE && !BK7258_VISION_SERVICE
+	depends on !BK7258_VOICE_SERVICE && !BK7258_USBMSC
+	help
+		Dedicated diagnostic image only. Destroys SD contents at every boot.
+		Write address-specific patterns within reported geometry, check for
+		aliases, then write the entire reported span before reading it all
+		back. Never access past reported geometry. Abort on the first
+		I/O error or mismatch. Never change reported capacity or format media.
+		Requires explicit owner authorization to discard all SD data.
+
+config BK7258_SDIO_PERF
+	bool "SDIO aggregate transfer timing"
+	default n
+	depends on BK7258_SDIO
+	help
+		Log aggregate command and blocking SDK write timings every 2048
+		writes or on write failure. Command fields are count/milliseconds.
+		Timings use scheduler ticks; individual sub-tick operations are not
+		resolved. No sector contents or buffer addresses are logged.
+
 config BK7258_SDMADC
 	bool "Sigma-delta ADC lower half"
 	default n
@@ -2221,6 +2356,7 @@ config BK7258_TRNG
 source "../vendor/beken/nuttx/drivers/lcd/Kconfig.gc9d01"
 source "../vendor/beken/nuttx/drivers/lcd/Kconfig.ili9488_rgb"
 source "../vendor/beken/nuttx/drivers/input/Kconfig.gt9xx"
+source "../vendor/beken/nuttx/drivers/contactless/Kconfig.mfrc522"
 source "../vendor/beken/nuttx/drivers/input/Kconfig.gpio_ff"
 source "../vendor/beken/nuttx/drivers/sensors/Kconfig.sc7a20"
 
@@ -2408,8 +2544,10 @@ config BK7258_USBMODE
 	help
 		Own USB0 and switch it between the NuttX /dev/ttyGS0 CDC gadget and
 		a CherryUSB MSC gadget.  Each switch disconnects and re-enumerates the
-		device.  USB CDC OTA cannot own the controller at the same time; file
-		and HTTP OTA sources remain independent.
+		device.  Local filesystem users take the manager's block-device lease;
+		MSC export returns -EBUSY while that lease is held, and local acquire
+		returns -EBUSY while MSC owns the volume.  USB CDC OTA cannot own the
+		controller at the same time; file and HTTP OTA sources remain independent.
 
 config BK7258_USBMODE_BLOCKDEV
 	string "USB MSC backing block device"

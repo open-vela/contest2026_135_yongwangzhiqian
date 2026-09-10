@@ -58,3 +58,19 @@ wdog -i/dev/watchdog0 -shard -t2000 -d1000 -p200
 After reboot, run `resetcause` and `apctl status`.  Acceptance requires the
 watchdog reset cause plus recovered AP/RPMsg health; a boot banner alone does
 not establish that the watchdog caused the reset.
+
+The same diagnostic pair enables read-only peripheral queries through the
+product services and their standard NuttX device interfaces:
+
+```text
+bkhealth status
+bkmotion sample
+bknfc scan
+```
+
+Motion reports timestamps and acceleration in millimetres per second squared.
+Validate six stationary orientations and motion before accepting board axes
+and scaling. NFC reports presence only; use a known test card for insertion,
+removal and repeat checks. Health reports raw temperature when uncalibrated
+and does not estimate battery percentage. Query success alone does not prove
+sensor calibration, charging transitions or a physical card read.

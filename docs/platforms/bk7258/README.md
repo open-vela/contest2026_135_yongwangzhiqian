@@ -38,6 +38,12 @@ N15/N17 文档恢复旧地址、旧脚本或旧信任设计。
 
 ## 平台文档
 
+- [傻妞 AIDK AI Toy 全项目 Master Plan](shaniu-master-plan.md)：统一产品目标、设备/Gateway/
+  Android/模型资产工作流、OpenVela/MiMo 复用顺序、唤醒词安排、里程碑与验收门；
+- [BKVoice 产品架构与适配计划](bkvoice-authorized-voice-app.md)：板端语音、视觉、UI、模型与
+  OpenVela 组件专项计划；
+- [傻妞 Android companion 计划](shaniu-android-companion-plan.md)：原生 Android 完整控制台和
+  后续微信小程序轻客户端专项计划；
 - [RF 校准与工厂烧录规范](rf-calibration-and-factory-provisioning.md)：设备唯一 RF
   数据、Beken 量产/测试工具职责、工位流程及恢复/OTA/通用工厂镜像边界；
 - [官方符合性复核](official-compliance-review.md) / [English](official-compliance-review.en.md)：

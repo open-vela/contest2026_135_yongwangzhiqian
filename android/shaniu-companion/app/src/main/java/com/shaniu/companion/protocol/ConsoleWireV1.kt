@@ -218,11 +218,12 @@ object ConsoleWireV1 {
         addProperty("presence", value.presence.wireValue())
         addProperty("gateway", value.gateway.wireValue())
         addNullableNumber("battery_percent", value.batteryPercent)
-        addProperty("charging", value.charging)
+        if (value.charging == null) add("charging", JsonNull.INSTANCE)
+        else addProperty("charging", value.charging)
         addNullableString("firmware_version", value.firmwareVersion)
         addProperty("revision", value.revision)
         addProperty("turn", value.turn.wireValue())
-        addProperty("volume_percent", value.volumePercent)
+        addNullableNumber("volume_percent", value.volumePercent)
         addProperty("persona_mode", value.personaMode.wireValue())
         addProperty("emotion", value.emotion.wireValue())
         add(
@@ -251,11 +252,13 @@ object ConsoleWireV1 {
             batteryPercent = value.nullableInt("battery_percent")?.also {
                 if (it !in 0..100) schema("battery_percent is out of range")
             },
-            charging = value.boolean("charging"),
+            charging = value.nullableBoolean("charging"),
             firmwareVersion = value.nullableString("firmware_version"),
             revision = value.nonNegativeLong("revision"),
             turn = turnFromWire(value.string("turn")),
-            volumePercent = value.percent("volume_percent"),
+            volumePercent = value.nullableInt("volume_percent")?.also {
+                if (it !in 0..100) schema("volume_percent is out of range")
+            },
             personaMode = personaFromWire(value.string("persona_mode")),
             emotion = emotionFromWire(value.string("emotion")),
             permissions = PrivacyCapability.entries.associateWith { capability ->
@@ -447,6 +450,11 @@ object ConsoleWireV1 {
             ?: schema("$name must be a boolean")
         if (!primitive.isBoolean) schema("$name must be a boolean")
         return primitive.asBoolean
+    }
+
+    private fun JsonObject.nullableBoolean(name: String): Boolean? {
+        val value = get(name) ?: schema("$name is required")
+        return if (value.isJsonNull) null else boolean(name)
     }
 
     private fun JsonObject.nonNegativeLong(name: String): Long = integer(name).also {

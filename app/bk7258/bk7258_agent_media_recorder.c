@@ -25,6 +25,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <syslog.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <media_recorder.h>
@@ -35,6 +36,11 @@
 #define BK7258_AGENT_AUDIO_MQ_NAME_LEN 32u
 #define BK7258_AGENT_AUDIO_BITS        16u
 #define BK7258_AGENT_AUDIO_RATE        16000u
+#define BK7258_AGENT_NSEC_PER_SEC      1000000000l
+
+#ifndef CONFIG_BK7258_MEDIA_RECORDER_NO_FRAME_TIMEOUT_MS
+#  define CONFIG_BK7258_MEDIA_RECORDER_NO_FRAME_TIMEOUT_MS 1000
+#endif
 
 struct bk7258_agent_audio_s
 {
@@ -49,6 +55,7 @@ struct bk7258_agent_audio_s
   bool                   started;
   bool                   buffers_queued;
   bool                   stopping;
+  bool                   stop_in_progress;
   bool                   wake_sent;
   uint8_t                channels;
   uint8_t                physical_channels;
@@ -58,6 +65,8 @@ struct bk7258_agent_audio_s
   struct ap_buffer_s    *current;
   size_t                 current_frame;
   size_t                 current_frames;
+  uint32_t               trace_receive_count;
+  uint32_t               trace_requeue_count;
   char                   mq_name[BK7258_AGENT_AUDIO_MQ_NAME_LEN];
 };
 
@@ -66,6 +75,26 @@ static uint32_t g_bk7258_agent_audio_sequence;
 static int bk7258_agent_audio_errno(void)
 {
   return errno > 0 ? -errno : -EIO;
+}
+
+static int bk7258_agent_audio_receive_deadline(struct timespec *deadline)
+{
+  long milliseconds = CONFIG_BK7258_MEDIA_RECORDER_NO_FRAME_TIMEOUT_MS;
+
+  if (clock_gettime(CLOCK_REALTIME, deadline) < 0)
+    {
+      return bk7258_agent_audio_errno();
+    }
+
+  deadline->tv_sec += milliseconds / 1000l;
+  deadline->tv_nsec += (milliseconds % 1000l) * 1000000l;
+  if (deadline->tv_nsec >= BK7258_AGENT_NSEC_PER_SEC)
+    {
+      deadline->tv_sec++;
+      deadline->tv_nsec -= BK7258_AGENT_NSEC_PER_SEC;
+    }
+
+  return 0;
 }
 
 static int bk7258_agent_audio_ioctl(
@@ -87,7 +116,8 @@ static bool bk7258_agent_audio_resources_released(
     const struct bk7258_agent_audio_s *rec)
 {
   return !rec->reserved && !rec->mq_registered && !rec->mq_created &&
-         rec->mq == (mqd_t)-1 && rec->buffer_count == 0 && rec->fd < 0;
+         !rec->stop_in_progress && rec->mq == (mqd_t)-1 &&
+         rec->buffer_count == 0 && rec->fd < 0;
 }
 
 static void bk7258_agent_audio_dispose(struct bk7258_agent_audio_s *rec)
@@ -180,27 +210,6 @@ static int bk7258_agent_audio_enqueue(struct bk7258_agent_audio_s *rec,
                                   (unsigned long)(uintptr_t)&desc);
 }
 
-static int bk7258_agent_audio_stop_locked(struct bk7258_agent_audio_s *rec,
-                                          bool *wake)
-{
-  bool needs_stop;
-  int ret;
-
-  needs_stop = rec->started || rec->buffers_queued;
-  rec->started = false;
-  rec->stopping = true;
-  *wake = rec->mq_registered && !rec->wake_sent;
-  rec->wake_sent = true;
-  ret = needs_stop ?
-        bk7258_agent_audio_ioctl(rec, AUDIOIOC_STOP, 0) : 0;
-  if (ret >= 0)
-    {
-      rec->buffers_queued = false;
-    }
-
-  return ret;
-}
-
 static int bk7258_agent_audio_cleanup(struct bk7258_agent_audio_s *rec)
 {
   struct audio_buf_desc_s desc;
@@ -211,18 +220,8 @@ static int bk7258_agent_audio_cleanup(struct bk7258_agent_audio_s *rec)
 
   if (rec->started || rec->buffers_queued)
     {
-      bool wake;
-
-      ret = bk7258_agent_audio_stop_locked(rec, &wake);
+      ret = media_recorder_stop(rec);
       bk7258_agent_audio_first_error(&first, ret);
-      if (wake)
-        {
-          struct audio_msg_s msg;
-
-          memset(&msg, 0, sizeof(msg));
-          msg.msg_id = AUDIO_MSG_STOP;
-          (void)mq_send(rec->mq, (const char *)&msg, sizeof(msg), 0);
-        }
     }
 
   /* RELEASE drains lower-half pending buffers before the queue reference is
@@ -230,11 +229,17 @@ static int bk7258_agent_audio_cleanup(struct bk7258_agent_audio_s *rec)
 
   if (rec->reserved)
     {
+      syslog(LOG_INFO, "BKVOICE RECORDER stage=release-enter\n");
       ret = bk7258_agent_audio_ioctl(rec, AUDIOIOC_RELEASE, 0);
+      syslog(ret < 0 ? LOG_ERR : LOG_INFO,
+             "BKVOICE RECORDER stage=release-ret ret=%d\n", ret);
       bk7258_agent_audio_first_error(&first, ret);
       if (ret < 0)
         {
+          syslog(LOG_INFO, "BKVOICE RECORDER stage=shutdown-enter\n");
           ret = bk7258_agent_audio_ioctl(rec, AUDIOIOC_SHUTDOWN, 0);
+          syslog(ret < 0 ? LOG_ERR : LOG_INFO,
+                 "BKVOICE RECORDER stage=shutdown-ret ret=%d\n", ret);
           bk7258_agent_audio_first_error(&first, ret);
         }
 
@@ -247,8 +252,11 @@ static int bk7258_agent_audio_cleanup(struct bk7258_agent_audio_s *rec)
 
   if (rec->mq_registered && !rec->reserved)
     {
+      syslog(LOG_INFO, "BKVOICE RECORDER stage=mq-unregister-enter\n");
       ret = bk7258_agent_audio_ioctl(rec, AUDIOIOC_UNREGISTERMQ,
                                      (unsigned long)rec->mq);
+      syslog(ret < 0 ? LOG_ERR : LOG_INFO,
+             "BKVOICE RECORDER stage=mq-unregister-ret ret=%d\n", ret);
       bk7258_agent_audio_first_error(&first, ret);
       if (ret >= 0)
         {
@@ -392,6 +400,8 @@ void *media_recorder_open(const char *params)
   rec->lock_initialized = true;
   snprintf(devpath, sizeof(devpath), "/dev/audio/%s",
            CONFIG_BK7258_MIC_DEVNAME);
+  syslog(LOG_INFO, "BKVOICE RECORDER stage=device-open-enter dev=%s\n",
+         devpath);
   rec->fd = open(devpath, O_RDWR | O_CLOEXEC);
   if (rec->fd < 0)
     {
@@ -406,6 +416,9 @@ void *media_recorder_open(const char *params)
       return NULL;
     }
 
+  syslog(LOG_INFO, "BKVOICE RECORDER stage=device-open-pass fd=%d\n",
+         rec->fd);
+  syslog(LOG_INFO, "BKVOICE RECORDER stage=reserve-enter\n");
   ret = bk7258_agent_audio_ioctl(rec, AUDIOIOC_RESERVE, 0);
   if (ret < 0)
     {
@@ -421,10 +434,13 @@ void *media_recorder_open(const char *params)
     }
 
   rec->reserved = true;
+  syslog(LOG_INFO, "BKVOICE RECORDER stage=reserve-pass\n");
   sequence = __atomic_add_fetch(&g_bk7258_agent_audio_sequence, 1u,
                                 __ATOMIC_RELAXED);
   snprintf(rec->mq_name, sizeof(rec->mq_name), "/bkaudio%lu",
            (unsigned long)sequence);
+  syslog(LOG_INFO, "BKVOICE RECORDER stage=open-pass fd=%d sequence=%lu\n",
+         rec->fd, (unsigned long)sequence);
   return rec;
 }
 
@@ -452,6 +468,9 @@ int media_recorder_prepare(void *handle, const char *url,
       return ret;
     }
 
+  syslog(LOG_INFO, "BKVOICE RECORDER stage=prepare-enter channels=%u\n",
+         channels);
+
   nxmutex_lock(&rec->lock);
   if (rec->prepared || rec->stopping || rec->mq_registered ||
       rec->mq_created || rec->mq != (mqd_t)-1 ||
@@ -474,6 +493,9 @@ int media_recorder_prepare(void *handle, const char *url,
       goto fail;
     }
 
+  syslog(LOG_INFO, "BKVOICE RECORDER stage=getcaps-pass channels=%u\n",
+         query.ac_channels);
+
   memset(&caps, 0, sizeof(caps));
   caps.caps.ac_len = sizeof(struct audio_caps_s);
   caps.caps.ac_type = AUDIO_TYPE_INPUT;
@@ -489,6 +511,8 @@ int media_recorder_prepare(void *handle, const char *url,
       goto fail;
     }
 
+  syslog(LOG_INFO, "BKVOICE RECORDER stage=configure-pass\n");
+
   memset(&info, 0, sizeof(info));
   ret = bk7258_agent_audio_ioctl(rec, AUDIOIOC_GETBUFFERINFO,
                                  (unsigned long)(uintptr_t)&info);
@@ -497,6 +521,10 @@ int media_recorder_prepare(void *handle, const char *url,
       ret = ret < 0 ? ret : -ENOBUFS;
       goto fail;
     }
+
+  syslog(LOG_INFO,
+         "BKVOICE RECORDER stage=bufferinfo-pass buffers=%zu bytes=%zu\n",
+         info.nbuffers, info.buffer_size);
 
   rec->buffer_count = info.nbuffers > BK7258_AGENT_AUDIO_MAX_BUFFERS ?
                       BK7258_AGENT_AUDIO_MAX_BUFFERS : info.nbuffers;
@@ -520,6 +548,16 @@ int media_recorder_prepare(void *handle, const char *url,
     }
 
   rec->mq_created = true;
+  if (mq_getattr(rec->mq, &attr) == 0)
+    {
+      syslog(LOG_INFO,
+             "BKVOICE RECORDER stage=mq-open-pass max=%ld size=%ld cur=%ld\n",
+             attr.mq_maxmsg, attr.mq_msgsize, attr.mq_curmsgs);
+    }
+  else
+    {
+      syslog(LOG_INFO, "BKVOICE RECORDER stage=mq-open-pass attr=unavailable\n");
+    }
 
   ret = bk7258_agent_audio_ioctl(rec, AUDIOIOC_REGISTERMQ,
                                  (unsigned long)rec->mq);
@@ -529,6 +567,7 @@ int media_recorder_prepare(void *handle, const char *url,
     }
 
   rec->mq_registered = true;
+  syslog(LOG_INFO, "BKVOICE RECORDER stage=mq-register-pass\n");
   for (index = 0; index < rec->buffer_count; index++)
     {
       memset(&desc, 0, sizeof(desc));
@@ -543,10 +582,15 @@ int media_recorder_prepare(void *handle, const char *url,
         }
     }
 
+  syslog(LOG_INFO, "BKVOICE RECORDER stage=buffer-alloc-pass count=%zu\n",
+         rec->buffer_count);
   rec->physical_channels = query.ac_channels;
   rec->channels = channels;
   rec->prepared = true;
   rec->stopping = false;
+  syslog(LOG_INFO,
+         "BKVOICE RECORDER stage=prepare-pass buffers=%zu frame_bytes=%zu\n",
+         rec->buffer_count, rec->frame_bytes);
   return 0;
 
 fail:
@@ -584,7 +628,12 @@ int media_recorder_start(void *handle)
 
   rec->stopping = false;
   rec->wake_sent = false;
+  rec->trace_receive_count = 0;
+  rec->trace_requeue_count = 0;
   nxmutex_unlock(&rec->lock);
+
+  syslog(LOG_INFO, "BKVOICE RECORDER stage=start-enter buffers=%zu\n",
+         rec->buffer_count);
 
   for (index = 0; index < rec->buffer_count; index++)
     {
@@ -620,6 +669,10 @@ int media_recorder_start(void *handle)
       nxmutex_unlock(&rec->lock);
     }
 
+  syslog(LOG_INFO, "BKVOICE RECORDER stage=enqueue-pass buffers=%zu\n",
+         rec->buffer_count);
+
+  syslog(LOG_INFO, "BKVOICE RECORDER stage=lower-start-enter\n");
   ret = bk7258_agent_audio_ioctl(rec, AUDIOIOC_START, 0);
   if (ret < 0)
     {
@@ -643,6 +696,7 @@ int media_recorder_start(void *handle)
   nxmutex_lock(&rec->lock);
   rec->started = true;
   nxmutex_unlock(&rec->lock);
+  syslog(LOG_INFO, "BKVOICE RECORDER stage=start-pass\n");
   return 0;
 }
 
@@ -703,10 +757,26 @@ ssize_t media_recorder_read_data(void *handle, void *data, size_t len)
             {
               if (requeue)
                 {
+                  uint32_t requeue_seq = ++rec->trace_requeue_count;
+
+                  if (requeue_seq <= 8u)
+                    {
+                      syslog(LOG_INFO,
+                             "BKVOICE RECORDER stage=requeue-enter seq=%lu\n",
+                             (unsigned long)requeue_seq);
+                    }
+
                   ret = bk7258_agent_audio_enqueue(rec, apb);
                   if (ret < 0)
                     {
                       return written > 0 ? (ssize_t)written : ret;
+                    }
+
+                  if (requeue_seq <= 8u)
+                    {
+                      syslog(LOG_INFO,
+                             "BKVOICE RECORDER stage=requeue-pass seq=%lu\n",
+                             (unsigned long)requeue_seq);
                     }
                 }
 
@@ -738,18 +808,70 @@ ssize_t media_recorder_read_data(void *handle, void *data, size_t len)
 
       {
         struct audio_msg_s msg;
+        struct mq_attr trace_attr;
+        struct timespec deadline;
         ssize_t received;
+        uint32_t receive_seq = ++rec->trace_receive_count;
 
-        received = mq_receive(rec->mq, (char *)&msg, sizeof(msg), NULL);
+        ret = bk7258_agent_audio_receive_deadline(&deadline);
+        if (ret < 0)
+          {
+            syslog(LOG_ERR,
+                   "BKVOICE RECORDER stage=receive-deadline-fail seq=%lu "
+                   "ret=%d\n",
+                   (unsigned long)receive_seq, ret);
+            return written > 0 ? (ssize_t)written : ret;
+          }
+
+        if (receive_seq <= 8u)
+          {
+            if (mq_getattr(rec->mq, &trace_attr) == 0)
+              {
+                syslog(LOG_INFO,
+                       "BKVOICE RECORDER stage=receive-enter seq=%lu "
+                       "cur=%ld max=%ld\n",
+                       (unsigned long)receive_seq, trace_attr.mq_curmsgs,
+                       trace_attr.mq_maxmsg);
+              }
+            else
+              {
+                syslog(LOG_INFO,
+                       "BKVOICE RECORDER stage=receive-enter seq=%lu "
+                       "attr=unavailable\n",
+                       (unsigned long)receive_seq);
+              }
+          }
+
+        do
+          {
+            received = mq_timedreceive(rec->mq, (char *)&msg, sizeof(msg),
+                                       NULL, &deadline);
+          }
+        while (received < 0 && errno == EINTR);
+
+        if (receive_seq <= 8u)
+          {
+            syslog(LOG_INFO,
+                   "BKVOICE RECORDER stage=receive-return seq=%lu "
+                   "bytes=%ld msg=%u\n",
+                   (unsigned long)receive_seq, (long)received,
+                   received == sizeof(msg) ? (unsigned int)msg.msg_id : 0u);
+          }
+
         if (received < 0)
           {
-            if (errno == EINTR)
+            ret = bk7258_agent_audio_errno();
+            if (ret == -ETIMEDOUT)
               {
-                continue;
+                syslog(LOG_ERR,
+                       "BKVOICE RECORDER stage=receive-timeout seq=%lu "
+                       "timeout_ms=%u\n",
+                       (unsigned long)receive_seq,
+                       (unsigned int)
+                         CONFIG_BK7258_MEDIA_RECORDER_NO_FRAME_TIMEOUT_MS);
               }
 
-            return written > 0 ? (ssize_t)written :
-                   bk7258_agent_audio_errno();
+            return written > 0 ? (ssize_t)written : ret;
           }
 
         if (received != sizeof(msg))
@@ -784,7 +906,9 @@ ssize_t media_recorder_read_data(void *handle, void *data, size_t len)
 int media_recorder_stop(void *handle)
 {
   struct bk7258_agent_audio_s *rec = handle;
+  bool needs_stop;
   bool wake;
+  int wake_ret = 0;
   int ret;
 
   if (rec == NULL)
@@ -799,8 +923,26 @@ int media_recorder_stop(void *handle)
       return 0;
     }
 
-  ret = bk7258_agent_audio_stop_locked(rec, &wake);
+  if (rec->stop_in_progress)
+    {
+      nxmutex_unlock(&rec->lock);
+      return -EBUSY;
+    }
+
+  needs_stop = rec->started || rec->buffers_queued;
+  rec->started = false;
+  rec->stopping = true;
+  rec->stop_in_progress = true;
+  wake = rec->mq_registered && !rec->wake_sent;
   nxmutex_unlock(&rec->lock);
+
+  /* Wake the blocking reader before AUDIOIOC_STOP.  The synchronous lower
+   * STOP joins a capture worker that returns queued buffers through this same
+   * message queue.  Letting the reader drain or exit first prevents a full
+   * queue from pinning that worker while STOP waits for it.  Neither the queue
+   * send nor AUDIOIOC_STOP may run under rec->lock: the reader also needs that
+   * lock while consuming a callback.
+   */
 
   if (wake)
     {
@@ -808,12 +950,46 @@ int media_recorder_stop(void *handle)
 
       memset(&msg, 0, sizeof(msg));
       msg.msg_id = AUDIO_MSG_STOP;
-      if (mq_send(rec->mq, (const char *)&msg, sizeof(msg), 0) < 0 &&
-          ret == 0)
+      syslog(LOG_INFO, "BKVOICE RECORDER stage=stop-wake-enter\n");
+      if (mq_send(rec->mq, (const char *)&msg, sizeof(msg), 0) < 0)
         {
-          ret = bk7258_agent_audio_errno();
+          wake_ret = bk7258_agent_audio_errno();
         }
+      else
+        {
+          nxmutex_lock(&rec->lock);
+          rec->wake_sent = true;
+          nxmutex_unlock(&rec->lock);
+        }
+
+      syslog(wake_ret < 0 ? LOG_ERR : LOG_INFO,
+             "BKVOICE RECORDER stage=stop-wake-ret ret=%d\n", wake_ret);
     }
+
+  syslog(LOG_INFO,
+         "BKVOICE RECORDER stage=stop-lower-enter needed=%u wake=%u\n",
+         needs_stop ? 1u : 0u, wake ? 1u : 0u);
+  ret = needs_stop ?
+        bk7258_agent_audio_ioctl(rec, AUDIOIOC_STOP, 0) : 0;
+  syslog(ret < 0 ? LOG_ERR : LOG_INFO,
+         "BKVOICE RECORDER stage=stop-lower-ret ret=%d\n", ret);
+
+  nxmutex_lock(&rec->lock);
+  rec->stop_in_progress = false;
+  if (ret >= 0)
+    {
+      rec->buffers_queued = false;
+    }
+
+  nxmutex_unlock(&rec->lock);
+
+  if (ret >= 0 && wake_ret < 0)
+    {
+      ret = wake_ret;
+    }
+
+  syslog(ret < 0 ? LOG_ERR : LOG_INFO,
+         "BKVOICE RECORDER stage=stop-return ret=%d\n", ret);
 
   return ret;
 }
@@ -829,6 +1005,7 @@ int media_recorder_close(void *handle)
       return -EINVAL;
     }
 
+  syslog(LOG_INFO, "BKVOICE RECORDER stage=close-enter\n");
   ret = media_recorder_stop(rec);
   cleanup_ret = bk7258_agent_audio_cleanup(rec);
   if (!bk7258_agent_audio_resources_released(rec))
@@ -848,6 +1025,7 @@ int media_recorder_close(void *handle)
    */
 
   bk7258_agent_audio_dispose(rec);
+  syslog(LOG_INFO, "BKVOICE RECORDER stage=close-pass\n");
   return 0;
 }
 

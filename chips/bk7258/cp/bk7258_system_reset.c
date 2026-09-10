@@ -32,9 +32,13 @@ bk7258_system_reset_source(enum bk7258_reset_source_e source)
 {
   switch (source)
     {
+#ifdef CONFIG_BK7258_PM_SOFT_OFF
+      case BK7258_RESET_SOURCE_FORCE_DEEPSLEEP:
+#endif
       case BK7258_RESET_SOURCE_REBOOT:
       case BK7258_RESET_SOURCE_WATCHDOG:
       case BK7258_RESET_SOURCE_NMI_WDT:
+      case BK7258_RESET_SOURCE_HARD_FAULT:
         return source;
 
       default:

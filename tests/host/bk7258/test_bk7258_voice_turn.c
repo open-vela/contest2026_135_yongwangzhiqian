@@ -14,6 +14,7 @@
 
 #define TEST_FRAME_BYTES 640u
 #define TEST_TRACE_MAX   128u
+#define TEST_STATE_TRACE_MAX 8u
 
 enum test_stage_e
 {
@@ -48,6 +49,21 @@ struct test_audio_s
   bool dac_started;
   bool overlap;
 };
+
+struct test_state_observer_s
+{
+  enum bkvoice_turn_state_e trace[TEST_STATE_TRACE_MAX];
+  size_t trace_count;
+};
+
+static void test_state_changed(void *context,
+                               enum bkvoice_turn_state_e state)
+{
+  struct test_state_observer_s *observer = context;
+
+  assert(observer->trace_count < TEST_STATE_TRACE_MAX);
+  observer->trace[observer->trace_count++] = state;
+}
 
 static int test_call(struct test_audio_s *audio, enum test_stage_e stage)
 {
@@ -368,6 +384,53 @@ static void test_normal_turn(void)
                 "invalid") == 0);
 }
 
+static void test_state_observer(void)
+{
+  static const enum bkvoice_turn_state_e expected[] =
+  {
+    BKVOICE_TURN_CAPTURING,
+    BKVOICE_TURN_WAITING_TTS,
+    BKVOICE_TURN_PLAYING,
+    BKVOICE_TURN_IDLE,
+    BKVOICE_TURN_CAPTURING,
+    BKVOICE_TURN_FAULTED,
+    BKVOICE_TURN_IDLE,
+  };
+  struct test_state_observer_s observer;
+  struct bkvoice_turn_token_s token;
+  struct bkvoice_turn_token_s event;
+  struct bkvoice_turn_s turn;
+  struct test_audio_s audio;
+
+  memset(&observer, 0, sizeof(observer));
+  test_initialize(&turn, &audio);
+  assert(bkvoice_turn_set_state_observer(NULL, test_state_changed,
+                                         &observer) == -EINVAL);
+  assert(bkvoice_turn_set_state_observer(&turn, test_state_changed,
+                                         &observer) == 0);
+  assert(observer.trace_count == 0);
+
+  assert(bkvoice_turn_session_open(&turn, 9) == 0);
+  assert(bkvoice_turn_ptt_down(&turn, 9, 1, 100, &token) == 0);
+  assert(bkvoice_turn_set_state_observer(&turn, NULL, NULL) == -EBUSY);
+  event = test_event(&token, 2);
+  assert(bkvoice_turn_ptt_up(&turn, &event, 200) == 0);
+  event = test_event(&token, 1);
+  assert(bkvoice_turn_tts_start(&turn, &event, 300) == 0);
+  event.sequence = 2;
+  assert(bkvoice_turn_tts_end(&turn, &event) == 0);
+
+  audio.fail_stage = TEST_MIC_RELEASE;
+  audio.fail_count = 1;
+  assert(bkvoice_turn_ptt_down(&turn, 9, 3, 400, &token) == 0);
+  event = test_event(&token, 4);
+  assert(bkvoice_turn_ptt_up(&turn, &event, 500) == -EIO);
+  assert(bkvoice_turn_recover(&turn) == 0);
+
+  assert(observer.trace_count == sizeof(expected) / sizeof(expected[0]));
+  assert(memcmp(observer.trace, expected, sizeof(expected)) == 0);
+}
+
 static void test_order_replay_and_cancel(void)
 {
   struct bkvoice_turn_token_s token;
@@ -636,6 +699,10 @@ static void test_session_lifecycle(void)
   assert(bkvoice_turn_session_open(&turn, 5) == -ESTALE);
   assert(bkvoice_turn_session_open(&turn, 4) == -ESTALE);
   assert(bkvoice_turn_session_open(&turn, 6) == 0);
+  struct bkvoice_turn_token_s old_token = test_event(&token, 2);
+  assert(bkvoice_turn_ptt_down(&turn, 6, 1, 0, &token) == 0);
+  assert(token.session_id == 6 && token.turn_id == 1);
+  assert(bkvoice_turn_ptt_up(&turn, &old_token, 1) == -ESTALE);
   assert(bkvoice_turn_session_close(&turn, 0) == 0);
   turn.last_session_id = UINT32_MAX;
   assert(bkvoice_turn_session_open(&turn, 7) == -EOVERFLOW);
@@ -670,7 +737,6 @@ static void test_validation_and_overflow(void)
   assert(turn.session_id == 0 && turn.last_error == -EOVERFLOW);
   test_assert_idle(&turn, &audio);
 
-  turn.last_turn_id = 0;
   assert(bkvoice_turn_session_open(&turn, 2) == 0);
   assert(bkvoice_turn_ptt_down(&turn, 2, 1, 0, &token) == 0);
   event = test_event(&token, 2);
@@ -714,6 +780,7 @@ static void test_validation_and_overflow(void)
 int main(void)
 {
   test_normal_turn();
+  test_state_observer();
   test_order_replay_and_cancel();
   test_timeouts();
   test_mic_failures();

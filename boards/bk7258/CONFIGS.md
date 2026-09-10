@@ -87,9 +87,10 @@ live below:
 <workspace>/out/bk7258/<board>/<cp>__<ap>/<layout-id>/roles/<boot>/<role>/<build-id>/cmake
 ```
 
-An incremental build reuses only that exact identity.  `--clean` removes only
-its CMake binary directory and never configures or distcleans the NuttX source
-tree.
+An incremental build reuses only that exact identity.  `--clean` removes its
+CMake binary directory and prunes stale content-addressed siblings for the
+same pair, boot mode and role.  It never configures or distcleans the NuttX
+source tree, and it does not remove published releases or device bases.
 
 During the OpenVela Make-to-CMake transition, every source or feature-gate
 change must be mirrored in the same component's `Make.defs` and

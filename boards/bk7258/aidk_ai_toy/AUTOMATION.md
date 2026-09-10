@@ -12,10 +12,24 @@ physical operations that cannot be generalized across boards.
 | CH340 Type-C | CH340E to UART0 TX/RX | BK Loader recovery and CP console |
 | Native Type-C | BK7258 USB0 DP/DM | Signed CP/AP OTA transport |
 
-CH340 RTS/CTS are not connected to CEN.  When BK Loader prints `Getting Bus`,
-press and release K1 once.  An isolated relay, PhotoMOS, or open-drain fixture
-across K1 may automate that physical action; do not drive CEN from
-RS-232-level control signals.
+CH340 RTS/CTS are not connected to CEN.  Never use COM8 RTS/DTR as reset.  If
+the running firmware provides the `reset reboot` command, first eject native
+USB MSC (or switch it back to CDC), then use BK Loader's atomic software-reset
+handoff:
+
+```text
+bk_loader.exe download -p 8 -b 460800 -s 0 -i FULL_FLASH.bin \
+  --swrst "reset reboot" --hard-reset 0 --reboot 1 --uart-type CH340 \
+  --fast-link 1
+```
+
+This makes BK Loader wait for and consume the boot-ROM window created by the
+firmware reboot; it does not toggle modem-control pins.  The AIDK CH340 path
+requires `--fast-link 1` for this handoff; the same command without it timed
+out before erase/write.  If software reboot is unavailable, press and release
+K1 once when BK Loader prints `Getting Bus`.
+An isolated relay, PhotoMOS, or open-drain fixture across K1 may automate that
+physical fallback; do not drive CEN from RS-232-level control signals.
 
 ## Accept one device readback
 
@@ -81,7 +95,8 @@ MAC/RF/Bluetooth/calibration state, the ZIP reports
 `factory=requires-provisioning`.
 
 Use BK Loader at offset zero and length `0x800000`.  The validated conservative
-CH340 rate is 460800 baud without fast-link.  Treat `GetBus`, erase, or write
+CH340 software-reset handoff uses 460800 baud with `--fast-link 1`, as above.
+Treat `GetBus`, erase, or write
 failure text as failure even if the process exit code is ambiguous, and require
 an explicit terminal success marker before reboot acceptance.
 

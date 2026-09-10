@@ -22,7 +22,7 @@ enum class ConsoleOperation(
     RAW_SHELL(PermissionLevel.FORBIDDEN),
 }
 
-enum class MemoryDeleteScope { CONVERSATIONS, PROFILE, ALL }
+enum class MemoryDeleteScope { CONVERSATIONS, ALL }
 
 sealed interface ConsoleMutationArguments {
     data object None : ConsoleMutationArguments

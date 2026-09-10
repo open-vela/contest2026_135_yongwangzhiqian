@@ -705,6 +705,16 @@ static int bk7258_pm_server_cb(FAR struct rpmsg_endpoint *ept,
             request->reserved != BK7258_PM_OPP_DEFAULT;
         }
     }
+#ifdef CONFIG_BK7258_PM_SOFT_OFF
+  else if (request->command == BK7258_PM_COMMAND_SOFT_OFF_STATUS)
+    {
+      status = bk7258_pm_soft_off_status();
+    }
+  else if (request->command == BK7258_PM_COMMAND_SOFT_OFF)
+    {
+      status = bk7258_pm_soft_off_request();
+    }
+#endif
   else if (request->command == BK7258_PM_COMMAND_CPU_FREQ_QUERY)
     {
       status = bk7258_pm_frequency_get_status(&frequency_status);

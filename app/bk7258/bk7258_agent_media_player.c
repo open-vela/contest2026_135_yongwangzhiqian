@@ -18,6 +18,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <mqueue.h>
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -54,6 +55,11 @@ struct bk7258_agent_player_s
   bool                started;
   bool                hardware_started;
   bool                stopping;
+  bool                eof_requested;
+  bool                eof_abort;
+  bool                eof_joinable;
+  bool                eof_joining;
+  pthread_t           eof_thread;
   uint8_t             input_channels;
   size_t              input_frame_bytes;
   size_t              buffer_count;
@@ -388,7 +394,7 @@ static int bk7258_agent_player_receive_locked(
 }
 
 static int bk7258_agent_player_drain_locked(
-    struct bk7258_agent_player_s *player)
+    struct bk7258_agent_player_s *player, bool interruptible)
 {
   struct ap_buffer_s *apb;
   bool complete = false;
@@ -404,6 +410,11 @@ static int bk7258_agent_player_drain_locked(
   for (poll = 0; apb == NULL &&
                  poll < BK7258_AGENT_PLAYER_DRAIN_POLLS; poll++)
     {
+      if (interruptible && player->eof_abort)
+        {
+          return -ECANCELED;
+        }
+
       apb = bk7258_agent_player_take_free_locked(player);
       if (apb != NULL)
         {
@@ -413,7 +424,16 @@ static int bk7258_agent_player_drain_locked(
       ret = bk7258_agent_player_receive_locked(player, &complete);
       if (ret == -EAGAIN)
         {
+          if (interruptible)
+            {
+              nxmutex_unlock(&player->lock);
+            }
+
           usleep(BK7258_AGENT_PLAYER_RETRY_US);
+          if (interruptible)
+            {
+              nxmutex_lock(&player->lock);
+            }
         }
       else if (ret < 0)
         {
@@ -444,10 +464,24 @@ static int bk7258_agent_player_drain_locked(
 
   for (poll = 0; poll < BK7258_AGENT_PLAYER_DRAIN_POLLS; poll++)
     {
+      if (interruptible && player->eof_abort)
+        {
+          return -ECANCELED;
+        }
+
       ret = bk7258_agent_player_receive_locked(player, &complete);
       if (ret == -EAGAIN)
         {
+          if (interruptible)
+            {
+              nxmutex_unlock(&player->lock);
+            }
+
           usleep(BK7258_AGENT_PLAYER_RETRY_US);
+          if (interruptible)
+            {
+              nxmutex_lock(&player->lock);
+            }
           continue;
         }
 
@@ -467,7 +501,7 @@ static int bk7258_agent_player_drain_locked(
 }
 
 static int bk7258_agent_player_cleanup_locked(
-    struct bk7258_agent_player_s *player)
+    struct bk7258_agent_player_s *player, bool drain)
 {
   struct audio_buf_desc_s desc;
   bool buffers_left = false;
@@ -477,9 +511,9 @@ static int bk7258_agent_player_cleanup_locked(
 
   player->stopping = true;
 
-  if (player->started && player->hardware_started)
+  if (drain && player->started && player->hardware_started)
     {
-      ret = bk7258_agent_player_drain_locked(player);
+      ret = bk7258_agent_player_drain_locked(player, false);
       bk7258_agent_player_first_error(&first, ret);
     }
 
@@ -536,7 +570,12 @@ static int bk7258_agent_player_cleanup_locked(
                 player, AUDIOIOC_FREEBUFFER,
                 (unsigned long)(uintptr_t)&desc);
               bk7258_agent_player_first_error(&first, ret);
-              if (ret == 0)
+              /* The generic NuttX freebuffer path returns the descriptor
+               * size on success.  Drop ownership for every successful
+               * result so a later cleanup cannot free the buffer twice.
+               */
+
+              if (ret >= 0)
                 {
                   player->buffers[index] = NULL;
                 }
@@ -591,9 +630,104 @@ static int bk7258_agent_player_cleanup_locked(
       player->current = NULL;
       player->current_bytes = 0;
       player->submitted_frames = 0;
+      player->eof_requested = false;
     }
 
   return first;
+}
+
+static void *bk7258_agent_player_finish_input(void *arg)
+{
+  struct bk7258_agent_player_s *player = arg;
+  bool notify;
+  int ret;
+
+  nxmutex_lock(&player->lock);
+  ret = bk7258_agent_player_drain_locked(player, true);
+  notify = !player->eof_abort;
+  nxmutex_unlock(&player->lock);
+  if (notify)
+    {
+      bk7258_agent_player_notify(player, MEDIA_EVENT_COMPLETED, ret);
+    }
+
+  return NULL;
+}
+
+/* The lifecycle owner joins before cleanup/free.  Never hold the player or
+ * global registry lock while waiting for a callback to return.  Callbacks
+ * publish events; self-close is rejected instead of freeing their own stack's
+ * player context.  Return with the player lock held.
+ */
+
+static int bk7258_agent_player_join_locked(
+    struct bk7258_agent_player_s *player, bool abort)
+{
+  int ret;
+
+  if (player->eof_joining)
+    {
+      return -EBUSY;
+    }
+
+  if (!player->eof_joinable)
+    {
+      return 0;
+    }
+
+  if (pthread_equal(pthread_self(), player->eof_thread))
+    {
+      return -EDEADLK;
+    }
+
+  player->eof_abort = abort;
+  player->eof_joining = true;
+  nxmutex_unlock(&player->lock);
+  ret = pthread_join(player->eof_thread, NULL);
+  nxmutex_lock(&player->lock);
+  player->eof_joining = false;
+  if (ret == 0)
+    {
+      player->eof_joinable = false;
+    }
+
+  return ret == 0 ? 0 : -ret;
+}
+
+void media_player_close_socket(void *handle)
+{
+  struct bk7258_agent_player_s *player = handle;
+  int ret;
+
+  if (player == NULL)
+    {
+      return;
+    }
+
+  nxmutex_lock(&player->lock);
+  if (player->eof_requested || player->stopping || player->eof_joining)
+    {
+      nxmutex_unlock(&player->lock);
+      return;
+    }
+
+  if (!player->prepared || !player->started)
+    {
+      nxmutex_unlock(&player->lock);
+      bk7258_agent_player_notify(player, MEDIA_EVENT_COMPLETED, -EINVAL);
+      return;
+    }
+
+  player->eof_requested = true;
+  player->eof_abort = false;
+  ret = pthread_create(&player->eof_thread, NULL,
+                       bk7258_agent_player_finish_input, player);
+  player->eof_joinable = ret == 0;
+  nxmutex_unlock(&player->lock);
+  if (ret != 0)
+    {
+      bk7258_agent_player_notify(player, MEDIA_EVENT_COMPLETED, -ret);
+    }
 }
 
 /* Referenced by the product lifecycle so this object is extracted from the
@@ -828,7 +962,7 @@ int media_player_prepare(void *handle, const char *url, const char *options)
   return 0;
 
 fail:
-  (void)bk7258_agent_player_cleanup_locked(player);
+  (void)bk7258_agent_player_cleanup_locked(player, false);
   nxmutex_unlock(&player->lock);
   return ret;
 }
@@ -907,6 +1041,7 @@ ssize_t media_player_write_data(void *handle, const void *data, size_t len)
 
   nxmutex_lock(&player->lock);
   if (!player->prepared || !player->started || player->stopping ||
+      player->eof_requested ||
       player->input_frame_bytes == 0 ||
       (len % player->input_frame_bytes) != 0)
     {
@@ -926,7 +1061,8 @@ ssize_t media_player_write_data(void *handle, const void *data, size_t len)
       int ret;
 
       nxmutex_lock(&player->lock);
-      if (!player->prepared || !player->started || player->stopping)
+      if (!player->prepared || !player->started || player->stopping ||
+          player->eof_requested)
         {
           nxmutex_unlock(&player->lock);
           return consumed > 0 ? (ssize_t)consumed : -EPIPE;
@@ -1016,7 +1152,13 @@ int media_player_stop(void *handle)
 
   nxmutex_lock(&player->lock);
   notify = player->prepared || player->started;
-  ret = bk7258_agent_player_cleanup_locked(player);
+  player->stopping = true;
+  ret = bk7258_agent_player_join_locked(player, false);
+  if (ret == 0)
+    {
+      ret = bk7258_agent_player_cleanup_locked(player,
+                                               !player->eof_requested);
+    }
   nxmutex_unlock(&player->lock);
 
   if (notify)
@@ -1033,11 +1175,18 @@ int media_player_close(void *handle, int pending_stop)
   int first;
   int ret;
 
-  (void)pending_stop;
-
   if (player == NULL)
     {
       return -EINVAL;
+    }
+
+  nxmutex_lock(&player->lock);
+  player->stopping = true;
+  ret = bk7258_agent_player_join_locked(player, pending_stop == 0);
+  nxmutex_unlock(&player->lock);
+  if (ret < 0)
+    {
+      return ret;
     }
 
   nxmutex_lock(&g_bk7258_agent_player_lock);
@@ -1048,7 +1197,8 @@ int media_player_close(void *handle, int pending_stop)
     }
 
   nxmutex_lock(&player->lock);
-  first = bk7258_agent_player_cleanup_locked(player);
+  first = bk7258_agent_player_cleanup_locked(
+    player, pending_stop != 0 && !player->eof_requested);
   if (!bk7258_agent_player_resources_released(player))
     {
       nxmutex_unlock(&player->lock);
@@ -1122,6 +1272,38 @@ int media_player_get_duration(void *handle, unsigned int *duration)
     }
 
   return -ENOTSUP;
+}
+
+int media_policy_get_range(const char *name, int *min_value, int *max_value)
+{
+  if (name == NULL || min_value == NULL || max_value == NULL)
+    {
+      return -EINVAL;
+    }
+
+  if (strcmp(name, MEDIA_STREAM_MUSIC MEDIA_POLICY_VOLUME) != 0)
+    {
+      return -ENOTSUP;
+    }
+
+  *min_value = BK7258_AGENT_PLAYER_VOLUME_MIN;
+  *max_value = BK7258_AGENT_PLAYER_VOLUME_MAX;
+  return 0;
+}
+
+int media_policy_get_stream_volume(const char *stream, int *volume)
+{
+  if (stream == NULL || volume == NULL ||
+      strcmp(stream, MEDIA_STREAM_MUSIC) != 0)
+    {
+      return -EINVAL;
+    }
+
+  nxmutex_lock(&g_bk7258_agent_player_lock);
+  *volume = __atomic_load_n(&g_bk7258_agent_player_volume,
+                            __ATOMIC_RELAXED);
+  nxmutex_unlock(&g_bk7258_agent_player_lock);
+  return 0;
 }
 
 int media_policy_set_stream_volume(const char *stream, int volume)

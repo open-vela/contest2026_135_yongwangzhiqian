@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: Apache-2.0
+config CL_MFRC522_FRAME
+	bool "MFRC522 with selected-card CRC_A frame exchange"
+	select SPI
+	select DRIVERS_CONTACTLESS
+	help
+		NuttX MFRC522 driver plus bounded frame exchange for an upper
+		ISO-DEP owner. Select only one MFRC522 implementation.
+
+config CL_MFRC522_FRAME_SPI_FREQ
+	int "MFRC522 frame driver SPI frequency"
+	depends on CL_MFRC522_FRAME
+	default 1000000
+
+config CL_ISODEP
+	bool "ISO-DEP reader protocol"
+	help
+		Transport-independent ISO14443-4 Type A reader session support.
+		The caller supplies selected-card CRC_A exchange and RF ownership.

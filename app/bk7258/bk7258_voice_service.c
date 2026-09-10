@@ -13,8 +13,19 @@
 
 #include "bk7258_product_lifecycle.h"
 #include "bk7258_voice_pack.h"
+#include "bk7258_voice_product.h"
 #include "bk7258_voice_protocol.h"
+#ifdef CONFIG_BK7258_PREFERENCES
+#  include "bk7258_preferences.h"
+#endif
+#include "bk7258_voice_ptt.h"
 #include "bk7258_voice_turn_audio.h"
+#ifdef CONFIG_BK7258_VOICE_TLS
+#  include "bk7258_voice_runtime.h"
+#endif
+#ifdef CONFIG_BK7258_DISPLAY_SERVICE
+#  include "bk7258_voice_feedback.h"
+#endif
 
 #include <errno.h>
 #include <fcntl.h>
@@ -28,16 +39,22 @@
 #include <syslog.h>
 #include <unistd.h>
 
+#include <arch/chip/bk7258_amp.h>
 #include <nuttx/irq.h>
 #include <nuttx/mutex.h>
 #include <nuttx/rpmsg/rpmsg.h>
 #include <nuttx/semaphore.h>
 #include <nuttx/spinlock.h>
+#include <nuttx/clock.h>
 
 #define BKVOICE_STREAM_BYTES 2048u
 #define BKVOICE_PLAYER_OPTIONS \
   "format=s16le:sample_rate=16000:ch_layout=mono"
-
+#ifdef CONFIG_BK7258_VOICE_TLS
+#  define BKVOICE_TRANSPORT_STATUS "tls-wss"
+#else
+#  define BKVOICE_TRANSPORT_STATUS "not-installed"
+#endif
 struct bkvoice_service_s
 {
   struct rpmsg_endpoint endpoint;
@@ -55,7 +72,7 @@ struct bkvoice_service_s
   struct bkvoice_rpc_request_s last_request;
   struct bkvoice_rpc_response_s last_response;
   struct bkvoice_turn_audio_s turn_audio;
-  const struct bkvoice_turn_audio_ops_s *turn_audio_ops;
+  struct bkvoice_ptt_s ptt;
 };
 
 static struct bkvoice_service_s g_bkvoice_service =
@@ -167,6 +184,9 @@ static int bkvoice_play_wav(struct bkvoice_service_s *service,
   uint32_t remaining;
   void *player = NULL;
   bool prepared = false;
+#ifdef CONFIG_BK7258_DISPLAY_SERVICE
+  bool feedback_active = false;
+#endif
   int fd = -1;
   int first = 0;
   int ret;
@@ -212,6 +232,11 @@ static int bkvoice_play_wav(struct bkvoice_service_s *service,
       first = ret;
       goto out;
     }
+
+#ifdef CONFIG_BK7258_DISPLAY_SERVICE
+  bk7258_voice_feedback_report(NULL, BKVOICE_TURN_PLAYING);
+  feedback_active = true;
+#endif
 
   remaining = wav->data_bytes;
   while (remaining > 0)
@@ -261,6 +286,13 @@ out:
       bkvoice_first_error(&first, bkvoice_errno());
     }
 
+#ifdef CONFIG_BK7258_DISPLAY_SERVICE
+  if (feedback_active)
+    {
+      bk7258_voice_feedback_report(NULL, BKVOICE_TURN_IDLE);
+    }
+#endif
+
   return first;
 }
 
@@ -302,6 +334,62 @@ static int bkvoice_send(struct bkvoice_service_s *service,
   return ret;
 }
 
+#ifdef CONFIG_BK7258_PREFERENCES
+static int bkvoice_preferences_request(
+  const struct bkvoice_rpc_request_s *request,
+  struct bkvoice_rpc_response_s *response)
+{
+  struct bk7258_preferences_s preferences;
+  unsigned int volume = 0;
+  const char *value = request->manifest;
+  int ret = OK;
+
+  if (request->command == BKVOICE_RPC_PREFS_VOLUME)
+    {
+      /* Validate again at the AP boundary; the CP shell is not the owner. */
+
+      if (*value == '\0' || strlen(value) > 3)
+        {
+          return -EINVAL;
+        }
+
+      for (; *value != '\0'; value++)
+        {
+          if (*value < '0' || *value > '9')
+            {
+              return -EINVAL;
+            }
+
+          volume = volume * 10u + (unsigned int)(*value - '0');
+        }
+
+      ret = bk7258_preferences_set_volume(volume);
+    }
+  else if (request->command == BKVOICE_RPC_PREFS_PERSONA)
+    {
+      ret = bk7258_preferences_set_persona(value);
+    }
+
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  ret = bk7258_preferences_get(&preferences);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  response->result.preferences.volume_percent = preferences.volume_percent;
+  response->result.preferences.persona = preferences.persona;
+  response->result.preferences.default_flags =
+    (preferences.volume_is_default ? BKVOICE_PREFS_DEFAULT_VOLUME : 0) |
+    (preferences.persona_is_default ? BKVOICE_PREFS_DEFAULT_PERSONA : 0);
+  return OK;
+}
+#endif
+
 static int bkvoice_handle_request(
   struct bkvoice_service_s *service, uint32_t generation,
   const struct bkvoice_rpc_request_s *request,
@@ -314,7 +402,8 @@ static int bkvoice_handle_request(
 
   bkvoice_make_response(response, request, OK);
   response->flags = BKVOICE_STATUS_SERVICE_READY |
-                    BKVOICE_STATUS_LOCAL_ONLY;
+                    BKVOICE_STATUS_LOCAL_ONLY |
+                    BKVOICE_STATUS_PTT_OWNER_READY;
   if (stat("/dev/mmcsd0", &status) == 0)
     {
       response->flags |= BKVOICE_STATUS_BLOCK_PRESENT;
@@ -322,7 +411,50 @@ static int bkvoice_handle_request(
 
   if (request->command == BKVOICE_RPC_STATUS)
     {
+#ifdef CONFIG_BK7258_VOICE_TLS
+      bkvoice_runtime_status(response);
+#endif
       return OK;
+    }
+
+#ifdef CONFIG_BK7258_VOICE_HIL_TEST
+  if (request->command == BKVOICE_RPC_HIL_CAPTURE)
+    {
+      response->status = bkvoice_runtime_command(request, response);
+      return response->status;
+    }
+#endif
+
+  if (request->command >= BKVOICE_RPC_CONFIG_BEGIN &&
+      request->command <= BKVOICE_RPC_DISCONNECT)
+    {
+#ifdef CONFIG_BK7258_VOICE_TLS
+      response->status = bkvoice_runtime_command(request, response);
+#else
+      response->status = -ENOSYS;
+#endif
+      return response->status;
+    }
+
+#ifdef CONFIG_BK7258_VOICE_TLS
+  if ((request->command >= BKVOICE_RPC_PREFS_GET &&
+       request->command <= BKVOICE_RPC_PREFS_PERSONA) ?
+      bkvoice_runtime_settings_busy() : bkvoice_runtime_busy())
+    {
+      response->status = -EBUSY;
+      return response->status;
+    }
+#endif
+
+  if (request->command >= BKVOICE_RPC_PREFS_GET &&
+      request->command <= BKVOICE_RPC_PREFS_PERSONA)
+    {
+#ifdef CONFIG_BK7258_PREFERENCES
+      response->status = bkvoice_preferences_request(request, response);
+#else
+      response->status = -ENOSYS;
+#endif
+      return response->status;
     }
 
   memset(&pack, 0, sizeof(pack));
@@ -330,9 +462,9 @@ static int bkvoice_handle_request(
                           request->command == BKVOICE_RPC_PLAY ?
                           request->clip_id : NULL,
                           &pack);
-  response->pack_version = pack.version;
-  response->clip_count = pack.clip_count;
-  response->error_line = pack.error_line;
+  response->result.pack.version = pack.version;
+  response->result.pack.clip_count = pack.clip_count;
+  response->result.pack.error_line = pack.error_line;
   memcpy(response->speaker_id, pack.speaker_id,
          sizeof(response->speaker_id));
   response->speaker_id[sizeof(response->speaker_id) - 1u] = '\0';
@@ -373,23 +505,59 @@ static int bkvoice_worker(int argc, char **argv)
       struct bkvoice_rpc_response_s response;
       uint32_t generation;
       irqstate_t flags;
+      bool active;
 
-      if (nxsem_wait_uninterruptible(&service->request_sem) < 0)
+      (void)nxsem_tickwait_uninterruptible(&service->request_sem,
+                                            MSEC2TICK(20));
+
+#ifdef CONFIG_BK7258_VOICE_TLS
+      bkvoice_runtime_step(__atomic_load_n(&service->endpoint_created,
+                                           __ATOMIC_ACQUIRE));
+#endif
+
+#ifndef CONFIG_BK7258_VOICE_TLS
+      if (bkvoice_turn_poll(&service->ptt.turn) < 0)
         {
-          continue;
+          syslog(LOG_WARNING, "BKVOICE playback completion failed\n");
         }
+#endif
 
       flags = spin_lock_irqsave(&service->request_lock);
+      active = service->active;
       memcpy(&request, &service->active_request, sizeof(request));
       generation = service->active_generation;
       spin_unlock_irqrestore(&service->request_lock, flags);
 
-      (void)bkvoice_handle_request(service, generation, &request, &response);
+      if (!active)
+        {
+          continue;
+        }
+
+      if (bkvoice_connection_valid(service, generation))
+        {
+          (void)bkvoice_handle_request(service, generation, &request,
+                                        &response);
+        }
+      else
+        {
+          bkvoice_make_response(&response, &request, -ENOTCONN);
+        }
 
       flags = spin_lock_irqsave(&service->request_lock);
-      memcpy(&service->last_request, &request, sizeof(request));
-      memcpy(&service->last_response, &response, sizeof(response));
-      service->replay_valid = true;
+      /* Secret upload chunks are retried by bounded offset/readback in the
+       * uploader, never retained in the general RPC replay cache.
+       */
+
+      service->replay_valid =
+        request.command != BKVOICE_RPC_CONFIG_DATA &&
+        bkvoice_connection_valid(service, generation);
+      if (service->replay_valid)
+        {
+          memcpy(&service->last_request, &request, sizeof(request));
+          memcpy(&service->last_response, &response, sizeof(response));
+        }
+
+      memset(&service->active_request, 0, sizeof(service->active_request));
       service->active = false;
       spin_unlock_irqrestore(&service->request_lock, flags);
 
@@ -397,7 +565,18 @@ static int bkvoice_worker(int argc, char **argv)
        * client retries the same session/sequence request.
        */
 
-      (void)bkvoice_send(service, &response);
+      if (bkvoice_connection_valid(service, generation))
+        {
+          (void)bkvoice_send(service, &response);
+        }
+
+      {
+        volatile unsigned char *secret = (void *)&request;
+        for (size_t i = 0; i < sizeof(request); i++)
+          {
+            secret[i] = 0;
+          }
+      }
     }
 
   return OK;
@@ -419,7 +598,33 @@ static bool bkvoice_request_valid(
       return false;
     }
 
-  if (request->command == BKVOICE_RPC_STATUS)
+  if (request->command == BKVOICE_RPC_STATUS ||
+      request->command == BKVOICE_RPC_PREFS_GET)
+    {
+      return request->manifest[0] == '\0' && request->clip_id[0] == '\0';
+    }
+
+#ifdef CONFIG_BK7258_VOICE_HIL_TEST
+  if (request->command == BKVOICE_RPC_HIL_CAPTURE)
+    {
+      return request->manifest[0] != '\0' && request->clip_id[0] == '\0';
+    }
+#endif
+
+  if (request->command == BKVOICE_RPC_CONFIG_BEGIN ||
+      request->command == BKVOICE_RPC_PREFS_VOLUME ||
+      request->command == BKVOICE_RPC_PREFS_PERSONA)
+    {
+      return request->manifest[0] != '\0' && request->clip_id[0] == '\0';
+    }
+
+  if (request->command == BKVOICE_RPC_CONFIG_DATA)
+    {
+      return request->manifest[0] != '\0' && request->clip_id[0] != '\0';
+    }
+
+  if (request->command >= BKVOICE_RPC_CONFIG_COMMIT &&
+      request->command <= BKVOICE_RPC_DISCONNECT)
     {
       return request->manifest[0] == '\0' && request->clip_id[0] == '\0';
     }
@@ -515,6 +720,24 @@ static bool bkvoice_ns_match(struct rpmsg_device *rdev, void *priv,
          strcmp(name, BKVOICE_RPC_ENDPOINT) == 0;
 }
 
+static void bkvoice_service_unbind(struct rpmsg_endpoint *endpoint)
+{
+  struct bkvoice_service_s *service = endpoint->priv;
+  irqstate_t flags;
+
+  if (service == NULL)
+    {
+      return;
+    }
+
+  __atomic_store_n(&service->endpoint_created, false, __ATOMIC_RELEASE);
+  bkvoice_advance_generation(service);
+  flags = spin_lock_irqsave(&service->request_lock);
+  service->replay_valid = false;
+  spin_unlock_irqrestore(&service->request_lock, flags);
+  (void)nxsem_post(&service->request_sem);
+}
+
 static void bkvoice_ns_bind(struct rpmsg_device *rdev, void *priv,
                             const char *name, uint32_t dest)
 {
@@ -530,9 +753,14 @@ static void bkvoice_ns_bind(struct rpmsg_device *rdev, void *priv,
   if (!__atomic_load_n(&service->endpoint_created, __ATOMIC_ACQUIRE))
     {
       service->endpoint.priv = service;
+      if (service->endpoint.rdev != NULL)
+        {
+          rpmsg_destroy_ept(&service->endpoint);
+        }
+
       ret = rpmsg_create_ept(&service->endpoint, rdev, name,
                              RPMSG_ADDR_ANY, dest,
-                             bkvoice_service_cb, NULL);
+                             bkvoice_service_cb, bkvoice_service_unbind);
       if (ret >= 0)
         {
           bkvoice_advance_generation(service);
@@ -554,8 +782,7 @@ static void bkvoice_device_destroy(struct rpmsg_device *rdev, void *priv)
       return;
     }
 
-  __atomic_store_n(&service->endpoint_created, false, __ATOMIC_RELEASE);
-  bkvoice_advance_generation(service);
+  bkvoice_service_unbind(&service->endpoint);
   if (nxmutex_lock(&service->endpoint_lock) >= 0)
     {
       if (service->endpoint.rdev != NULL)
@@ -577,7 +804,24 @@ int bk7258_voice_service_prepare(void)
 int bk7258_voice_service_start(void)
 {
   struct bkvoice_service_s *service = &g_bkvoice_service;
+  const struct bkvoice_capture_source_ops_s *source_ops;
+  const struct bkvoice_turn_audio_ops_s *audio_ops;
+  const struct bkvoice_ptt_worker_config_s worker_config =
+  {
+    .stack_size = CONFIG_BK7258_VOICE_CAPTURE_STACKSIZE,
+    .priority = CONFIG_BK7258_VOICE_CAPTURE_PRIORITY,
+    .join_timeout_ms = CONFIG_BK7258_VOICE_CAPTURE_JOIN_TIMEOUT_MS,
+  };
+  const struct bkvoice_turn_limits_s turn_limits =
+  {
+    .capture_timeout_ms = CONFIG_BK7258_VOICE_CAPTURE_TIMEOUT_MS,
+    .waiting_tts_timeout_ms = CONFIG_BK7258_VOICE_WAITING_TTS_TIMEOUT_MS,
+    .playback_timeout_ms = CONFIG_BK7258_VOICE_PLAYBACK_TIMEOUT_MS,
+    .audio_frame_bytes = BKVOICE_COMPANION_AUDIO_FRAME_BYTES,
+  };
+  uint32_t boot_generation;
   bool callback_registered = false;
+  bool ptt_initialized = false;
   bool semaphore_initialized = false;
   pid_t pid;
   int ret;
@@ -599,8 +843,44 @@ int bk7258_voice_service_start(void)
   ret = bkvoice_turn_audio_initialize(&service->turn_audio);
   if (ret >= 0)
     {
-      service->turn_audio_ops = bkvoice_turn_audio_ops();
-      ret = service->turn_audio_ops != NULL ? 0 : -ENOSYS;
+      audio_ops = bkvoice_turn_audio_ops();
+      source_ops = bkvoice_turn_audio_capture_source_ops();
+      boot_generation = __atomic_load_n(
+        &bk7258_ap_boot_state()->generation, __ATOMIC_ACQUIRE);
+      ret = audio_ops != NULL && source_ops != NULL ? 0 : -ENOSYS;
+      if (ret >= 0 && boot_generation == 0)
+        {
+          ret = -EAGAIN;
+        }
+
+      if (ret >= 0)
+        {
+          ret = bkvoice_ptt_initialize(
+            &service->ptt, audio_ops, &service->turn_audio,
+            source_ops, &service->turn_audio, &turn_limits,
+            &worker_config, boot_generation);
+          ptt_initialized = ret >= 0;
+        }
+
+#ifdef CONFIG_BK7258_DISPLAY_SERVICE
+      if (ret >= 0)
+        {
+          int feedback_ret = bk7258_voice_feedback_start();
+
+          if (feedback_ret >= 0)
+            {
+              feedback_ret = bkvoice_turn_set_state_observer(
+                &service->ptt.turn, bk7258_voice_feedback_report, NULL);
+            }
+
+          if (feedback_ret < 0)
+            {
+              syslog(LOG_WARNING,
+                     "BKVOICE EYES start ret=%d best_effort=1\n",
+                     feedback_ret);
+            }
+        }
+#endif
     }
 
   if (ret >= 0)
@@ -611,6 +891,14 @@ int bk7258_voice_service_start(void)
     {
       semaphore_initialized = true;
     }
+
+#ifdef CONFIG_BK7258_VOICE_TLS
+  if (ret >= 0)
+    {
+      ret = bkvoice_runtime_initialize(&service->ptt, boot_generation,
+                                       &service->request_sem);
+    }
+#endif
 
 #ifdef CONFIG_PRIORITY_INHERITANCE
   if (ret >= 0)
@@ -641,11 +929,19 @@ int bk7258_voice_service_start(void)
   if (ret >= 0)
     {
       __atomic_store_n(&service->initialized, true, __ATOMIC_RELEASE);
-      syslog(LOG_INFO, "BKVOICE SERVICE READY endpoint=%s\n",
-             BKVOICE_RPC_ENDPOINT);
+      syslog(LOG_INFO,
+             "BKVOICE SERVICE READY endpoint=%s persona=%s name=%s "
+             "disclosure=%s ptt_owner=ready eyes=best-effort "
+             "transport=%s\n",
+             BKVOICE_RPC_ENDPOINT, BKVOICE_PRODUCT_PERSONA_ID,
+             BKVOICE_PRODUCT_DISPLAY_NAME, BKVOICE_PRODUCT_DISCLOSURE,
+             BKVOICE_TRANSPORT_STATUS);
     }
   else
     {
+#ifdef CONFIG_BK7258_VOICE_TLS
+      (void)bkvoice_runtime_uninitialize();
+#endif
       if (callback_registered)
         {
           rpmsg_unregister_callback(service, NULL,
@@ -672,9 +968,13 @@ int bk7258_voice_service_start(void)
           (void)nxsem_destroy(&service->request_sem);
         }
 
+      if (ptt_initialized)
+        {
+          (void)bkvoice_ptt_uninitialize(&service->ptt);
+        }
+
       service->active = false;
       service->replay_valid = false;
-      service->turn_audio_ops = NULL;
     }
 
   nxmutex_unlock(&service->init_lock);

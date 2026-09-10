@@ -183,6 +183,14 @@ static int bk7258_cp_stage_execute(
 #ifdef CONFIG_BK7258_SDK_IPC_RUNTIME
       case BK7258_CP_STAGE_SDK_RUNTIME:
         ret = bk7258_sdk_runtime_initialize();
+#ifdef CONFIG_BK7258_PM_SOFT_OFF
+        if (ret == 0)
+          {
+            /* Before radio, AP, SD and product owners start. */
+
+            bk7258_pm_soft_off_boot(gpio);
+          }
+#endif
         break;
 #endif
 

@@ -45,6 +45,7 @@ struct bk7258_ap_image_desc_s
 
 int bk7258_ap_control_initialize(const struct bk7258_ap_image_desc_s *image);
 int bk7258_ap_start(uint32_t timeout_ms);
+void bk7258_ap_retained_report(void);
 
 volatile struct bk7258_ap_boot_state_s *bk7258_ap_boot_state(void);
 

@@ -259,3 +259,51 @@ fingerprints, signed boot chain, CP/AP state and feature-specific board gates.
 Compile success is not runtime acceptance, package verification is not target
 trust, and Flash success is not application acceptance. Retain exact artifact
 hashes plus UART/J-Link evidence for any hardware claim.
+
+## Handoff gates by stage
+
+Read only the stage relevant to the requested delivery.
+
+- **Hardware-fast debug iteration:** follow the repository's hardware-fast
+  loop, build only the affected target and hand off the exact debug artifact
+  with minimum integrity checks. Defer broad regression and release assembly.
+  A whole-device BIN still requires accepted-base, fresh-key, signature,
+  rollback and exact-Flash-size checks; prefer the permitted installed
+  apps-only contract where applicable.
+- **Final source acceptance:** run `git diff --check`, the host BK7258
+  regression and header audit, validate manifest and local documentation
+  links, confirm official checkouts have no team-owned tracked edits, and
+  clean-build every affected board/profile. Shared chip/common/test/build
+  changes require all supported boards; board-only wiring changes require
+  that board plus shared host regression.
+- **Downloadable artifact:** verify its build manifest, required ELF symbols
+  and package through the sole BK7258 CLI. Report the exact package/artifact
+  path, board/profile/boot and manifest identities, and actual verification
+  results. Label direct or unsigned diagnostics explicitly; a loose binary
+  pair is not a verified full package.
+- **Whole-device recovery:** supply one dense BIN for offset zero whose size
+  equals the selected partition CSV's full Flash capacity. Preserve immutable,
+  factory-init, device-unique, preserve and unmapped bytes from the exact
+  accepted same-unit readback; reset only transactional state. Record
+  accepted-base hash/size, layout, stable device identity and capture method,
+  and state that the image cannot be copied to another unit. A raw hash alone
+  does not prove which device supplied the base. Do not assemble release bytes
+  outside the maintained CLI.
+- **Product release:** direct diagnostics use `package delivery` with the
+  complete base, accepted-base evidence and explicit version; signed full/OTA
+  products use `release product`. The verified ZIP includes `release.json`,
+  `SHA256SUMS`, `FLASHING.md`, accepted-base/build/release-policy evidence,
+  the complete device-bound recovery BIN and any compatible OTA package.
+  OTA updates CP/AP, declares the accepted source version and installed root;
+  wired recovery separately declares the new root it installs. A root, BL2 or
+  layout transition requires wired full recovery. A universal factory image
+  requires the reviewed per-device provisioner; otherwise declare
+  `requires-provisioning`.
+- **Atomic publication:** publish release directories and ZIPs with no-replace
+  semantics; even an existing empty destination is an error. Packaged
+  `evidence/build-manifest.json` must validate against packaged target,
+  layout and security facts without the original `out/` path. Only initial
+  release construction may consume the path-bound build handoff.
+
+Host/Flash completion does not establish boot, function or physical acceptance.
+Keep the separate target-side evidence described under Hardware boundary.

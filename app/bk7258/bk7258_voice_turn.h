@@ -21,7 +21,15 @@ enum bkvoice_turn_state_e
   BKVOICE_TURN_WAITING_TTS,
   BKVOICE_TURN_PLAYING,
   BKVOICE_TURN_FAULTED,
+  BKVOICE_TURN_DRAINING,
 };
+
+/* Called synchronously after a state transition is committed.  Observers
+ * must not block, re-enter the turn owner or perform hardware I/O directly.
+ */
+
+typedef void (*bkvoice_turn_state_observer_t)(
+  void *context, enum bkvoice_turn_state_e state);
 
 struct bkvoice_turn_token_s
 {
@@ -53,8 +61,14 @@ struct bkvoice_turn_audio_ops_s
   int (*dac_start)(void *context);
   ssize_t (*dac_write)(void *context, const uint8_t *pcm, size_t bytes);
   int (*dac_drain)(void *context);
+  /* drain may return -EINPROGRESS; result then returns -EAGAIN until the
+   * backend completion event is available. Only the turn owner polls it.
+   */
+  int (*dac_result)(void *context);
   int (*dac_stop)(void *context);
   int (*dac_release)(void *context);
+  int (*volume)(void *context, bool set, unsigned int requested,
+                unsigned int *observed);
 };
 
 /* release() is the terminal ownership operation.  A backend may return
@@ -96,6 +110,8 @@ struct bkvoice_turn_s
   uint64_t deadline_ms;
   int last_error;
   enum bkvoice_turn_state_e state;
+  bkvoice_turn_state_observer_t state_observer;
+  void *state_observer_context;
   bool mic_acquired;
   bool mic_prepared;
   bool mic_started;
@@ -122,6 +138,10 @@ int bkvoice_turn_initialize(
   void *audio_context,
   const struct bkvoice_turn_limits_s *limits,
   uint32_t boot_generation);
+int bkvoice_turn_set_state_observer(
+  struct bkvoice_turn_s *turn,
+  bkvoice_turn_state_observer_t observer,
+  void *observer_context);
 int bkvoice_turn_session_open(struct bkvoice_turn_s *turn,
                               uint32_t session_id);
 int bkvoice_turn_session_close(struct bkvoice_turn_s *turn, int reason);
@@ -147,6 +167,7 @@ int bkvoice_turn_tts_end(
 int bkvoice_turn_cancel(
   struct bkvoice_turn_s *turn,
   const struct bkvoice_turn_token_s *token, int reason);
+int bkvoice_turn_poll(struct bkvoice_turn_s *turn);
 int bkvoice_turn_timeout(struct bkvoice_turn_s *turn, uint64_t now_ms);
 int bkvoice_turn_recover(struct bkvoice_turn_s *turn);
 void bkvoice_turn_snapshot(

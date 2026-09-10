@@ -49,6 +49,13 @@ int board_reset_cause(FAR struct boardioc_reset_cause_s *cause)
         cause->cause = BOARDIOC_RESETCAUSE_CORE_SOFT;
         break;
 
+      case BK7258_RESET_SOURCE_HARD_FAULT:
+        /* The generic ABI has no HardFault category. Preserve the raw code
+         * in the chip report instead of misreporting a normal reboot/WDT.
+         */
+        cause->cause = BOARDIOC_RESETCAUSE_UNKOWN;
+        break;
+
       default:
         cause->cause = BOARDIOC_RESETCAUSE_NONE;
         break;

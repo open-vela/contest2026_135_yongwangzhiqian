@@ -16,6 +16,21 @@ config BK7258_BOARD_AIDK_AI_TOY
 		P9 is reserved for its active-high control; fitting does not imply
 		that the motor driver has passed hardware verification.
 
+config BK7258_AIDK_BUTTONS
+	bool "AIDK three polled keys as /dev/buttons"
+	default n
+	depends on BK7258_BOARD_AIDK_AI_TOY && !BK7258_AP_CORE
+	select ARCH_BUTTONS
+	select INPUT
+	select INPUT_BUTTONS
+	select BK7258_CP_GPIO_INPUT
+	help
+		Expose KEY1 (P13, volume down), KEY2 (P12, power), and KEY3
+		(P8, volume up) through the standard NuttX /dev/buttons upper half.
+		The physical keys are active-low and sampled on read. This board has
+		no button IRQ implementation, so BTNIOC_REGISTER and poll wakeups are
+		not supported; consumers must use bounded timed reads.
+
 config BK7258_AIDK_MOTOR
 	bool "AIDK CN10 motor as standard force feedback"
 	default n
@@ -99,7 +114,7 @@ config BK7258_AIDK_MFRC522
 	depends on BK7258_AP_CORE
 	depends on BK7258_UART1
 	select DRIVERS_CONTACTLESS
-	select CL_MFRC522
+	select CL_MFRC522_FRAME
 	help
 		Bind the MFRC522 RFID/NFC reader on the UART1 host interface (P0/P1)
 		as /dev/nfc0.  The board supplies only a UART register-transport adapter;

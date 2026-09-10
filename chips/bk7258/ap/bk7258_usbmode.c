@@ -125,6 +125,10 @@ int bk7258_usbmode_set(enum bk7258_usbmode_e mode)
   ret = bk7258_usbmode_stop(previous);
   if (ret < 0)
     {
+      syslog(LOG_ERR,
+             "BK7258 USBMODE TRANSITION stage=stop-fail from=%s to=%s "
+             "ret=%d\n",
+             bk7258_usbmode_name(previous), bk7258_usbmode_name(mode), ret);
       nxmutex_unlock(&g_bk7258_usbmode_lock);
       return ret;
     }
@@ -141,8 +145,9 @@ int bk7258_usbmode_set(enum bk7258_usbmode_e mode)
       return OK;
     }
 
-  syslog(LOG_ERR, "BK7258 USBMODE: start %s failed: %d\n",
-         bk7258_usbmode_name(mode), ret);
+  syslog(LOG_ERR,
+         "BK7258 USBMODE TRANSITION stage=start-fail from=%s to=%s ret=%d\n",
+         bk7258_usbmode_name(previous), bk7258_usbmode_name(mode), ret);
   if (previous != BK7258_USBMODE_NONE)
     {
       (void)nxsig_usleep(CONFIG_BK7258_USBMODE_REENUM_DELAY_MS * 1000u);

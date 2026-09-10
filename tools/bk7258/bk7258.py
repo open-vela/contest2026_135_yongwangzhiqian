@@ -22,6 +22,7 @@ sys.path.insert(0, str(TOOLS))
 
 from _lib import build as build_domain  # noqa: E402
 from _lib import deploy as deploy_domain  # noqa: E402
+from _lib import display_assets as display_assets_domain  # noqa: E402
 from _lib import image as image_domain  # noqa: E402
 from _lib import layout as layout_domain  # noqa: E402
 from _lib import layers as layers_domain  # noqa: E402
@@ -30,11 +31,17 @@ from _lib import product as product_domain  # noqa: E402
 from _lib import sdk as sdk_domain  # noqa: E402
 from _lib import toolchain as toolchain_domain  # noqa: E402
 from _lib import trust as trust_domain  # noqa: E402
+from _lib import voice as voice_domain  # noqa: E402
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="bk7258.py")
     commands = parser.add_subparsers(dest="command", required=True)
+
+    voice = commands.add_parser("voice", help="configure a BKVoice board session")
+    voice_domain.add_arguments(
+        voice.add_subparsers(dest="voice_command", required=True)
+    )
 
     build = commands.add_parser("build", help="build CP and AP through OpenVela")
     build.add_argument(
@@ -90,9 +97,18 @@ def _parser() -> argparse.ArgumentParser:
     sdk_rebuild.add_argument("--replace", action="store_true")
 
     package = commands.add_parser(
-        "package", help="inspect packages or create unsigned diagnostic packages"
+        "package", help="create firmware packages or bounded product asset packs"
     )
     package_commands = package.add_subparsers(dest="package_command", required=True)
+    eye_pack = package_commands.add_parser(
+        "eye-pack", help="build one deterministic shaniu-eye-pack-v1 asset"
+    )
+    eye_pack.add_argument("--source", type=Path, required=True)
+    eye_pack.add_argument("--output", type=Path, required=True)
+    eye_pack.add_argument(
+        "--preview-dir", type=Path,
+        help="optionally render review-only left/right PNG previews",
+    )
     accept_base = package_commands.add_parser(
         "accept-base",
         help="bind one complete device readback to its board/layout identity",
@@ -178,6 +194,16 @@ def _parser() -> argparse.ArgumentParser:
     product.add_argument("--ota-required-source-version")
     product.add_argument("--openssl", type=Path, required=True)
     product.add_argument("--output", type=Path, required=True)
+    gateway_catalog = release_commands.add_parser(
+        "gateway-catalog",
+        help="verify product deliveries and publish a metadata-only Gateway catalog",
+    )
+    gateway_catalog.add_argument(
+        "--delivery", type=Path, action="append", required=True,
+        help="verified product delivery ZIP; repeat for each device release",
+    )
+    gateway_catalog.add_argument("--openssl", type=Path, required=True)
+    gateway_catalog.add_argument("--output", type=Path, required=True)
 
     verify = commands.add_parser("verify", help="perform read-only verification")
     verify_commands = verify.add_subparsers(dest="verify_command", required=True)
@@ -198,6 +224,10 @@ def _parser() -> argparse.ArgumentParser:
     verify_manifest.add_argument("--manifest", type=Path, required=True)
     verify_package = verify_commands.add_parser("package", help="verify a package")
     verify_package.add_argument("--package", type=Path, required=True)
+    verify_eye_pack = verify_commands.add_parser(
+        "eye-pack", help="verify one shaniu-eye-pack-v1 asset"
+    )
+    verify_eye_pack.add_argument("--package", type=Path, required=True)
     verify_delivery = verify_commands.add_parser(
         "delivery", help="verify a complete BK7258 product delivery ZIP"
     )
@@ -518,6 +548,20 @@ def _release_product(args: argparse.Namespace) -> None:
 def _release(args: argparse.Namespace) -> None:
     if args.release_command == "product":
         _release_product(args)
+        return
+    if args.release_command == "gateway-catalog":
+        report = product_domain.create_gateway_release_registry(
+            tuple(args.delivery),
+            args.output,
+            package_verifier=lambda candidate: _verify_package_trust(
+                candidate, args.openssl
+            ),
+        )
+        print(
+            "bk7258 release gateway-catalog: PASS "
+            f"output={report['output']} releases={report['releases']} "
+            f"sha256={report['sha256']}"
+        )
         return
     manifest = build_domain.load_build_manifest(
         REPOSITORY, _workspace_input(args.build_manifest)
@@ -912,6 +956,17 @@ def _create_unsigned_package(
 
 
 def _package(args: argparse.Namespace) -> None:
+    if args.package_command == "eye-pack":
+        report = display_assets_domain.build(
+            _repository_input(args.source), args.output, args.preview_dir
+        )
+        print(
+            "bk7258 package eye-pack: PASS "
+            f"output={report.path} id={report.pack_id} "
+            f"revision={report.revision} entries={len(report.entries)} "
+            f"size={report.stored_size} sha256={report.sha256}"
+        )
+        return
     if args.package_command == "accept-base":
         preset = build_domain.board_preset(REPOSITORY, args.board)
         layout = layout_domain.load(preset.partition)
@@ -1066,6 +1121,14 @@ def _verify(args: argparse.Namespace) -> None:
             f"board={result.physical_board} layout={result.layout.identity} "
             f"source={result.source}"
         )
+    elif args.verify_command == "eye-pack":
+        result = display_assets_domain.verify(args.package)
+        print(
+            "bk7258 verify eye-pack: PASS "
+            f"id={result.pack_id} revision={result.revision} "
+            f"renderer={result.renderer_api} entries={len(result.entries)} "
+            f"size={result.stored_size} sha256={result.sha256}"
+        )
     elif args.verify_command == "package":
         result = package_domain.verify(args.package)
         security = (
@@ -1121,6 +1184,8 @@ def main(argv: list[str] | None = None) -> int:
             _package(args)
         elif args.command == "release":
             _release(args)
+        elif args.command == "voice":
+            print(json.dumps(voice_domain.run(args), indent=2))
         else:
             _verify(args)
     except (
@@ -1133,6 +1198,7 @@ def main(argv: list[str] | None = None) -> int:
         sdk_domain.SdkError,
         toolchain_domain.ToolchainError,
         trust_domain.TrustError,
+        voice_domain.VoiceProvisionError,
         OSError,
         UnicodeError,
         ValueError,

@@ -27,16 +27,32 @@ class AndroidKeystoreTokenStore(context: Context) : GatewayAccessTokenStore {
 
     @Synchronized
     override fun storeAccessToken(accessToken: String) {
+        storeScoped(accessToken, "")
+    }
+
+    fun providerFor(origin: String, deviceId: String): GatewayAccessTokenProvider {
+        val scope = "$origin\n$deviceId"
+        return GatewayAccessTokenProvider { readScoped(scope) }
+    }
+
+    fun storeFor(origin: String, deviceId: String, accessToken: String) {
+        storeScoped(accessToken, "$origin\n$deviceId")
+    }
+
+    @Synchronized
+    private fun storeScoped(accessToken: String, scope: String) {
         GatewayTokenPolicy.requireValid(accessToken)
         val plaintext = accessToken.toByteArray(StandardCharsets.UTF_8)
         var ciphertext: ByteArray? = null
         try {
             val cipher = Cipher.getInstance(CIPHER_TRANSFORMATION)
             cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
+            cipher.updateAAD(scope.toByteArray(StandardCharsets.UTF_8))
             ciphertext = cipher.doFinal(plaintext)
             val committed = preferences.edit()
                 .putString(KEY_IV, Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
                 .putString(KEY_CIPHERTEXT, Base64.encodeToString(ciphertext, Base64.NO_WRAP))
+                .putString(KEY_SCOPE, scope)
                 .commit()
             if (!committed) throw IOException(CREDENTIAL_ERROR)
         } catch (error: GeneralSecurityException) {
@@ -49,6 +65,14 @@ class AndroidKeystoreTokenStore(context: Context) : GatewayAccessTokenStore {
 
     @Synchronized
     override fun readAccessToken(): String? {
+        return readScoped("")
+    }
+
+    @Synchronized
+    private fun readScoped(scope: String): String? {
+        // Legacy unscoped credentials require explicit resupply. Never send a
+        // saved bearer to a newly typed origin or a different device.
+        if (preferences.getString(KEY_SCOPE, null) != scope) return null
         val encodedIv = preferences.getString(KEY_IV, null)
         val encodedCiphertext = preferences.getString(KEY_CIPHERTEXT, null)
         if (encodedIv == null && encodedCiphertext == null) return null
@@ -65,6 +89,7 @@ class AndroidKeystoreTokenStore(context: Context) : GatewayAccessTokenStore {
             val key = getExistingKey() ?: throw IOException(CREDENTIAL_ERROR)
             val cipher = Cipher.getInstance(CIPHER_TRANSFORMATION)
             cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, iv))
+            cipher.updateAAD(scope.toByteArray(StandardCharsets.UTF_8))
             plaintext = cipher.doFinal(ciphertext)
             return GatewayTokenPolicy.requireValid(String(plaintext, StandardCharsets.UTF_8))
         } catch (error: GeneralSecurityException) {
@@ -128,6 +153,7 @@ class AndroidKeystoreTokenStore(context: Context) : GatewayAccessTokenStore {
         private const val PREFERENCES_NAME = "shaniu_gateway_credentials_v1"
         private const val KEY_IV = "token_iv"
         private const val KEY_CIPHERTEXT = "token_ciphertext"
+        private const val KEY_SCOPE = "token_scope"
         private const val CIPHER_TRANSFORMATION = "AES/GCM/NoPadding"
         private const val AES_KEY_BITS = 256
         private const val GCM_TAG_BITS = 128

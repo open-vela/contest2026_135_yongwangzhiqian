@@ -27,8 +27,13 @@ This subtree is the complete ownership boundary for AIDK AI Toy adaptation.
   erase or copy the image to another unit; the tail
   `[0x7fa000,0x800000)` must remain byte-identical to the accepted base.
 - The fitted CH340E exposes UART0 but its RTS/CTS pins are not connected to
-  CEN.  Without an external open-drain reset hook, start BK Loader and press K1
-  RESET once when `Getting Bus` appears.  Holding a BOOT key is not required.
+  CEN.  Never use COM8 RTS/DTR as reset.  For a running diagnostic image,
+  leave native USB MSC safely (eject it or switch it back to CDC), then let
+  BK Loader atomically send the firmware `reset reboot` command with
+  `--swrst "reset reboot" --hard-reset 0 --fast-link 1`; the loader must
+  already be waiting for the reboot window.  If software reboot is
+  unavailable, start BK Loader and press K1 RESET once when `Getting Bus`
+  appears.  Holding a BOOT key is not required.
 - The second Type-C port is native BK7258 USB0 Device.  It carries only signed
   OTA object reads into the unified OTA Manager; it is not raw DFU/MSC Flash.
   That transport is the chip-level `BK7258_OTA_SOURCE_USB` source, one OTA

@@ -35,6 +35,7 @@
 #  include <sys/ioctl.h>
 #  include <sys/poll.h>
 #  include <sys/socket.h>
+#  include <syslog.h>
 #  include <sys/time.h>
 
 #  include <arpa/inet.h>
@@ -142,6 +143,21 @@ struct bk7258_wifi_control_dev_s
   sem_t scan_sem;
   bool abort;
   bool busy;
+  bool request_local;
+  bool local_pending;
+  bool local_done;
+  bool local_cancel;
+  bool trial_active;
+  bool trial_touched;
+  bool trial_connected;
+  bool trial_restore_failed;
+  bool saved_valid;
+  bool trial_was_connected;
+  uint32_t trial_lease;
+  struct bk7258_wifi_control_wire_s saved_connection;
+  struct bk7258_wifi_control_wire_s trial_connection;
+  uint32_t local_ticket;
+  struct bk7258_wifi_result_s local_result;
   bool native_link_valid;
   struct bk7258_wifi_result_s native_link;
   struct bk7258_wifi_control_wire_s request;
@@ -313,6 +329,7 @@ static struct bk7258_wifi_control_dev_s g_bk7258_wifi_control;
 
 #ifdef CONFIG_BK7258_AP_CORE
 static struct bk7258_wifi_monitor_runtime_s g_bk7258_wifi_monitor;
+static mutex_t g_bk7258_wifi_local_lock = NXMUTEX_INITIALIZER;
 #endif
 
 #ifndef CONFIG_BK7258_AP_CORE
@@ -868,7 +885,14 @@ static int bk7258_wifi_sync_native_link(
       priv->native_link.netmask == result->netmask &&
       priv->native_link.router == result->router)
     {
-      return OK;
+      if (result->link_state != BK7258_WIFI_LINK_CONNECTED ||
+          bk7258_wifi_native_lease_matches(result))
+        {
+          return OK;
+        }
+
+      syslog(LOG_WARNING,
+             "BK7258 WIFI: native lease state drift; reapplying\n");
     }
 
   if (result->link_state == BK7258_WIFI_LINK_CONNECTED &&
@@ -1420,6 +1444,157 @@ out_close:
   return ret < 0 ? ret : close_ret;
 }
 
+/* Private worker operations: never accepted from the CP request wire. */
+#define BK7258_WIFI_TRIAL_CONNECT 0x1000u
+#define BK7258_WIFI_TRIAL_COMMIT  0x1001u
+#define BK7258_WIFI_TRIAL_RESTORE 0x1002u
+
+static int bk7258_wifi_submit_connect(const char *ssid, const char *password,
+                                      uint32_t timeout_ms, uint32_t *ticket,
+                                      bool trial)
+{
+  struct bk7258_wifi_control_dev_s *priv = &g_bk7258_wifi_control;
+  size_t ssid_size, password_size;
+  bool expected = false;
+  int ret;
+  if (ssid == NULL || password == NULL || ticket == NULL ||
+      timeout_ms < BK7258_WIFI_CONNECT_MIN_MS ||
+      timeout_ms > BK7258_WIFI_CONNECT_MAX_MS) return -EINVAL;
+  ssid_size = strnlen(ssid, BK7258_WIFI_SSID_MAX_LEN + 1);
+  password_size = strnlen(password, BK7258_WIFI_PASSWORD_MAX_LEN + 1);
+  if (ssid_size == 0 || ssid_size > BK7258_WIFI_SSID_MAX_LEN ||
+      !bk7258_wifi_password_length_valid(password_size)) return -EINVAL;
+  if (!priv->initialized) return -EAGAIN;
+  ret = nxmutex_lock(&g_bk7258_wifi_local_lock);
+  if (ret < 0) return ret;
+  if (priv->local_pending)
+    { ret = -EBUSY; goto out; }
+  if (priv->local_ticket == UINT32_MAX)
+    { ret = -EOVERFLOW; goto out; }
+  if (!__atomic_compare_exchange_n(&priv->busy,&expected,true,false,
+                                    __ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))
+    { ret = -EBUSY; goto out; }
+  memset(&priv->request,0,sizeof(priv->request));
+  priv->request.operation = trial ? BK7258_WIFI_TRIAL_CONNECT : BK7258_WIFI_OPERATION_CONNECT;
+  priv->request.timeout_ms = timeout_ms;
+  priv->request.ssid_len = ssid_size;
+  priv->request.password_len = password_size;
+  memcpy(priv->request.ssid,ssid,ssid_size);
+  memcpy(priv->request.password,password,password_size);
+  priv->request_local = true;
+  priv->local_pending = true;
+  priv->local_done = false;
+  __atomic_store_n(&priv->local_cancel,false,__ATOMIC_RELEASE);
+  *ticket = ++priv->local_ticket;
+  if (trial)
+    {
+      priv->trial_active = true;
+      priv->trial_lease = *ticket;
+      priv->trial_touched = false;
+      priv->trial_connected = false;
+      priv->trial_restore_failed = false;
+    }
+  __asm volatile ("dmb sy" ::: "memory");
+  ret = nxsem_post(&priv->request_sem);
+  if (ret < 0)
+    {
+      explicit_bzero(&priv->request,sizeof(priv->request));
+      priv->local_pending = false;
+      if (trial) priv->trial_active = false;
+      __atomic_store_n(&priv->busy,false,__ATOMIC_RELEASE);
+    }
+out:
+  nxmutex_unlock(&g_bk7258_wifi_local_lock);
+  return ret;
+}
+
+int bk7258_wifi_connect_async(const char *ssid, const char *password,
+                              uint32_t timeout_ms, uint32_t *ticket)
+{
+  return bk7258_wifi_submit_connect(ssid, password, timeout_ms, ticket, false);
+}
+
+int bk7258_wifi_trial_start(const char *ssid, const char *password,
+                            uint32_t timeout_ms, uint32_t *lease)
+{
+  return bk7258_wifi_submit_connect(ssid, password, timeout_ms, lease, true);
+}
+
+int bk7258_wifi_trial_finish(uint32_t lease, bool commit, uint32_t *ticket)
+{
+  struct bk7258_wifi_control_dev_s *priv = &g_bk7258_wifi_control;
+  if (ticket == NULL || lease == 0) return -EINVAL;
+  int ret = nxmutex_lock(&g_bk7258_wifi_local_lock);
+  if (ret < 0) return ret;
+  if (priv->local_pending) ret = -EBUSY;
+  else if (!priv->trial_active || priv->trial_lease != lease) ret = -ESTALE;
+  else if (commit && (!priv->trial_connected || priv->trial_restore_failed)) ret = -EPERM;
+  else if (priv->local_ticket == UINT32_MAX) ret = -EOVERFLOW;
+  else
+    {
+      memset(&priv->request, 0, sizeof(priv->request));
+      priv->request.operation = commit ? BK7258_WIFI_TRIAL_COMMIT : BK7258_WIFI_TRIAL_RESTORE;
+      priv->request_local = true;
+      priv->local_pending = true;
+      priv->local_done = false;
+      __atomic_store_n(&priv->local_cancel, false, __ATOMIC_RELEASE);
+      *ticket = ++priv->local_ticket;
+      __asm volatile ("dmb sy" ::: "memory");
+      ret = nxsem_post(&priv->request_sem);
+      if (ret < 0)
+        {
+          explicit_bzero(&priv->request, sizeof(priv->request));
+          priv->local_pending = false;
+        }
+    }
+  nxmutex_unlock(&g_bk7258_wifi_local_lock);
+  return ret;
+}
+
+int bk7258_wifi_connect_poll(uint32_t ticket,
+                             struct bk7258_wifi_result_s *result)
+{
+  struct bk7258_wifi_control_dev_s *priv = &g_bk7258_wifi_control;
+  int ret;
+  if (result == NULL || ticket == 0) return -EINVAL;
+  ret = nxmutex_lock(&g_bk7258_wifi_local_lock);
+  if (ret < 0) return ret;
+  if (!priv->local_pending || ticket != priv->local_ticket) ret = -ESTALE;
+  else if (!priv->local_done) ret = -EAGAIN;
+  else
+    {
+      *result = priv->local_result;
+      memset(&priv->local_result,0,sizeof(priv->local_result));
+      priv->local_pending = false;
+      priv->local_done = false;
+      ret = 0;
+    }
+  nxmutex_unlock(&g_bk7258_wifi_local_lock);
+  return ret;
+}
+
+int bk7258_wifi_connect_cancel(uint32_t ticket)
+{
+  struct bk7258_wifi_control_dev_s *priv = &g_bk7258_wifi_control;
+  int ret = nxmutex_lock(&g_bk7258_wifi_local_lock);
+  if (ret < 0) return ret;
+  if (!priv->local_pending || ticket != priv->local_ticket) ret = -ESTALE;
+  else if (priv->local_done) ret = -EALREADY;
+  else
+    {
+      __atomic_store_n(&priv->local_cancel,true,__ATOMIC_RELEASE);
+      ret = 0;
+    }
+  nxmutex_unlock(&g_bk7258_wifi_local_lock);
+  return ret;
+}
+
+static bool bk7258_wifi_local_cancelled(void)
+{
+  return g_bk7258_wifi_control.request_local &&
+         __atomic_load_n(&g_bk7258_wifi_control.local_cancel,__ATOMIC_ACQUIRE);
+}
+
 static int bk7258_wifi_connect(
   FAR const struct bk7258_wifi_control_wire_s *request,
   FAR struct bk7258_wifi_result_s *result)
@@ -1428,6 +1603,8 @@ static int bk7258_wifi_connect(
   clock_t started;
   bool started_sta = false;
   int ret;
+
+  if (bk7258_wifi_local_cancelled()) return -ECANCELED;
 
   if (request->ssid_len == 0 ||
       request->ssid_len > BK7258_WIFI_SSID_MAX_LEN ||
@@ -1470,6 +1647,11 @@ static int bk7258_wifi_connect(
 
   for (;;)
     {
+      if (bk7258_wifi_local_cancelled())
+        {
+          explicit_bzero(&config, sizeof(config));
+          return -ECANCELED;
+        }
       ret = bk7258_wifi_read_link(result);
       if (ret == OK &&
           result->link_state != BK7258_WIFI_LINK_CONNECTED)
@@ -1510,6 +1692,11 @@ static int bk7258_wifi_connect(
   started_sta = true;
   for (;;)
     {
+      if (bk7258_wifi_local_cancelled())
+        {
+          ret = -ECANCELED;
+          break;
+        }
       ret = bk7258_wifi_read_link(result);
       if (ret == OK &&
           result->link_state == BK7258_WIFI_LINK_CONNECTED &&
@@ -1544,6 +1731,52 @@ static int bk7258_wifi_connect(
     }
 
   return ret;
+}
+
+/* Executed exclusively by the existing controller worker. */
+static int bk7258_wifi_trial_run(struct bk7258_wifi_control_dev_s *priv,
+                                 const struct bk7258_wifi_control_wire_s *request,
+                                 struct bk7258_wifi_result_s *result)
+{
+  int ret = 0;
+  if (request->operation == BK7258_WIFI_TRIAL_CONNECT)
+    {
+      ret = bk7258_wifi_read_link(result);
+      if (ret < 0) return ret;
+      priv->trial_was_connected = result->link_state == BK7258_WIFI_LINK_CONNECTED;
+      if (priv->trial_was_connected && !priv->saved_valid) return -ENOKEY;
+      priv->trial_connection = *request;
+      priv->trial_touched = true;
+      ret = bk7258_wifi_connect(request, result);
+      priv->trial_connected = ret == 0;
+      return ret;
+    }
+  if (request->operation == BK7258_WIFI_TRIAL_COMMIT)
+    {
+      priv->saved_connection = priv->trial_connection;
+      priv->saved_valid = true;
+    }
+  else if (priv->trial_touched)
+    {
+      if (priv->trial_was_connected)
+        ret = bk7258_wifi_connect(&priv->saved_connection, result);
+      else
+        {
+          ret = bk7258_wifi_stop_sta();
+          if (ret == 0) ret = bk7258_wifi_sync_native_link(result);
+          if (ret == 0 && result->link_state == BK7258_WIFI_LINK_CONNECTED) ret = -EAGAIN;
+        }
+      if (ret < 0)
+        {
+          priv->trial_restore_failed = true;
+          return ret;
+        }
+    }
+  explicit_bzero(&priv->trial_connection, sizeof(priv->trial_connection));
+  priv->trial_active = false;
+  priv->trial_touched = false;
+  priv->trial_connected = false;
+  return 0;
 }
 
 static void bk7258_wifi_control_report_immediate(
@@ -1629,9 +1862,21 @@ static FAR void *bk7258_wifi_control_worker(FAR void *arg)
       report.sequence = request.sequence;
       report.operation = request.operation;
 
-      if (!bk7258_wifi_control_generation_ready(request.generation))
+      if (!priv->request_local &&
+          !bk7258_wifi_control_generation_ready(request.generation))
         {
           status = -ESTALE;
+        }
+      else if (request.operation >= BK7258_WIFI_TRIAL_CONNECT)
+        {
+          if (!priv->request_local || !priv->trial_active ||
+              request.operation > BK7258_WIFI_TRIAL_RESTORE)
+            status = -EPERM;
+          else if (request.operation == BK7258_WIFI_TRIAL_CONNECT &&
+                   __atomic_load_n(&g_bk7258_wifi_monitor.active, __ATOMIC_ACQUIRE) != 0)
+            status = -EBUSY;
+          else
+            status = bk7258_wifi_trial_run(priv, &request, &report.result);
         }
       else if (request.operation == BK7258_WIFI_OPERATION_CONNECT &&
                __atomic_load_n(&g_bk7258_wifi_monitor.active,
@@ -1642,6 +1887,16 @@ static FAR void *bk7258_wifi_control_worker(FAR void *arg)
       else if (request.operation == BK7258_WIFI_OPERATION_CONNECT)
         {
           status = bk7258_wifi_connect(&request, &report.result);
+          if (status == 0)
+            {
+              priv->saved_connection = request;
+              priv->saved_valid = true;
+            }
+          else
+            {
+              priv->saved_valid = false;
+              explicit_bzero(&priv->saved_connection, sizeof(priv->saved_connection));
+            }
         }
       else if (request.operation == BK7258_WIFI_OPERATION_STATUS)
         {
@@ -1717,9 +1972,22 @@ static FAR void *bk7258_wifi_control_worker(FAR void *arg)
       report.result.status = status;
       report.monitor_result.status = status;
       report.scan_result.status = status;
-      (void)bk7258_wifi_control_send_bounded(&report);
+      if (priv->request_local)
+        {
+          nxmutex_lock(&g_bk7258_wifi_local_lock);
+          priv->local_result = report.result;
+          /* Release/retain busy before publishing completion so finish cannot
+           * enqueue a new job that the old worker tail accidentally unlocks. */
+          __atomic_store_n(&priv->busy, priv->trial_active, __ATOMIC_RELEASE);
+          priv->local_done = true;
+          nxmutex_unlock(&g_bk7258_wifi_local_lock);
+        }
+      else
+        {
+          (void)bk7258_wifi_control_send_bounded(&report);
+          __atomic_store_n(&priv->busy, false, __ATOMIC_RELEASE);
+        }
       explicit_bzero(&request, sizeof(request));
-      __atomic_store_n(&priv->busy, false, __ATOMIC_RELEASE);
     }
 
   return NULL;
@@ -1818,6 +2086,7 @@ static int bk7258_wifi_control_ept_cb(FAR struct rpmsg_endpoint *ept,
         }
 
       memcpy(&priv->request, message, sizeof(priv->request));
+      priv->request_local = false;
       __asm volatile ("dmb sy" ::: "memory");
       explicit_bzero(data, length);
       (void)nxsem_post(&priv->request_sem);

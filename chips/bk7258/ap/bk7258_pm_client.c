@@ -684,6 +684,18 @@ out:
   return ret;
 }
 
+#ifdef CONFIG_BK7258_PM_SOFT_OFF
+int bk7258_pm_soft_off_status(void)
+{
+  return bk7258_pm_request(0, BK7258_PM_COMMAND_SOFT_OFF_STATUS, 0, NULL);
+}
+
+int bk7258_pm_soft_off_request(void)
+{
+  return bk7258_pm_request(0, BK7258_PM_COMMAND_SOFT_OFF, 0, NULL);
+}
+#endif
+
 int bk7258_pm_initialize(void)
 {
   struct bk7258_pm_client_s *priv = &g_bk7258_pm_client;

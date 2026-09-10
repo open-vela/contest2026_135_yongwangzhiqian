@@ -68,6 +68,7 @@
 #include <arch/chip/bk7258_amp.h>
 #include <arch/chip/bk7258_reset_cause.h>
 #include <arch/chip/bk7258_system_reset.h>
+#include <arch/chip/bk7258_psram.h>
 
 #include "chip.h"
 #include "arm_internal.h"
@@ -404,9 +405,46 @@ uint32_t *__wrap_arm_doirq(int irq, uint32_t *regs)
  * under cpsid i, which is exactly what the xTS -r 1 case requires).  Treat
  * NMI as the watchdog bark: record the cause, emit the same debugger-
  * readable dump, then force the AON whole-device reset instead of parking.
- * Genuine HardFault/MemManage/etc. keep the parked-for-inspection path. */
+ * HardFault follows the board's fatal-assert reset policy after recording. */
 
 #define BK7258_EXC_NMI 2u
+#define BK7258_EXC_HARDFAULT 3u
+
+/* Do not interpret the invalid-value sentinel as a captured PC. CP threads
+ * may use the role-owned PSRAM heap once initialization has completed.
+ * A stacking/unstacking fault makes the frame unreliable regardless of range.
+ */
+
+static bool bk7258_fault_frame_readable(uintptr_t address, uint32_t cfsr)
+{
+  const uint32_t stack_errors = NVIC_CFAULTS_MUNSTKERR |
+    NVIC_CFAULTS_MSTKERR | NVIC_CFAULTS_MLSPERR | NVIC_CFAULTS_UNSTKERR |
+    NVIC_CFAULTS_STKERR | NVIC_CFAULTS_LSPERR | NVIC_CFAULTS_STKOF;
+  const uintptr_t frame_size = BK7258_EXCEPTION_FRAME_WORDS * sizeof(uint32_t);
+
+  if ((address & (sizeof(uint32_t) - 1u)) != 0 ||
+      (cfsr & stack_errors) != 0)
+    {
+      return false;
+    }
+
+  if (address >= BK7258_CP_RAM_BASE &&
+      address <= BK7258_CP_RAM_BASE + BK7258_CP_RAM_SIZE - frame_size)
+    {
+      return true;
+    }
+
+#ifdef CONFIG_BK7258_PSRAM
+  if (bk7258_psram_ready() && address >= BK7258_PSRAM_CP_HEAP_BASE &&
+      address <= BK7258_PSRAM_CP_HEAP_BASE + BK7258_PSRAM_CP_HEAP_SIZE -
+                 frame_size)
+    {
+      return true;
+    }
+#endif
+
+  return false;
+}
 
 static void __attribute__((noinline, noreturn, used))
 bk7258_fault_handler(uint32_t *stack, uint32_t exc_return,
@@ -428,6 +466,7 @@ bk7258_fault_handler(uint32_t *stack, uint32_t exc_return,
   uint32_t cfsr;
   uint32_t mmfar;
   uint32_t bfar;
+  bool frame_valid;
 
   bk7258_fault_stop_watchdogs();
 
@@ -441,10 +480,8 @@ bk7258_fault_handler(uint32_t *stack, uint32_t exc_return,
    * always addresses the basic frame.  This also matches NuttX arm_m/irq.h.
    */
 
-  if ((frame_addr & (sizeof(uint32_t) - 1u)) == 0 &&
-      frame_addr >= BK7258_CP_RAM_BASE &&
-      frame_addr <= BK7258_CP_RAM_BASE + BK7258_CP_RAM_SIZE -
-                    BK7258_EXCEPTION_FRAME_WORDS * sizeof(uint32_t))
+  frame_valid = bk7258_fault_frame_readable(frame_addr, cfsr);
+  if (frame_valid)
     {
       frame = (const volatile uint32_t *)frame_addr;
       stacked_r0   = frame[0];
@@ -488,6 +525,7 @@ bk7258_fault_handler(uint32_t *stack, uint32_t exc_return,
   bk7258_fault_putfield('S', (uint32_t)(uintptr_t)stack);
   bk7258_fault_putfield('H', hfsr);
   bk7258_fault_putfield('C', cfsr);
+  bk7258_fault_putfield('V', frame_valid ? 1u : 0u);
   bk7258_fault_putfield('P', stacked_pc);
   bk7258_fault_putfield('L', stacked_lr);
   bk7258_fault_putfield('Q', stacked_xpsr);
@@ -511,6 +549,18 @@ bk7258_fault_handler(uint32_t *stack, uint32_t exc_return,
       up_systemreset();
 #endif
     }
+
+#if CONFIG_BOARD_RESET_ON_ASSERT >= 1
+  if (exception == BK7258_EXC_HARDFAULT)
+    {
+      /* The custom vector bypasses up_assert(), but must honor the same
+       * fatal-context recovery policy. Keep the SDK fault cause distinct
+       * from a user-requested reboot or watchdog expiration.
+       */
+
+      bk7258_system_reset(BK7258_RESET_SOURCE_HARD_FAULT);
+    }
+#endif
 
   for (; ; )
     {

@@ -98,8 +98,10 @@ int main(void)
   assert(BKVOICE_STATUS_SERVICE_READY == (1u << 0));
   assert(BKVOICE_STATUS_BLOCK_PRESENT == (1u << 1));
   assert(BKVOICE_STATUS_LOCAL_ONLY == (1u << 2));
+  assert(BKVOICE_STATUS_PTT_OWNER_READY == (1u << 3));
   assert(sizeof(struct bkvoice_rpc_request_s) == 320);
   assert(sizeof(struct bkvoice_rpc_response_s) == 92);
+  assert(offsetof(struct bkvoice_rpc_response_s, result) == 24);
 
   assert(mkdtemp(directory) != NULL);
   assert(snprintf(manifest, sizeof(manifest), "%s/voicepack.ini",

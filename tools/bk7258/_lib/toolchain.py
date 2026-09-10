@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
@@ -21,6 +20,11 @@ import urllib.request
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+
+try:
+    import fcntl
+except ModuleNotFoundError:  # Windows may still use the deploy-only CLI path.
+    fcntl = None
 
 
 class ToolchainError(RuntimeError):
@@ -209,6 +213,8 @@ def _safe_member(member: tarfile.TarInfo, top: str) -> None:
 def _lock(timeout: int):
     if timeout <= 0:
         raise ToolchainError("lock timeout must be positive")
+    if fcntl is None or not hasattr(os, "getuid"):
+        raise ToolchainError("toolchain installation locking requires a POSIX host")
     path = Path(tempfile.gettempdir()) / f"openvela-bk7258-toolchain-{os.getuid()}.lock"
     stream = path.open("a+b")
     try:
