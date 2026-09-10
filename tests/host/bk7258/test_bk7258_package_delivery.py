@@ -25,6 +25,7 @@ from _lib import image as image_domain  # noqa: E402
 from _lib import layout as layout_domain  # noqa: E402
 from _lib import package as package_domain  # noqa: E402
 from _lib import product as product_domain  # noqa: E402
+import bk7258 as bk7258_cli  # noqa: E402
 from shaniu_gateway.firmware import load_firmware_releases  # noqa: E402
 
 
@@ -167,6 +168,80 @@ class ProductDeliveryTest(unittest.TestCase):
         )
         return package, manifest
 
+    def _release_input_fixture(
+        self, stem: str, *, identity: dict[str, object] | None = None,
+        generation: int | None = None, package_name: str | None = None,
+    ) -> Path:
+        package, manifest = self._inputs(stem)
+        build = json.loads(manifest.read_text(encoding="utf-8"))
+        provenance = {
+            "dependencies": {
+                name: {
+                    "source_commit": "a" * 40,
+                    "dirty": False,
+                    "input_tree_sha256": hashlib.sha256(b"").hexdigest(),
+                    "input_count": 0,
+                }
+                for name in ("nuttx", "apps")
+            },
+            "source_commit": "a" * 40,
+            "dirty": False,
+            "input_tree_sha256": "b" * 64,
+            "input_count": 2,
+            "scope": ["app/bk7258", "chips/bk7258"],
+            "product": "shaniu",
+            "profiles": {
+                "cp": "configs/cp-aidk",
+                "ap": "configs/ap-aidk",
+            },
+        }
+        build["format"] = build_domain.BUILD_MANIFEST_FORMAT
+        build["provenance"] = provenance
+
+        version = "18.6.351+415"
+        expected_identity = bk7258_cli._artifact_identity(
+            "test_board", provenance, version, "shaniu", "A4"
+        )
+        assert expected_identity is not None
+        selected_identity = identity or expected_identity
+        release = self.root / f"{stem}-release"
+        evidence = release / "evidence"
+        package_dir = release / "package"
+        evidence.mkdir(parents=True)
+        package_dir.mkdir()
+        build_path = evidence / "build-manifest.json"
+        build_path.write_text(
+            json.dumps(build, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        member_name = package_name or (
+            bk7258_cli._artifact_stem(expected_identity, "ota") + ".bkpack"
+        )
+        release_package = package_dir / member_name
+        release_package.write_bytes(package.read_bytes())
+        summary = {
+            "build_manifest": {
+                "path": "evidence/build-manifest.json",
+                "sha256": hashlib.sha256(build_path.read_bytes()).hexdigest(),
+            },
+            "format": "bk7258.release/2",
+            "generation": (
+                expected_identity["security_counter"]
+                if generation is None else generation
+            ),
+            "identity": selected_identity,
+            "layout": build["layout"],
+            "mode": "ota",
+            "package": {
+                "path": f"package/{member_name}",
+                "sha256": hashlib.sha256(release_package.read_bytes()).hexdigest(),
+            },
+            "target": build["target"],
+            "version": version,
+        }
+        bk7258_cli._release_summary(release, summary)
+        return release
+
     def _delivery(self, stem: str) -> Path:
         package, manifest = self._inputs(stem)
         recovery = product_domain.materialize_recovery(
@@ -272,6 +347,68 @@ class ProductDeliveryTest(unittest.TestCase):
         expected[24:28] = b"\xff" * 4
         self.assertEqual(operator, bytes(expected))
 
+    def test_operation_impact_distinguishes_full_flash_and_ota(self) -> None:
+        package, _ = self._inputs("impact-full")
+
+        full = product_domain.operation_impact(
+            package, self.policy, transport="full-bin"
+        )
+        self.assertEqual(full["transport"], "full-bin")
+        self.assertEqual(full["layout"]["flash_size"], self.layout.flash_size)
+        self.assertEqual(full["full_bin"]["scope"], "complete-flash")
+        self.assertEqual(full["full_bin"]["flash_offset"], 0)
+        self.assertEqual(full["full_bin"]["erases"], [{"offset": 0, "size": self.layout.flash_size}])
+        self.assertEqual(full["full_bin"]["writes"], full["full_bin"]["erases"])
+        self.assertEqual(
+            full["full_bin"]["device_unique_data"],
+            "trusted-same-device-base-required",
+        )
+        self.assertEqual(full["startup_migration"], {
+            "status": "unknown",
+            "unconditional_start_allowed": False,
+        })
+
+        delivery = self._ota_delivery("impact-ota")
+        with zipfile.ZipFile(delivery) as archive:
+            ota_member = next(
+                name for name in archive.namelist() if name.startswith("ota/")
+            )
+            ota = self.root / "impact-ota.bkpack"
+            ota.write_bytes(archive.read(ota_member))
+
+        impact = product_domain.operation_impact(
+            ota, self.policy, transport="ota"
+        )
+        self.assertEqual(impact["transport"], "ota")
+        self.assertEqual(impact["ota"]["target"], "inactive")
+        self.assertEqual(
+            {row["artifact"] for row in impact["ota"]["payloads"]},
+            {"cp", "ap"},
+        )
+        self.assertEqual(impact["ota"]["package_erase_operations"], [])
+        self.assertEqual(
+            impact["ota"]["target_device_erase_granularity"],
+            "device-managed-unknown",
+        )
+        self.assertEqual(impact["ota"]["full_flash_base"], "not-required")
+
+    def test_operation_impact_rejects_wrong_transport_and_large_generation(self) -> None:
+        package, _ = self._inputs("impact-reject")
+        with self.assertRaises(product_domain.ProductError):
+            product_domain.operation_impact(
+                package, self.policy, transport="ota"
+            )
+        with self.assertRaises(product_domain.ProductError):
+            product_domain.operation_impact(
+                package, self.policy, transport="unexpected"
+            )
+        self.assertEqual(
+            product_domain.version_generation("1.2.3+4294967295"),
+            4294967295,
+        )
+        with self.assertRaises(product_domain.ProductError):
+            product_domain.version_generation("1.2.3+4294967296")
+
     def test_copied_build_manifest_evidence_is_path_independent(self) -> None:
         package, manifest = self._inputs("portable-evidence")
         evidence = self.root / "detached-release/evidence/build-manifest.json"
@@ -287,6 +424,141 @@ class ProductDeliveryTest(unittest.TestCase):
             document["target"],
             {"board_family": "bk7258", "physical_board": "test_board"},
         )
+
+    def test_build_manifest_evidence_accepts_v2_and_v3_provenance(self) -> None:
+        package, legacy_manifest = self._inputs("manifest-compat")
+        package_document, _, report = product_domain._package_target_layout(
+            package
+        )
+
+        legacy = product_domain._validate_build_manifest(
+            legacy_manifest.read_bytes(), package_document, report["security"]
+        )
+        self.assertEqual(
+            legacy["format"], build_domain.BUILD_MANIFEST_FORMAT_V2
+        )
+
+        current = dict(legacy)
+        current["format"] = build_domain.BUILD_MANIFEST_FORMAT
+        current["provenance"] = {
+            "dependencies": {name: {"source_commit": "a" * 40, "dirty": False,
+                                    "input_tree_sha256": hashlib.sha256(b"").hexdigest(),
+                                    "input_count": 0} for name in ("nuttx", "apps")},
+            "source_commit": "a" * 40,
+            "dirty": False,
+            "input_tree_sha256": "b" * 64,
+            "input_count": 2,
+            "scope": ["app/bk7258", "chips/bk7258"],
+            "product": "shaniu",
+            "profiles": {
+                "cp": "configs/cp-aidk",
+                "ap": "configs/ap-aidk",
+            },
+        }
+
+        accepted = product_domain._validate_build_manifest(
+            json.dumps(current, separators=(",", ":")).encode("utf-8"),
+            package_document,
+            report["security"],
+        )
+        self.assertEqual(accepted["provenance"], current["provenance"])
+
+    def test_release_identity_uses_explicit_product_and_artifact_id(self) -> None:
+        manifest = mock.Mock()
+        manifest.physical_board = "aidk_ai_toy"
+        manifest.provenance = {
+            "product": "shaniu",
+            "profiles": {
+                "cp": "configs/cp-aidk",
+                "ap": "configs/ap-aidk",
+            },
+        }
+
+        identity = bk7258_cli._release_identity(
+            manifest, "18.6.351+415", "shaniu", "A4"
+        )
+
+        self.assertEqual(identity["product"], "shaniu")
+        self.assertEqual(identity["artifact_id"], "A4")
+        self.assertEqual(identity["security_counter"], 415)
+        self.assertEqual(
+            bk7258_cli._artifact_stem(identity, "ota"),
+            "shaniu-bk7258-aidk_ai_toy-cp-aidk__ap-aidk-"
+            "v18.6.351+415-bA4-ota",
+        )
+
+    def test_release_identity_rejects_conflicts_and_unsafe_names(self) -> None:
+        manifest = mock.Mock()
+        manifest.physical_board = "aidk_ai_toy"
+        manifest.provenance = {
+            "product": "shaniu",
+            "profiles": {
+                "cp": "configs/cp-aidk",
+                "ap": "configs/ap-aidk",
+            },
+        }
+
+        with self.assertRaisesRegex(ValueError, "differs from build provenance"):
+            bk7258_cli._release_identity(
+                manifest, "18.6.351+415", "other", "A4"
+            )
+        manifest.provenance["product"] = None
+        with self.assertRaisesRegex(ValueError, "requires an explicit --product"):
+            bk7258_cli._release_identity(
+                manifest, "18.6.351+415", "Shaniu!", "A4"
+            )
+        with self.assertRaisesRegex(ValueError, "artifact-id"):
+            bk7258_cli._release_identity(
+                manifest, "18.6.351+415", "shaniu", "A4/bad"
+            )
+
+    def test_release_input_accepts_bound_v3_identity(self) -> None:
+        release = self._release_input_fixture("release-input-valid")
+
+        summary, package, build_manifest, operator, base = \
+            bk7258_cli._release_input(release, "ota")
+
+        self.assertEqual(summary["identity"]["product"], "shaniu")
+        self.assertEqual(summary["generation"], 415)
+        self.assertEqual(package.name,
+                         "shaniu-bk7258-test_board-cp-aidk__ap-aidk-"
+                         "v18.6.351+415-bA4-ota.bkpack")
+        self.assertEqual(build_manifest.parent.name, "evidence")
+        self.assertIsNone(operator)
+        self.assertIsNone(base)
+
+    def test_release_input_rejects_identity_counter_and_package_name_mismatch(self) -> None:
+        identity_release = self._release_input_fixture(
+            "release-input-identity",
+            identity={
+                "product": "shaniu",
+                "chip": "unexpected-chip",
+                "board": "test_board",
+                "profile": "cp-aidk__ap-aidk",
+                "version": "18.6.351+415",
+                "artifact_id": "A4",
+                "security_counter": 415,
+                "counter_policy":
+                    "legacy-version-build-equals-security-counter",
+            },
+        )
+        with self.assertRaisesRegex(ValueError,
+                                    "identity differs from build evidence"):
+            bk7258_cli._release_input(identity_release, "ota")
+
+        counter_release = self._release_input_fixture(
+            "release-input-counter", generation=414
+        )
+        with self.assertRaisesRegex(ValueError,
+                                    "identity differs from build evidence"):
+            bk7258_cli._release_input(counter_release, "ota")
+
+        name_release = self._release_input_fixture(
+            "release-input-name", package_name="renamed.bkpack"
+        )
+        with self.assertRaisesRegex(ValueError,
+                                    "package name differs from artifact identity"):
+            bk7258_cli._release_input(name_release, "ota")
 
     def test_delivery_rejects_changed_operator(self) -> None:
         valid = self._delivery("valid")

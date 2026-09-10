@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping
 
+from _lib import build as build_domain
 from _lib import image as image_domain
 from _lib import layout as layout_domain
 from _lib import package as package_domain
@@ -42,6 +43,7 @@ DIRECTIVE_RE = re.compile(r"#\s*([A-Z][A-Z0-9_]*)=(.+)")
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 DEVICE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 CAPTURE_METHOD_RE = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
+MAX_VERSION_GENERATION = (1 << 32) - 1
 RELEASE_POLICIES = frozenset(
     {
         "replace",
@@ -412,14 +414,20 @@ def _package_version(document: Mapping[str, object]) -> str | None:
     version = versions.pop()
     if not isinstance(version, str) or VERSION_RE.fullmatch(version) is None:
         raise ProductError("signed package version is malformed")
+    version_generation(version)
     return version
 
 
-def _version_generation(version: str) -> int:
-    match = VERSION_RE.fullmatch(version)
+def version_generation(version: str) -> int:
+    """Return a wire-safe product generation from a canonical version."""
+
+    match = VERSION_RE.fullmatch(version) if isinstance(version, str) else None
     if match is None:
         raise ProductError("version must use MAJOR.MINOR.PATCH+GENERATION")
-    return int(match.group(4))
+    generation = int(match.group(4))
+    if generation > MAX_VERSION_GENERATION:
+        raise ProductError("version generation exceeds uint32")
+    return generation
 
 
 def _package_target_layout(
@@ -434,6 +442,94 @@ def _package_target_layout(
     return document, members, report
 
 
+def operation_impact(
+    package: Path,
+    policy: ReleasePolicy,
+    *,
+    transport: str,
+) -> dict[str, object]:
+    """Project verified package operations into a transport-specific impact.
+
+    This is descriptive release evidence.  It does not claim an unknown
+    startup migration is safe and it does not turn an OTA into a full-image
+    operation.
+    """
+
+    if transport not in {"full-bin", "ota"}:
+        raise ProductError("operation impact transport must be full-bin or ota")
+
+    document, _, report = _package_target_layout(package)
+    layout = document.get("layout")
+    if not isinstance(layout, dict) or not isinstance(layout.get("flash_size"), int) \
+            or isinstance(layout["flash_size"], bool) or layout["flash_size"] <= 0:
+        raise ProductError("operation impact package layout is malformed")
+
+    partitions = layout.get("partitions")
+    if not isinstance(partitions, list):
+        raise ProductError("operation impact package partitions are malformed")
+    parsed_policy = _parse_policy(
+        _regular_bytes(policy.source, "release policy"),
+        policy.source,
+        tuple(partitions),
+    )
+    if parsed_policy.sha256 != policy.sha256:
+        raise ProductError("release policy changed while projecting operations")
+
+    contract = package_domain.flash_contract(package)
+    if contract.get("layout") != {
+        "identity": layout.get("identity"),
+        "sha256": layout.get("sha256"),
+    }:
+        raise ProductError("operation impact package contract layout changed")
+
+    impact: dict[str, object] = {
+        "layout": {
+            "flash_size": layout["flash_size"],
+            "identity": layout.get("identity"),
+            "sha256": layout.get("sha256"),
+        },
+        "release_policy": report_policy(parsed_policy),
+        "startup_migration": {
+            "status": "unknown",
+            "unconditional_start_allowed": False,
+        },
+        "transport": transport,
+    }
+
+    if transport == "full-bin":
+        if report["security"] == "signed-ota" or "writes" not in contract:
+            raise ProductError("full-bin impact requires a non-OTA package")
+        impact["full_bin"] = {
+            "device_unique_data": "trusted-same-device-base-required",
+            "erases": [{"offset": 0, "size": layout["flash_size"]}],
+            "flash_offset": 0,
+            "flash_size": layout["flash_size"],
+            "scope": "complete-flash",
+            "writes": [{"offset": 0, "size": layout["flash_size"]}],
+            "package_overlay": {
+                "erases": contract["erases"], "writes": contract["writes"],
+            },
+        }
+        return impact
+
+    payloads = contract.get("payloads")
+    if report["security"] != "signed-ota" or contract.get("target") != "inactive" \
+            or not isinstance(payloads, list) \
+            or {row.get("artifact") for row in payloads if isinstance(row, dict)} \
+                != {"cp", "ap"}:
+        raise ProductError("OTA impact requires an inactive CP/AP OTA package")
+    if contract.get("erases") != []:
+        raise ProductError("OTA package-level erase operations are unsupported")
+    impact["ota"] = {
+        "full_flash_base": "not-required",
+        "package_erase_operations": [],
+        "payloads": payloads,
+        "target": "inactive",
+        "target_device_erase_granularity": "device-managed-unknown",
+    }
+    return impact
+
+
 def _validate_build_manifest(
     data: bytes,
     package_document: Mapping[str, object],
@@ -444,9 +540,14 @@ def _validate_build_manifest(
     except (UnicodeError, json.JSONDecodeError) as error:
         raise ProductError("build manifest is not valid UTF-8 JSON") from error
     if not isinstance(document, dict) \
-            or document.get("format") != "bk7258.build-manifest/2" \
+            or document.get("format") not in build_domain.TARGET_BOUND_FORMATS \
             or document.get("target") != package_document.get("target"):
         raise ProductError("build manifest does not match the package target")
+    if document["format"] == build_domain.BUILD_MANIFEST_FORMAT:
+        try:
+            build_domain._validate_provenance(document.get("provenance"))
+        except build_domain.BuildError as error:
+            raise ProductError(str(error)) from error
     build_layout = document.get("layout")
     package_layout = package_document.get("layout")
     if not isinstance(build_layout, dict) or not isinstance(package_layout, dict) \
@@ -789,8 +890,7 @@ def create_delivery(
 ) -> dict[str, object]:
     """Create one deterministic, board-bound product delivery ZIP."""
 
-    if VERSION_RE.fullmatch(version) is None:
-        raise ProductError("product version must use MAJOR.MINOR.PATCH+GENERATION")
+    version_generation(version)
     package = package.absolute()
     build_manifest = build_manifest.absolute()
     output = output.absolute()
@@ -866,8 +966,8 @@ def create_delivery(
                 "OTA required source version must use "
                 "MAJOR.MINOR.PATCH+GENERATION"
             )
-        if _version_generation(ota_required_source_version) \
-                >= _version_generation(version):
+        if version_generation(ota_required_source_version) \
+                >= version_generation(version):
             raise ProductError(
                 "OTA required source generation must precede target generation"
             )
@@ -1055,6 +1155,7 @@ def verify_delivery(
             or not isinstance(document.get("version"), str) \
             or VERSION_RE.fullmatch(document["version"]) is None:
         raise ProductError("product release manifest is unsupported")
+    version_generation(document["version"])
     target = document.get("target")
     layout_summary = document.get("layout")
     policy_row = document.get("release_policy")
@@ -1295,8 +1396,8 @@ def verify_delivery(
                 or VERSION_RE.fullmatch(
                     ota_row["required_source_version"]
                 ) is None \
-                or _version_generation(ota_row["required_source_version"]) \
-                    >= _version_generation(document["version"]) \
+                or version_generation(ota_row["required_source_version"]) \
+                    >= version_generation(document["version"]) \
                 or not isinstance(ota_row.get("required_source_root"), str) \
                 or DIGEST_RE.fullmatch(ota_row["required_source_root"]) is None:
             raise ProductError("OTA compatibility metadata is malformed")
@@ -1401,7 +1502,7 @@ def create_gateway_release_registry(
     releases.sort(
         key=lambda row: (
             str(row["device_id"]),
-            _version_generation(str(row["target_version"])),
+            version_generation(str(row["target_version"])),
             str(row["target_version"]),
             str(row["manifest_sha256"]),
         )

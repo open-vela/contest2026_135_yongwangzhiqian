@@ -8,10 +8,15 @@
 ## BK7258 trust safety
 
 - During active BK7258 work, do not use N17 or another historical trust domain as a source, baseline, key candidate, or fallback unless the owner explicitly reactivates it.
-- Every owner-authorized full download starts a fresh trust generation: create new ephemeral P-256 key pairs independently for BL1 and MCUboot, embed their public keys in a clean build, and use their private keys to sign the complete BL1/BL2/CP/AP chain. Never reuse a previous generation's private keys for another full download.
-- Keep fresh private keys as mode-0600 files in a mode-0700 temporary directory only, never print or record their contents or paths in tracked files, and remove them after package verification and hardware acceptance. The signed package retains only public trust evidence.
-- Before a fresh-key full download, the non-halting target preflight must match the latest accepted base generation, while the new package must independently pass its complete internal trust verification and use strictly increasing rollback counters. After download, fresh boot/readback evidence must identify the new generation. Do not require the not-yet-installed public key to match the pre-download target.
-- The apps-only loader path remains bound to the already-installed public-only trust contract and its exact target fingerprint. Do not mix it with the fresh-key full-download path or add a parallel key resolver, trust gate, or download policy.
+- A maintained signing identity is referenced explicitly by its public fingerprint and an approved secure local path, secret-manager, or HSM reference. Do not generate, rotate, destroy, print, or place private key material in the repository, logs, or temporary automation unless the owner explicitly authorizes that identity operation.
+- A missing private signing key blocks only the signing/release step. It does not block source review, configuration, ordinary incremental builds, host regression, or unsigned diagnostic artifacts; state the blocked signing input precisely.
+- Reuse unchanged boot components and sealed signed artifacts when content,
+  configuration, toolchain, trust identity, protected metadata and dependencies
+  still match. Use the existing CP/AP OTA signing path without re-signing BL1/BL2.
+  A changed version, counter, TLV or pair dependency invalidates the affected
+  signed artifact; a matching raw payload alone does not establish reuse.
+- Before any full download, the target preflight must match its accepted base generation and the signed package must pass its own trust and rollback checks. Record the signer reference and public identity in release evidence, never a private path or value. The apps-only path remains bound to its installed public trust contract and exact target fingerprint.
+- Backup scope follows the actual erase/write or migration scope. The current AIDK 8-MiB full-image path needs trusted same-device base material, but may reuse an accepted historical full-device readback when its hash and device identity match. The CLI requiring a complete base file is an interface condition, not a demand to reacquire it for every write. A configuration rollback needs explicit owner authorization; if non-reconstructible data has no trustworthy same-device material, refuse the operation. Never copy a target-bound image or device-unique data to another unit.
 
 ## BK7258 hardware-first debugging
 
@@ -25,6 +30,14 @@
   the minimum image-integrity check, and hand off the directly flashable
   artifact immediately.  Real-board results are the acceptance signal for the
   iteration.
+- Stop a short loop when the stated observation either confirms or rejects its
+  single hypothesis, then report the next bounded question. Do not keep adding
+  probes, broad regression, clean builds, signing, or key work after that stop
+  condition without a new reason.
+- Use mechanical tools for repeatable file, config, build and artifact facts.
+  Give a model only the compact hypothesis, relevant evidence, changed owner,
+  stop condition, and the affected tests; do not make it reconstruct unrelated
+  logs or run a generic full-workspace review.
 - A debug-artifact handoff is not a final project handoff.  Defer broad host
   regression, unrelated-board clean builds, documentation and provenance
   audits, official-checkout audits, ZIP/release assembly and other final
@@ -32,13 +45,29 @@
   not introduce speculative tests merely to delay the next hardware attempt.
 - Mandatory device-data and trust protections still apply.  If an iteration
   requires a whole-device BIN, perform only the minimum required accepted-base,
-  fresh-key, signature, rollback and exact-Flash-size checks, then hand off the
-  BIN without unrelated gates or a ZIP.  Prefer the installed apps-only path
+  signer-reference, signature, rollback and exact-Flash-size checks, then hand
+  off the BIN without unrelated gates or a ZIP.  Prefer the installed apps-only path
   when its existing trust contract permits the affected CP/AP update.
 - Exit hardware-fast mode only when the owner explicitly requests final
   acceptance/release work or reports that the relevant hardware behavior has
   passed.  Then run the deferred regression, multi-board, provenance and final
   delivery checks before claiming completion.
+
+## BK7258 validation tiers
+
+- Ordinary increment: build only the affected role/target and run its directly
+  relevant host or target regression. Reuse the established build tree and
+  signing identity; neither `--clean` nor signing is a default validation step.
+- Impacted regression: run the tests and builds selected by changed ownership
+  (chip/common changes include affected board profiles; board wiring stays on
+  that board). State why each selected test is relevant and what remains out of
+  scope.
+- Before adding a test or probe, state the current behavior or hypothesis it
+  checks, why existing coverage is insufficient, and how its result changes the
+  next action. Reuse the existing harness; stop expansion at the acceptance point.
+- Boot/trust/layout change: run the dedicated clean, package, signature,
+  rollback, readback and boot evidence path. This is an explicit specialist
+  workflow, not a gate for ordinary app or driver increments.
 
 ## BK7258 delegation boundaries
 
