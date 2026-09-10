@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: Apache-2.0
+
+config DOLPHIN
+	bool "Dolphin command directory"
+	default n
+	depends on NSH_BUILTIN_APPS && SCHED_WAITPID
+	help
+		Build the dolphin command directory.  It launches only a fixed set
+		of already-built BK7258 command applications; it adds no driver,
+		network, or RPC implementation.
+
+if DOLPHIN
+
+config DOLPHIN_STACKSIZE
+	int "Dolphin stack size"
+	default 4096
+
+endif
+
+config DOLPHIN_UI
+	bool "Dolphin touchscreen desktop"
+	default n
+	depends on BK7258_AP_CORE && GRAPHICS_LVGL && LV_USE_NUTTX
+	depends on LV_USE_NUTTX_TOUCHSCREEN && VIDEO_FB && INPUT_TOUCHSCREEN && NET
+	depends on !BK7258_BOARD_HAS_LVGL_UI_BINDING && !BK7258_DISPLAY_SERVICE
+	select BK7258_AP_APPLICATION_LIFECYCLE
+	help
+		Run the local Dolphin desktop on the AP-owned NuttX framebuffer
+		and touchscreen. Reuse standard VFS and network status APIs; no
+		SDK dependency, cloud provisioning or NFC hardware is assumed.
+
+if DOLPHIN_UI
+
+config DOLPHIN_UI_STACKSIZE
+	int "Dolphin UI stack size"
+	default 16384
+	range 8192 65536
+
+config DOLPHIN_STORAGE_ROOT
+	string "Dolphin read-only file browser root"
+	default "/mnt/tf"
+	help
+		Use the board-mounted removable filesystem. Dolphin does not mount,
+		format, create or delete files and cannot navigate above this root.
+
+endif

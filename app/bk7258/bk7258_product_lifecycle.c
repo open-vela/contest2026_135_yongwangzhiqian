@@ -16,6 +16,10 @@
 
 #include "bk7258_product_lifecycle.h"
 
+#ifdef CONFIG_DOLPHIN_UI
+#include "dolphin_ui.h"
+#endif
+
 #ifdef CONFIG_BK7258_PROVISION_GATT
 #include "bk7258_provision_gatt.h"
 #include "bk7258_provision_storage.h"
@@ -100,6 +104,14 @@ int bk7258_ap_application_prepare(void)
 int bk7258_ap_application_start(void)
 {
   int ret;
+
+#ifdef CONFIG_DOLPHIN_UI
+  ret = dolphin_ui_start();
+  if (ret < 0)
+    {
+      return ret;
+    }
+#endif
 
 #ifdef CONFIG_BK7258_PROVISION_GATT
   /* HCI Host startup has completed before this product callback. Register

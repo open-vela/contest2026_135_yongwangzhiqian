@@ -13,3 +13,7 @@
 #ifndef CONFIG_NSH_DISABLE_ECHO
 echo "BK7258 RCS PASS"
 #endif
+
+#ifdef CONFIG_DOLPHIN
+dolphin list
+#endif

@@ -18,7 +18,7 @@ Use a lowercase underscore name and add these board-owned inputs:
 
 1. `boards/bk7258/<board>/` with the normal physical binding, adjacent
    `Make.defs`/`CMakeLists.txt`, and `CONFIG_BK7258_BOARD_<BOARD>` selector;
-2. `configs/openvela_cp/{defconfig,profile.conf}` and
+2. `configs/app/{defconfig,profile.conf}` and
    `configs/openvela_ap/{defconfig,profile.conf}` with the same board owner and
    CP/AP compatibility value;
 3. one strict `openvela.conf` naming those two role seeds, a partition CSV and
@@ -57,15 +57,24 @@ logical base pair, not two product variants.
 
 | Physical board | Normal openvela CP | Normal openvela AP | Additional maintained purpose |
 |---|---|---|---|
-| T5-Board | `openvela_cp` | `openvela_ap` | `xts`, `perf` |
-| T5AI-Core | `openvela_cp` | `openvela_ap` | `xts`; paired `drivercheck_cp` / `drivercheck_ap` |
-| AIDK AI Toy | `openvela_cp` | `openvela_ap` | `xts` CP paired with `openvela_ap`; paired `drivercheck_cp` / `drivercheck_ap` |
+| T5-Board | `app` | `openvela_ap` | `xts`, `perf` |
+| T5AI-Core | `app` | `openvela_ap` | `xts`; paired `drivercheck_cp` / `drivercheck_ap` |
+| AIDK AI Toy | `app` | `openvela_ap` | `xts` CP paired with `openvela_ap`; paired `drivercheck_cp` / `drivercheck_ap` |
 
-The three normal pairs expose the fitted board capabilities and openvela
-system services but do not select Vela Claw, AI Agent, UIKit/LVGL UI or another
-product application. A future application adds a purpose-specific defconfig
-only when its Kconfig contract cannot use the base unchanged. Generated full
-`.config` snapshots are build outputs and must never live under `configs/`.
+Each physical board owns exactly one normal application entry at
+`configs/app/defconfig`. It is a complete CP configuration, not a shared
+cross-board fragment. `configs/openvela_ap/defconfig` remains the companion
+AP image configuration because BK7258 links CP and AP independently.
+`openvela.conf` selects this pair for `--board`; no app selection table or
+additional config parser exists in the build tool.
+
+T5-Board selects Dolphin; AIDK AI Toy retains Shaniu; T5AI-Core retains its
+existing system features. The product application source remains in `app/`,
+SoC mechanisms in `chips/`, and populated hardware/wiring in each board.
+Diagnostic `xts`, `perf` and `drivercheck` profiles remain separate purposes.
+Retired duplicate product entries: `openvela_cp`, `dolphin_cp`, `dolphin_ap`.
+Generated `.config` files and historical build evidence retain their original
+paths; they are not new maintained application entries.
 
 Boot mode is not duplicated in the profile. Every build selects it explicitly:
 
@@ -104,7 +113,7 @@ The runnable CP base profiles use the standard OpenVela startup lifecycle:
 3. `board_app_finalinitialize()` verifies the ROMFS scripts and mounted
    filesystems;
 4. `/etc/init.d/rcS` is the designated place for CP product services and is
-   currently marker-only.
+   selects enabled board applications (including Dolphin on T5-Board).
 
 Final-init is a diagnostic contract, not a startup gate: the current NuttX
 NSH continues to `rcS` even when `BOARDIOC_FINALINIT` returns an error.  Any

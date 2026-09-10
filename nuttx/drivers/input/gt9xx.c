@@ -37,6 +37,7 @@
 #include <poll.h>
 #include <assert.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <debug.h>
 
 #include <nuttx/arch.h>
@@ -92,7 +93,7 @@ struct gt9xx_dev_s
   bool int_pending; /* True if a Touch Interrupt is pending processing */
   uint16_t x;       /* X Coordinate of Last Touch Point */
   uint16_t y;       /* Y Coordinate of Last Touch Point */
-  uint8_t flags;    /* Touch Up or Touch Down for Last Touch Point */
+  uint8_t flags;    /* Last reported DOWN, MOVE or UP state */
 
   /* Poll Waiters for device */
 
@@ -413,12 +414,16 @@ static int gt9xx_read_touch_data(FAR struct gt9xx_dev_s *dev,
   status_code = status[0] & 0x80;
   touched_points = status[0] & 0x0f;
 
-  /* If Touch Panel Status is OK and Touched Points is 1 or more */
+  /* No ready report is not a release. Keep the last contact state until
+   * the controller reports zero fingers. */
 
-  if (status_code != 0 && touched_points >= 1)
+  if (status_code == 0)
     {
-      /* Read the First Touch Point (6 bytes) */
+      return -EAGAIN;
+    }
 
+  if (touched_points >= 1)
+    {
       ret = gt9xx_i2c_read(dev, GTP_POINT1, touch, sizeof(touch));
       if (ret < 0)
         {
@@ -426,20 +431,23 @@ static int gt9xx_read_touch_data(FAR struct gt9xx_dev_s *dev,
           return ret;
         }
 
-      /* Decode the Touch Coordinates */
-
       x = touch[0] + (touch[1] << 8);
       y = touch[2] + (touch[3] << 8);
-
-      /* Return the Touch Coordinates as Touch Down */
-
-      flags = TOUCH_DOWN | TOUCH_ID_VALID | TOUCH_POS_VALID;
+      flags = (dev->flags & (TOUCH_DOWN | TOUCH_MOVE)) != 0 ?
+              TOUCH_MOVE : TOUCH_DOWN;
       sample->npoints = 1;
       sample->point[0].id = 0;
       sample->point[0].x = x;
       sample->point[0].y = y;
-      sample->point[0].flags = flags;
-      iinfo("touch down x=%d, y=%d\n", x, y);
+      sample->point[0].flags = flags | TOUCH_ID_VALID | TOUCH_POS_VALID;
+    }
+  else if ((dev->flags & (TOUCH_DOWN | TOUCH_MOVE)) != 0)
+    {
+      sample->npoints = 1;
+      sample->point[0].id = 0;
+      sample->point[0].x = dev->x;
+      sample->point[0].y = dev->y;
+      sample->point[0].flags = TOUCH_UP | TOUCH_ID_VALID | TOUCH_POS_VALID;
     }
 
   /* Set the Touch Panel Status to 0 */
@@ -505,77 +513,34 @@ static ssize_t gt9xx_read(FAR struct file *filep, FAR char *buffer,
       return ret;
     }
 
-  ret = -EINVAL;
+  /* Consume the pending indication before I2C so a new interrupt arriving
+   * during the transfer remains pending. No synthetic release: continuous
+   * contacts must reach the consumer as DOWN, MOVE, then a real UP. */
 
-  /* If waiting for Touch Up, return the Last Touch Point as Touch Up */
-
-  if (priv->flags & TOUCH_DOWN)
+  flags = enter_critical_section();
+  if ((filep->f_oflags & O_NONBLOCK) != 0 && !priv->int_pending)
     {
-      /* Begin Critical Section */
-
-      flags = enter_critical_section();
-
-      /* Mark the Last Touch Point as Touch Up */
-
-      priv->flags = TOUCH_UP | TOUCH_ID_VALID | TOUCH_POS_VALID;
-
-      /* End Critical Section */
-
       leave_critical_section(flags);
-
-      /* Return the Last Touch Point, changed to Touch Up */
-
-      memset(&sample, 0, sizeof(sample));
-      sample.npoints = 1;
-      sample.point[0].id = 0;
-      sample.point[0].x = priv->x;
-      sample.point[0].y = priv->y;
-      sample.point[0].flags = priv->flags;
-      memcpy(buffer, &sample, sizeof(sample));
-      ret = OK;
-      iinfo("touch up x=%d, y=%d\n", priv->x, priv->y);
+      nxmutex_unlock(&priv->devlock);
+      return -EAGAIN;
     }
-  else
+
+  priv->int_pending = false;
+  leave_critical_section(flags);
+  ret = gt9xx_read_touch_data(priv, &sample);
+  if (ret == OK)
     {
-      /* Otherwise read the Touch Point over I2C */
-
-      ret = gt9xx_read_touch_data(priv, &sample);
-
-      /* Skip duplicates */
-
-      if (sample.npoints >= 1 &&
-          priv->x == sample.point[0].x &&
-          priv->y == sample.point[0].y)
+      if (sample.npoints == 0)
         {
-          memset(&sample, 0, sizeof(sample));
-          sample.npoints = 0;
-          iinfo("skip duplicate x=%d, y=%d\n", priv->x, priv->y);
+          ret = -EAGAIN;
         }
-
-      /* Return the Touch Point */
-
-      memcpy(buffer, &sample, sizeof(sample));
-
-      /* Begin Critical Section */
-
-      flags = enter_critical_section();
-
-      /* Clear the Interrupt Pending Flag */
-
-      priv->int_pending = false;
-
-      /* Remember the Last Touch Point */
-
-      if (sample.npoints >= 1)
+      else
         {
           priv->x = sample.point[0].x;
           priv->y = sample.point[0].y;
           priv->flags = sample.point[0].flags;
+          memcpy(buffer, &sample, sizeof(sample));
         }
-
-      /* End Critical Section */
-
-      leave_critical_section(flags);
     }
 
   /* End Mutex: Unlock to allow next read */
