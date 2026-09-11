@@ -16,14 +16,15 @@ import java.util.Base64
  */
 class ProvisionActivation private constructor(
     private var bootstrap: ProvisionBootstrap?,
-    private val ca: ByteArray,
-    val host: String,
-    val address: String,
-    val port: Int,
+    private val ca: ByteArray?,
+    val host: String?,
+    val address: String?,
+    val port: Int?,
 ) : AutoCloseable {
     fun takeBootstrap(): ProvisionBootstrap = checkNotNull(bootstrap).also { bootstrap = null }
-    fun caCopy(): ByteArray = ca.copyOf()
-    override fun close() { bootstrap?.close(); bootstrap = null; ca.fill(0) }
+    fun caCopy(): ByteArray? = ca?.copyOf()
+    val hasLegacyRoute: Boolean get() = ca != null && host != null && address != null && port != null
+    override fun close() { bootstrap?.close(); bootstrap = null; ca?.fill(0) }
     override fun toString() = "ProvisionActivation(redacted)"
 
     companion object {
@@ -47,13 +48,21 @@ class ProvisionActivation private constructor(
                     reader.endObject()
                     require(reader.peek() == JsonToken.END_DOCUMENT)
                 }
-                require(values.keys == fields && values["protocol"] == "provision-activation-v1")
+                val protocol = values["protocol"]
+                val bootstrapFields = setOf("protocol", "device_id", "certificate_sha256", "possession_secret")
+                val legacyFields = bootstrapFields + setOf("gateway_host", "gateway_ipv4", "gateway_port", "gateway_ca_der")
+                require(values.keys == bootstrapFields || values.keys == legacyFields)
                 val encoded = Gson().toJson(mapOf(
                     "protocol" to "provision-bootstrap-v1", "device_id" to values["device_id"],
                     "certificate_sha256" to values["certificate_sha256"],
                     "possession_secret" to values["possession_secret"],
                 )).toCharArray()
                 bootstrap = try { ProvisionBootstrap.parse(encoded) } finally { encoded.fill('\u0000') }
+                if (values.keys == bootstrapFields) {
+                    require(protocol == "provision-bootstrap-v1")
+                    return ProvisionActivation(bootstrap, null, null, null, null)
+                }
+                require(protocol == "provision-activation-v1")
                 val caText = values.getValue("gateway_ca_der")
                 ca = Base64.getDecoder().decode(caText)
                 require(ca.size in 1..4096 && Base64.getEncoder().encodeToString(ca) == caText)

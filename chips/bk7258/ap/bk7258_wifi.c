@@ -13,9 +13,6 @@
  * Included Files
  ****************************************************************************/
 
-#ifdef CONFIG_NETDB_DNSCLIENT
-#include <nuttx/net/dns.h>
-#endif
 #include <nuttx/config.h>
 
 #include <errno.h>
@@ -33,6 +30,10 @@
 #include <nuttx/signal.h>
 #include <nuttx/spinlock.h>
 #include <nuttx/wqueue.h>
+
+#ifdef CONFIG_NETDB_DNSCLIENT
+#  include <nuttx/net/dns.h>
+#endif
 
 #include <components/event.h>
 

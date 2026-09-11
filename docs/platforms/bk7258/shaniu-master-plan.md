@@ -2,6 +2,175 @@
 
 状态：`IN_PROGRESS`
 
+## 2026-09-11 App更新页生命周期与NFC现有接口验证
+
+- 本批修复`MainActivity`固件包后台检查的旧结果回写：页面离开、后台及销毁递增
+  检查代数，过期结果只清理自身缓存文件，不能清除新任务pending；各页面切换统一
+  经过现有Activity中的selectTab。销毁时清理所选缓存副本，不删除用户原始固件包。
+  未改变包格式、哈希检查、板端验签、升级传输或固件版本确认规则。
+- 在现有DeviceUiAcceptance加入实际完成处理函数回归，覆盖旧结果晚到、离开再返回、
+  当前失败提示与pending恢复。临时文件仅用于生命周期fixture，不是可刷固件，
+  也不作为签名或实板OTA证据。首次检查发现Result反射ABI不符，改为显式Pair/Boolean
+  参数后完成构建及模拟器执行；没有降低验收条件或新增框架。
+- 实际Gradle单测/两个APK构建通过：26套135项，133通过、2跳过、0失败；
+  最终65任务12执行、53up-to-date。emulator-5554安装及ui_probe返回PASS。
+  App SHA256 `8c2b5728e3336bec7cfbd7cd28538cf3bb9ebe7645ca70323bffad02fcfedeae`。
+  对应`out/shaniu-product-acceptance-20260910/ota-inspection-{build-final,emulator}.log`、
+  `ota-inspection-artifacts.json`及同目录保留的`ota-inspection-app-debug.apk`。
+- NFC已有功能未重写。候选mcuboot/AP角色`3c9f0bc5aa792c33`的有效.config确认
+  NFC_SERVICE、CL_ISODEP、CL_MFRC522_FRAME、PROVISION_GATT均启用。
+  直接运行现有`test_isodep.py`、`test_isodep_apdu.py`通过；
+  `pytest test_nfc_rf_lifecycle.py`通过；`make run-nfc-core run-nfc-rpc`通过，RPC19例。
+  覆盖激活、APDU序列/分帧/重传、WTX期限及失败释放。日志同目录
+  `nfc-isodep-{activation,apdu}.log`、`nfc-handover-host.log`、`nfc-service-host.log`。
+  这是脚本化RF传输及主机执行，不是手机贴近实测，也不证明418已安装相同代码。
+- 普通实现沿用已指定luna子代理（实际后端路由未独立核实），主代理负责生命周期
+  集成与工具执行。未访问板子、生成密钥、供应身份、刷写、提交或推送。
+  真实BLE/NFC、有效官方唤醒模型及语音/图片/OTA实板闭环仍未验收；
+  下一真实认领步骤需要手机或可用宿主BLE与受控设备身份，不能靠取消认证绕过。
+
+## 2026-09-11 直连云端激活入口修复
+
+- 已退出旧目标，当前未创建新goal；继续AIDK傻妞，Dolphin成果保持原样。
+  以下是最新软件检查点；未安装的新源码不能使用418旧证据代替验收。
+- 实际COM8只读查询`/data/shaniu/identity/config.bin`及`/data/shaniu/config.bin`
+  均返回ENOENT；`bkvoice status`仍为ready=1、configured=0、connected=0。
+  未读取身份内容、写配置或复位。仅凭ENOENT不能证明父目录和挂载完全正常，
+  也不将其归因于网络；证据`resume-20260911-provision-metadata.log`。
+- 确认BPI1板端身份记录不包含Gateway路由，旧供应工具和App却要求Gateway地址与CA。
+  复用现有四字段`provision-bootstrap-v1`，不新增板端协议：App正常入口接受
+  device_id、certificate_sha256、possession_secret及protocol；仍严格拒绝混合、重复、
+  未知或非法字段。旧八字段激活资料继续兼容，开发者Gateway模式仍要求其完整路由。
+  正常云配置的CA继续由CloudEndpoint校验，不拿设备证书pin充当云端CA。
+- `voice pairing --direct-cloud`明确选择无Gateway模式；沿用原BPI1负载和材料转换，
+  在读取材料前拒绝非法COM或混合Gateway参数。默认旧模式保持8765端口及原路由要求。
+  resume保持原proof及文件字节，跨格式/身份不匹配拒绝，保留防覆盖及文件权限检查。
+  此命令会供应设备身份，本批仅用mock验证，**未实际执行身份供应**。
+- 常规实现使用已有指定gpt-5.6-luna子代理，实际后端身份未独立核实；主代理审查
+  身份边界及执行集成。未生成或使用设备/固件签名私钥，未访问旧418密钥或刷写。
+- Android实际执行`:app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest
+  --offline`：26套135项，133通过、2跳过、0失败。新增界面fixture语法错误已修正，
+  最终构建65任务中6执行、59up-to-date；初次失败日志保留。
+  App SHA256 `b29c816660b8fccb855f7db37db1225bc6eb9d658e7512216cd05595acd0cdc6`。
+  指定emulator-5554安装App及测试APK，现有`ControlKeyInstrumentation -e ui_probe 1`
+  返回PASS，覆盖无Gateway CA进入Wi-Fi页及此前取消回退。此为fixture界面验收，
+  不代表真实BLE认领。现有`test_bk7258_voice_provision.py`9项通过，含原身份重试用例。
+- 证据均在工作区`out/shaniu-product-acceptance-20260910/`：
+  `direct-bootstrap-app-build-final.log`、`direct-bootstrap-app-artifacts.json`、
+  `direct-bootstrap-emulator.log`、`direct-bootstrap-tool-tests.log`。
+- 图片理解已有代码保留：明确语音触发词、真实取帧接口、取消/deadline隔离及JPEG清理；
+  现有`make -C tests/host/bk7258 run-cloud-request`与`run-cloud-vision-runtime`通过。
+  这些主机结果不能替代真实语音取帧、上传及播报。
+- 本批未提交/推送。下一实板闭环仍需确认可用设备身份及受控供应、真实BLE连接；
+  宿主扫描启动失败且手机缺席是当前射频验收限制，不能由模拟器替代。
+  有效官方唤醒模型、真实图片理解与App OTA仍未验收。418签名部署独立待决，
+  不作为后续App/源码工作的前置，不恢复旧密钥扩搜。
+
+## 2026-09-11 从 Dolphin 返回傻妞的恢复点
+
+- Dolphin 已独立提交并推送至 `fork/feat/bk7258-dolphin`，提交
+  `e3fb5672b1ac63570ff9873d0f26d34b69876832`。本节之后的傻妞修改不属于该提交。
+- 最近已有 AIDK 安装证据是 **418**，以
+  [流程审查报告的418签名核查及计数证据](chip-board-wrapper-review-20260910.md)
+  为准；下方411启动、417候选和当时等待备份的内容属于历史检查点，不能继续作为
+  最新版本或日常开发前置。本次未访问AIDK串口，未核实当前在线设备/手机版本。
+- 当前没有可用的匹配签名能力，限定查找已收口。418封存包保持原样；本批不查OTP、
+  不搜索旧私钥、不生成身份或刷写。签名部署单独待决，源码、App和主机验证继续。
+- 产品方向保持：K2电源、K1/K3音量；官方唤醒词触发自动收音；BLE/NFC认证认领、
+  BLE配网及云配置；App首页固件更新。Gateway冻结，PTT仅内部调试用途。
+- 本批从 App 的认领、配网提交与状态恢复开始核对实际缺口。常规实现复用已指定
+  `gpt-5.6-luna` 子代理（指定配置沿用，子代理无法独立回报实际后端模型，路由未独立核实）；工具执行定向验证；主代理负责身份/设备边界和集成。
+  不将模拟器或主机结果记为真实BLE/NFC、语音或OTA验收。
+
+### 本批 App 恢复验收
+
+- 用户说明手机未连接，改用现有 `emulator-5554`。Windows只读查询确认Qualcomm
+  FastConnect 7800 Wi-Fi为Up、蓝牙为OK；未据此声称Android模拟器可访问宿主BLE。
+- 定向代码核对未发现认领pending回执、提交清理、重启首页状态的新增缺陷，保留现有实现。
+  `:app:testDebugUnitTest --offline`定向选取ProvisionClaimProtocolTest、
+  ProvisionBindingStoreTest、CloudSettingsTest、DeviceStatusTextTest，共32项通过。
+  `:app:assembleDebug :app:assembleDebugAndroidTest --offline`通过，60项任务均up-to-date。
+- 指定模拟器安装两个APK后，运行现有ControlKeyInstrumentation `-e ui_probe 1`返回PASS：
+  Android Keystore、加密pending恢复、pin拒绝、TLS分片及合成绑定UI通过；未启用cloud_probe。
+  测试采用独立fixture偏好，不清空用户绑定，不对板子或长期签名身份进行操作。
+- App SHA256 `524d487e6bcf000cc5c49ec8d129ce870d6a65b478daf53ef890bc5f57b175cf`；
+  测试APK `0ecaa382700c6b3aea5f83ab6f53f0c07ec3659c70e3829e28cafc0d867989b7`。
+  日志位于工作区 `out/shaniu-product-acceptance-20260910/resume-20260911-{config-tests,app-build,emulator}.log`。
+- 本批没有新增业务源码或测试。真实BLE/NFC认领、板端配置重启恢复、有效唤醒模型、
+  自动语音/图片理解及App OTA仍未完成；下一步先核对AIDK实际在线状态与现有公开接口，
+  再选择无需信任迁移的真实配置联调；手机缺席时继续模拟器与宿主无线可执行部分。
+
+### AIDK实时核对与恢复缺陷（2026-09-11）
+
+- 用户要求退出旧Dolphin goal并继续AIDK傻妞。旧目标系统状态为blocked，当前工具无取消接口；
+  不将其改成虚假的complete，不创建新goal。本批只推进傻妞。
+- COM8 PNP为CH340 `VID_1A86/PID_7523`，与T5 COM3/COM4的CH342分离。
+  一次只读`bkota status`确认`18.6.354+418`、A/confirmed、AP READY、CPU2 online=3、
+  RPTUN connected、manager idle、faults/recoveries=0/0；无复位或刷写。
+  `bkvoice status`返回ready=1、configured=0、connected=0、tls_available=1；
+  不能从legacy状态字段推断完整认领身份是否存在，也不能将未配置判为云端网络故障。
+  日志在工作区 `out/shaniu-product-acceptance-20260910/resume-20260911-com8-{status,voice}.log`。
+- 复用已有Windows BLE客户端，定向扫描Shaniu时在watcher启动处失败，HRESULT
+  `0x800710df`；蓝牙Radio=On、bthserv运行、适配器声明支持LE Central。
+  未建立ATT连接，不能据此判定板端没有广播；未配对、未改无线开关或设备配置。
+  证据`resume-20260911-ble-scan.log`，无成功result JSON。
+- 软件核对发现身份加载/持久化成功后的绑定若暂时EBUSY，非空record会使后续恢复永久跳过。
+  当前切片修复这一个恢复状态问题，保持未落盘身份不能启用、认证及OTA/关机排他门。
+  已完成实现与下述主机/构建验证；尚不声称这是实板configured=0的根因。
+- 官方唤醒KWS/自动VAD接线已有；AIDK有效配置仍未启用KWS和wake runtime，缺有效模型。
+  不把SHA256校验称为独立签名，不用演示模型或主机fixture代替多人泛化/实板验收。
+
+### 身份恢复修复完成检查点
+
+- `bk7258_voice_runtime.c`新增identity_bind_pending，仅在身份读取/安装成功后绑定暂忙时进入；
+  按既有1秒间隔重试，CONFIG_COMMIT保持EAGAIN，成功或永久错误结束等待，关闭清理状态。
+  不重复读写身份，不对持久化失败的身份调用bind，保留OTA/关机排他检查。
+- 在既有`test_bk7258_voice_provision.py`增加执行真实progress函数的回归，覆盖恢复及安装后
+  暂忙、deadline前不重试、成功后不重复读写、落盘失败不绑定、永久错误停止；8项通过。
+  `resume-20260911-identity-host.log`为实际日志。
+- 同次AIDK构建暴露AP Wi-Fi的`dns_add_nameserver`隐式声明：条件包含发生在config.h前，
+  因而被预处理跳过。仅调整`chips/bk7258/ap/bk7258_wifi.c`头文件顺序，复用NuttX正式声明。
+- 复用`out/bk7258-workflow-a1-a8/build-command.json`进行public-only增量构建，最终通过，
+  本次日志无warning/error；未clean、未用私钥、未改计数策略或封存包。
+  `resume-20260911-identity-final-build.log`和`resume-20260911-identity-final-artifacts.json`
+  记录最终构建及CP/AP ELF、清单摘要；先前identity-build/artifacts仅是头文件修正前的检查点。
+- 新源码尚未提交/推送，未安装；实板仍是已确认418。真实恢复、BLE认领、语音及OTA
+  不计通过。签名部署能力与宿主BLE扫描异常分别保留待决，不进行旧密钥扩搜或强制刷写。
+
+### 配网恢复与取消后续切片
+
+- 再次确认goal为空，后续为普通AIDK开发。保留此前身份恢复/DNS改动，不重复构建未变固件。
+- Windows无遗留BLE客户端/广播进程；bthserv运行，BluetoothUserService_e808b停止。
+  对该服务的Start-Service请求被Windows拒绝，未改启动类型、无线开关或配对；仅能确认
+  宿主扫描通路仍未恢复，不能把服务停止当作已证实的唯一根因。不循环重试或复位AIDK。
+- 配网生命周期沿用已有实现：失败/取消进入ABORTING，finish完成后释放；提交结果未知
+  保留QUARANTINE。`python3 -m pytest -q tests/host/bk7258/test_provision_tls.py`通过，
+  实际编译执行network等既有harness。日志`resume-20260911-network-lifecycle.log`；没有
+  `run-provision-network` Make目标，不声称执行过该目标，也未新增测试框架。
+- App恢复连接的取消入口存在缺口：resultButton关闭连接却停在连接中，goBack忽略
+  recoveryControl。当前改动限定为取消/返回、回调隔离及保留pending回执，已完成下述模拟器验收。
+
+### App恢复连接取消修复与模拟器验收
+
+- `ProvisionActivity`将恢复连接的取消按钮、返回键和切后台统一到取消路径：先递增epoch，
+  脱离连接引用再close，回到发现页并显示“已取消本次连接，认领结果仍需核对”。不删除
+  pending回执、不清除bootstrap、不把取消解释为提交失败或成功；普通认领路径保留。
+- `recoveryControl`仅消费close能力，类型收窄为标准AutoCloseable，实际仍为
+  DeviceControlConnection；没有新增协议或mock产品入口。
+- 复用`DeviceUiAcceptance`启动真实ProvisionActivity，仅替换连接对象与独立测试回执，
+  驱动实际按钮和返回键，验证页面、文案、epoch/引用清理顺序、关闭一次及回执保留。
+  这是模拟器UI/生命周期验收，不代表无线实际断连、真实认领或实板配置恢复。
+- 当前模拟器原先已退出，确认无进程后启动已有Medium_Phone_API_36.0 AVD，未wipe数据。
+  在emulator-5554安装新App/测试APK，ControlKeyInstrumentation `-e ui_probe 1`返回PASS。
+- `:app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest --offline`通过：
+  26 suites/133 tests，131通过、2跳过、0失败；65构建任务中12执行、53up-to-date。
+  日志 `resume-20260911-cancel-app-build.log`、`resume-20260911-cancel-emulator.log`，
+  产物清单 `resume-20260911-cancel-app-artifacts.json`，均位于工作区既有证据目录。
+  App SHA256 `307375ce3dac14e33bb06e1a8c8050b26f3a65b9f355c06e66dbcda1c205f2d3`；
+  测试APK `aadeb454a14ee85ecdb49f206752b3e896aae6f6ee3ebc021affe10c99403265`。
+- 本批由已有Luna配置的子代理实施、主代理审查及独占模拟器验证；实际后端模型未独立核实。
+  改动尚未提交/推送；此前固件修复仍未刷写。宿主BLE启动异常和实板签名部署单列待决。
+
 ## 2026-09-10 每板应用入口收束
 
 正常AIDK CP入口由 `configs/openvela_cp` 迁为 `configs/app`，配置内容保持

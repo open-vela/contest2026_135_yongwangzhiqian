@@ -99,6 +99,7 @@ class MainActivity : Activity() {
     private var selectedFirmwareFile: java.io.File? = null
     private var firmwareInspectionPending = false
     private var firmwareInspectionMessage: String? = null
+    private var firmwareInspectionEpoch = 0L
     private var otaServer: OtaPackageServer? = null
     private var otaUpload: OtaControlUpload? = null
     private var otaStatus: DeviceControlProtocol.OtaStatus? = null
@@ -175,8 +176,8 @@ class MainActivity : Activity() {
     private fun navigateBack() {
         when {
             developerPanel -> developerPanel = false
-            currentTab == TAB_PRIVACY || currentTab == TAB_UPDATE -> currentTab = TAB_SETTINGS
-            currentTab != TAB_OVERVIEW -> currentTab = TAB_OVERVIEW
+            currentTab == TAB_PRIVACY || currentTab == TAB_UPDATE -> selectTab(TAB_SETTINGS)
+            currentTab != TAB_OVERVIEW -> selectTab(TAB_OVERVIEW)
             else -> { finish(); return }
         }
         render()
@@ -199,6 +200,8 @@ class MainActivity : Activity() {
         // Device speech remains board-owned. Only the phone's observer and
         // pending local connection generation end when its UI is hidden.
         foreground = false
+        firmwareInspectionEpoch++
+        firmwareInspectionPending = false
         closeDirect()
         closeRuntime(clearReportedState = true)
         super.onStop()
@@ -223,14 +226,14 @@ class MainActivity : Activity() {
                     provisionedDeviceId = ""
                     controlCredentialRequired = true
                     lastAction = "设备已返回认领结果，但本机没有对应的持久化回执；请重新打开认领核对结果"
-                    currentTab = TAB_OVERVIEW
+                    selectTab(TAB_OVERVIEW)
                     render()
                     return
                 }
                 provisionedDeviceId = durableDeviceId
                 if (!legacyConsoleMode) {
                     lastAction = "设备已确认保存设置，可在首页查看连接和语音服务状态。"
-                    currentTab = TAB_OVERVIEW
+                    selectTab(TAB_OVERVIEW)
                     render()
                     return
                 }
@@ -245,7 +248,7 @@ class MainActivity : Activity() {
                     // restores it even if this compatibility mirror could not be saved.
                     lastAction = "傻妞已保存网络设置；本机状态将在重新打开后恢复，请再绑定 App 控制凭据"
                 }
-                currentTab = TAB_OVERVIEW
+                selectTab(TAB_OVERVIEW)
                 render()
             }
             CONSOLE_ENROLLMENT_REQUEST -> importConsoleEnrollment(data)
@@ -254,6 +257,10 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         destroyed = true
+        firmwareInspectionEpoch++
+        selectedFirmwareFile?.delete()
+        selectedFirmwareFile = null
+        inspectedFirmware = null
         closeDirect()
         closeRuntime(clearReportedState = true)
         // Let the queued TLS/session close finish off the main thread.
@@ -375,7 +382,7 @@ class MainActivity : Activity() {
                     isFocusable = true
                     navigation[tab] = this
                     setOnClickListener {
-                        currentTab = tab
+                        selectTab(tab)
                         developerPanel = false
                         render()
                     }
@@ -443,6 +450,14 @@ class MainActivity : Activity() {
         closeOtaServer("升级传输已中断；重新连接后会核对设备状态。")
         directMessage = "手机未连接；设备可继续独立对话。"
         mainHandler.removeCallbacks(directPoll)
+    }
+
+    private fun selectTab(value: Int) {
+        if (currentTab == TAB_UPDATE && value != TAB_UPDATE) {
+            firmwareInspectionEpoch++
+            firmwareInspectionPending = false
+        }
+        currentTab = value
     }
 
     private fun closeOtaServer(message: String? = null) {
@@ -806,7 +821,7 @@ class MainActivity : Activity() {
                         primaryButton(if (directConnecting) "正在连接…" else "连接我的傻妞", !directConnecting) { scanDirect() }
                     if (directSnapshot?.busy == true && directSnapshot?.memoryPending != true)
                         actionButton("停止这次对话", !directPending) { directRequest(DeviceControlProtocol.Command.CANCEL) }
-                    actionButton("使用与设置") { currentTab = TAB_SETTINGS; render() }
+                    actionButton("使用与设置") { selectTab(TAB_SETTINGS); render() }
                 } else {
                     addCard("从第一次对话开始", "连上网络，设置语音服务。\n然后，聊聊今天发生的小事。")
                     primaryButton("添加我的傻妞  →", !busy) { startProvisioning() }
@@ -817,7 +832,7 @@ class MainActivity : Activity() {
                     })
                 }
                 settingsRow("固件更新", "查看设备版本与固件包") {
-                    currentTab = TAB_UPDATE; render()
+                    selectTab(TAB_UPDATE); render()
                 }
             }
             TAB_PERSONALITY -> {
@@ -958,12 +973,12 @@ class MainActivity : Activity() {
                         ?: "连接设备后设置", enabled = directSnapshot?.volume != null &&
                         !directPending && directSnapshot?.busy == false) { editDirectVolume() }
                     settingsRow("聊天风格", directSnapshot?.persona?.let { directPersonas[it] }
-                        ?: "选择你喜欢的陪伴方式") { currentTab = TAB_PERSONALITY; render() }
+                        ?: "选择你喜欢的陪伴方式") { selectTab(TAB_PERSONALITY); render() }
                     settingsRow("设备配置", "配网与添加结果核对", !busy) { startProvisioning() }
                 }
                 sectionTitle("隐私与管理")
-                settingsRow("隐私与权限", "了解语音、凭据与记忆的使用") { currentTab = TAB_PRIVACY; render() }
-                settingsRow("固件更新", "查看设备当前版本与升级状态") { currentTab = TAB_UPDATE; render() }
+                settingsRow("隐私与权限", "了解语音、凭据与记忆的使用") { selectTab(TAB_PRIVACY); render() }
+                settingsRow("固件更新", "查看设备当前版本与升级状态") { selectTab(TAB_UPDATE); render() }
                 if (directConnection != null)
                     settingsRow("断开手机连接", "设备的独立对话不受此操作影响") { closeDirect(); render() }
                 if (bound) settingsRow("移除本机连接资料", "保留设备上的网络与服务配置",
@@ -985,6 +1000,7 @@ class MainActivity : Activity() {
 
     private fun inspectFirmwarePackage(uri: android.net.Uri?) {
         if (uri == null || firmwareInspectionPending) return
+        val epoch = ++firmwareInspectionEpoch
         inspectedFirmware = null
         firmwareInspectionPending = true
         firmwareInspectionMessage = null
@@ -1012,21 +1028,31 @@ class MainActivity : Activity() {
                 }
             }
             mainHandler.post {
-                if (!destroyed) {
-                    firmwareInspectionPending = false
-                    val accepted = inspected.getOrNull()
-                    inspectedFirmware = accepted?.first
-                    accepted?.let { pair ->
-                        val file = pair.second
-                        selectedFirmwareFile?.takeIf { it != file }?.delete()
-                        selectedFirmwareFile = file
-                    }
-                    firmwareInspectionMessage = if (inspected.isFailure)
-                        "无法验证此固件包，请选择完整的 .bkpack 文件后重试。" else null
-                    render()
-                }
+                finishFirmwareInspection(epoch, inspected.getOrNull(), inspected.isFailure)
             }
         }
+    }
+
+    private fun finishFirmwareInspection(
+        epoch: Long,
+        accepted: Pair<BkpackInspector.Metadata, java.io.File>?,
+        failed: Boolean,
+    ) {
+        val current = epoch == firmwareInspectionEpoch && !destroyed && foreground && currentTab == TAB_UPDATE
+        if (!current) {
+            accepted?.second?.delete()
+            return
+        }
+        firmwareInspectionPending = false
+        inspectedFirmware = accepted?.first
+        accepted?.let { pair ->
+            val file = pair.second
+            selectedFirmwareFile?.takeIf { it != file }?.delete()
+            selectedFirmwareFile = file
+        }
+        firmwareInspectionMessage = if (failed)
+            "无法验证此固件包，请选择完整的 .bkpack 文件后重试。" else null
+        render()
     }
 
     private fun statusStrip() {
@@ -1064,14 +1090,14 @@ class MainActivity : Activity() {
         }
         actionButton(primaryAction, !busy) {
             when {
-                runtime != null -> { currentTab = TAB_PERSONALITY; render() }
+                runtime != null -> { selectTab(TAB_PERSONALITY); render() }
                 needsControlBinding -> startConsoleEnrollmentImport()
                 hasBinding -> connect(draftOrigin, draftDeviceId, draftPins, "")
                 else -> startProvisioning()
             }
         }
         if (runtime != null) {
-            actionButton("对话状态") { currentTab = TAB_INTERACTION; render() }
+            actionButton("对话状态") { selectTab(TAB_INTERACTION); render() }
         } else if (!hasBinding && !needsControlBinding) {
             actionButton("连接已有设备", !busy) { startConsoleEnrollmentImport() }
         }
@@ -1097,8 +1123,8 @@ class MainActivity : Activity() {
         actionButton("添加设备") {
             startProvisioning()
         }
-        actionButton("隐私与权限") { currentTab = TAB_PRIVACY; render() }
-        actionButton("设备更新") { currentTab = TAB_UPDATE; render() }
+        actionButton("隐私与权限") { selectTab(TAB_PRIVACY); render() }
+        actionButton("设备更新") { selectTab(TAB_UPDATE); render() }
         if (expectedDevice.isNotBlank() || draftDeviceId.isNotBlank()) {
             actionButton("清除本机连接资料", !busy) { confirmClearProvisioning() }
         }
