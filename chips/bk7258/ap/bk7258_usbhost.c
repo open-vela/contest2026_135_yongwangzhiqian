@@ -158,6 +158,15 @@ struct bk7258_usbhost_s
   uint8_t event_work_queued;
   uint8_t endpoint_count;
   uint8_t active_sync;
+  enum bk7258_usbhost_enumeration_state_e enumeration_state;
+  uint32_t connection_generation;
+  int enumeration_result;
+  uint16_t configuration_length;
+  bool device_descriptor_valid;
+  bool configuration_descriptor_valid;
+  bool configuration_truncated;
+  uint8_t device_descriptor[BK7258_USBHOST_DEVICE_DESC_SIZE];
+  uint8_t configuration_descriptor[BK7258_USBHOST_CONFIG_DESC_MAX];
   bool initialized;
   bool event_sem_initialized;
   bool accepting_events;
@@ -169,9 +178,180 @@ struct bk7258_usbhost_s
 
 static struct bk7258_usbhost_s g_bk7258_usbhost;
 static mutex_t g_bk7258_usbhost_init_lock = NXMUTEX_INITIALIZER;
+/* This survives teardown/init memset and is never reused after exhaustion. */
+static uint32_t g_bk7258_usbhost_generation;
 static volatile int g_bk7258_usb_hcd_init_status = -ENODEV;
 static volatile int g_bk7258_usb_hcd_deinit_status = -ENODEV;
 static volatile int g_bk7258_usb_irq_route_status = -ENODEV;
+
+static int bk7258_usbhost_next_generation(void)
+{
+  if (g_bk7258_usbhost_generation == UINT32_MAX)
+    {
+      return -ENOSPC;
+    }
+
+  g_bk7258_usbhost_generation++;
+  if (g_bk7258_usbhost_generation == 0)
+    {
+      g_bk7258_usbhost_generation = 1;
+    }
+  return 0;
+}
+
+static void bk7258_usbhost_clear_snapshot(
+  FAR struct bk7258_usbhost_s *priv)
+{
+  priv->enumeration_state = BK7258_USBHOST_ENUMERATION_IDLE;
+  priv->enumeration_result = 0;
+  priv->device_descriptor_valid = false;
+  priv->configuration_descriptor_valid = false;
+  priv->configuration_length = 0;
+  priv->configuration_truncated = false;
+  memset(priv->device_descriptor, 0, sizeof(priv->device_descriptor));
+  memset(priv->configuration_descriptor, 0,
+         sizeof(priv->configuration_descriptor));
+}
+
+static void bk7258_usbhost_cache_descriptor(
+  FAR struct bk7258_usbhost_s *priv, uint32_t generation,
+  FAR const struct usb_ctrlreq_s *req, FAR const uint8_t *buffer,
+  uint32_t actual_length)
+{
+  uint16_t requested_length;
+  uint16_t total_length;
+  uint8_t descriptor_type;
+  irqstate_t flags;
+
+  if (req == NULL || buffer == NULL ||
+      req->type != (USB_REQ_DIR_IN | USB_REQ_TYPE_STANDARD |
+                    USB_REQ_RECIPIENT_DEVICE) ||
+      req->req != USB_REQ_GETDESCRIPTOR)
+    {
+      return;
+    }
+
+  requested_length = (uint16_t)req->len[0] |
+                     ((uint16_t)req->len[1] << 8);
+  if (actual_length > requested_length)
+    {
+      return;
+    }
+
+  descriptor_type = req->value[1];
+  if ((descriptor_type == USB_DESC_TYPE_DEVICE &&
+       (requested_length < USB_SIZEOF_DEVDESC ||
+        actual_length < USB_SIZEOF_DEVDESC)) ||
+      (descriptor_type == USB_DESC_TYPE_CONFIG &&
+       (requested_length < USB_SIZEOF_CFGDESC ||
+        actual_length < USB_SIZEOF_CFGDESC)))
+    {
+      return;
+    }
+  if (descriptor_type != USB_DESC_TYPE_DEVICE &&
+      descriptor_type != USB_DESC_TYPE_CONFIG)
+    {
+      return;
+    }
+  if (buffer[1] != descriptor_type || buffer[0] < USB_SIZEOF_CFGDESC ||
+      (descriptor_type == USB_DESC_TYPE_DEVICE &&
+       buffer[0] != USB_SIZEOF_DEVDESC))
+    {
+      return;
+    }
+  total_length = descriptor_type == USB_DESC_TYPE_CONFIG ?
+    (uint16_t)((uint16_t)buffer[2] | ((uint16_t)buffer[3] << 8)) :
+    (uint16_t)USB_SIZEOF_DEVDESC;
+  if (total_length < USB_SIZEOF_CFGDESC)
+    {
+      return;
+    }
+
+  flags = spin_lock_irqsave(&priv->lock);
+  if (!priv->initialized || priv->shutting_down ||
+      !priv->rhport.hport.connected ||
+      priv->connection_generation != generation)
+    {
+      spin_unlock_irqrestore(&priv->lock, flags);
+      return;
+    }
+
+  if (descriptor_type == USB_DESC_TYPE_DEVICE)
+    {
+      memcpy(priv->device_descriptor, buffer, USB_SIZEOF_DEVDESC);
+      priv->device_descriptor_valid = true;
+    }
+  else
+    {
+      uint32_t copied = actual_length < total_length ? actual_length : total_length;
+
+      if (copied > BK7258_USBHOST_CONFIG_DESC_MAX)
+        {
+          copied = BK7258_USBHOST_CONFIG_DESC_MAX;
+        }
+      memcpy(priv->configuration_descriptor, buffer, copied);
+      priv->configuration_descriptor_valid = true;
+      priv->configuration_length = (uint16_t)copied;
+      priv->configuration_truncated = copied < total_length;
+    }
+  spin_unlock_irqrestore(&priv->lock, flags);
+}
+
+static void bk7258_usbhost_enumeration_complete(
+  FAR struct bk7258_usbhost_s *priv, uint32_t generation, int result)
+{
+  irqstate_t flags = spin_lock_irqsave(&priv->lock);
+
+  if (priv->initialized && !priv->shutting_down &&
+      priv->rhport.hport.connected &&
+      priv->connection_generation == generation)
+    {
+      priv->enumeration_result = result;
+      priv->enumeration_state = result == 0 ?
+        BK7258_USBHOST_ENUMERATION_COMPLETE :
+        BK7258_USBHOST_ENUMERATION_FAILED;
+    }
+  spin_unlock_irqrestore(&priv->lock, flags);
+}
+
+int bk7258_usbhost_snapshot(FAR struct bk7258_usbhost_snapshot_s *snapshot)
+{
+  FAR struct bk7258_usbhost_s *priv = &g_bk7258_usbhost;
+  irqstate_t flags;
+
+  if (snapshot == NULL)
+    {
+      return -EINVAL;
+    }
+
+  /* Initialization and teardown memset the private state while holding this
+   * mutex.  Do not wait behind a UI snapshot request. */
+  if (nxmutex_trylock(&g_bk7258_usbhost_init_lock) < 0)
+    {
+      return -EAGAIN;
+    }
+
+  flags = spin_lock_irqsave(&priv->lock);
+  memset(snapshot, 0, sizeof(*snapshot));
+  snapshot->initialized = priv->initialized;
+  snapshot->connected = priv->rhport.hport.connected;
+  snapshot->speed = priv->rhport.hport.speed;
+  snapshot->connection_generation = priv->connection_generation;
+  snapshot->enumeration_state = priv->enumeration_state;
+  snapshot->enumeration_result = priv->enumeration_result;
+  snapshot->device_descriptor_valid = priv->device_descriptor_valid;
+  memcpy(snapshot->device_descriptor, priv->device_descriptor,
+         sizeof(snapshot->device_descriptor));
+  snapshot->configuration_descriptor_valid =
+    priv->configuration_descriptor_valid;
+  snapshot->configuration_length = priv->configuration_length;
+  snapshot->configuration_truncated = priv->configuration_truncated;
+  memcpy(snapshot->configuration_descriptor, priv->configuration_descriptor,
+         sizeof(snapshot->configuration_descriptor));
+  spin_unlock_irqrestore(&priv->lock, flags);
+  nxmutex_unlock(&g_bk7258_usbhost_init_lock);
+  return 0;
+}
 
 static inline FAR struct bk7258_usbhost_s *bk7258_priv_from_drvr(
   FAR struct usbhost_driver_s *drvr)
@@ -465,6 +645,20 @@ static void bk7258_update_connection(FAR struct bk7258_usbhost_s *priv,
   priv->vendor_hport.speed = speed;
   priv->rhport.hport.connected = connected;
   priv->rhport.hport.speed = speed;
+  if (changed)
+    {
+      if (bk7258_usbhost_next_generation() < 0)
+        {
+          priv->accepting_events = false;
+          priv->shutting_down = true;
+          priv->enumeration_result = -ENOSPC;
+          priv->enumeration_state = BK7258_USBHOST_ENUMERATION_FAILED;
+          spin_unlock_irqrestore(&priv->lock, flags);
+          return;
+        }
+      priv->connection_generation = g_bk7258_usbhost_generation;
+      bk7258_usbhost_clear_snapshot(priv);
+    }
   if (!connected)
     {
       priv->rhport.hport.devclass = NULL;
@@ -907,6 +1101,7 @@ static int bk7258_setup_urb(FAR struct bk7258_usbhost_s *priv,
   struct usb_setup_packet setup;
   struct usbh_urb urb;
   irqstate_t flags;
+  uint32_t generation;
   int ret;
 
   if (req == NULL || ep == NULL || !ep->ep0 ||
@@ -946,9 +1141,16 @@ static int bk7258_setup_urb(FAR struct bk7258_usbhost_s *priv,
   priv->active_sync++;
   ep->sync_active = true;
   ep->sync_urb = &urb;
+  generation = priv->connection_generation;
   spin_unlock_irqrestore(&priv->lock, flags);
 
   ret = bk7258_sdk_error(usbh_submit_urb(&urb));
+
+  if (ret == 0)
+    {
+      bk7258_usbhost_cache_descriptor(priv, generation, req, buffer,
+                                      urb.actual_length);
+    }
 
   flags = spin_lock_irqsave(&priv->lock);
   ep->sync_active = false;
@@ -1128,8 +1330,10 @@ static int bk7258_enumerate(FAR struct usbhost_connection_s *conn,
 {
   FAR struct bk7258_usbhost_s *priv = bk7258_priv_from_conn(conn);
   struct usb_setup_packet setup;
+  irqstate_t flags;
   bool connected;
   uint8_t speed;
+  uint32_t generation;
   int ret;
 
   if (hport != &priv->rhport.hport)
@@ -1137,9 +1341,14 @@ static int bk7258_enumerate(FAR struct usbhost_connection_s *conn,
       return -EINVAL;
     }
 
+  flags = spin_lock_irqsave(&priv->lock);
+  generation = priv->connection_generation;
+  spin_unlock_irqrestore(&priv->lock, flags);
+
   ret = bk7258_read_root_status(priv, &connected, &speed);
   if (ret < 0 || !connected)
     {
+      if (ret < 0) bk7258_usbhost_enumeration_complete(priv, generation, ret);
       return ret < 0 ? ret : -ENODEV;
     }
 
@@ -1157,6 +1366,7 @@ static int bk7258_enumerate(FAR struct usbhost_connection_s *conn,
   ret = bk7258_sdk_error(usbh_roothub_control(&setup, NULL));
   if (ret < 0)
     {
+      bk7258_usbhost_enumeration_complete(priv, generation, ret);
       return ret;
     }
   nxsig_usleep(50 * 1000);
@@ -1164,11 +1374,26 @@ static int bk7258_enumerate(FAR struct usbhost_connection_s *conn,
   ret = bk7258_read_root_status(priv, &connected, &speed);
   if (ret < 0 || !connected)
     {
+      if (ret < 0) bk7258_usbhost_enumeration_complete(priv, generation, ret);
       return ret < 0 ? ret : -ENODEV;
     }
   bk7258_update_connection(priv, true, speed, false);
 
-  return usbhost_enumerate(hport, &hport->devclass);
+  flags = spin_lock_irqsave(&priv->lock);
+  if (!priv->initialized || priv->shutting_down ||
+      !priv->rhport.hport.connected)
+    {
+      spin_unlock_irqrestore(&priv->lock, flags);
+      return -ENODEV;
+    }
+  generation = priv->connection_generation;
+  priv->enumeration_state = BK7258_USBHOST_ENUMERATION_RUNNING;
+  priv->enumeration_result = 0;
+  spin_unlock_irqrestore(&priv->lock, flags);
+
+  ret = usbhost_enumerate(hport, &hport->devclass);
+  bk7258_usbhost_enumeration_complete(priv, generation, ret);
+  return ret;
 }
 
 static void bk7258_initialize_driver(FAR struct bk7258_usbhost_s *priv)
@@ -1354,6 +1579,11 @@ FAR struct usbhost_connection_s *bk7258_usbhost_initialize(void)
     {
       nxmutex_unlock(&g_bk7258_usbhost_init_lock);
       return &priv->conn;
+    }
+  if (g_bk7258_usbhost_generation == UINT32_MAX)
+    {
+      nxmutex_unlock(&g_bk7258_usbhost_init_lock);
+      return NULL;
     }
 
   if (bk7258_usbhost_has_ownership(priv) || priv->shutting_down)

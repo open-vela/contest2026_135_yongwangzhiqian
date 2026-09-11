@@ -12,7 +12,8 @@
 #include <nuttx/config.h>
 
 #if (defined(CONFIG_BK7258_APP_AGENT) || \
-     defined(CONFIG_BK7258_VOICE_SERVICE)) && defined(CONFIG_BK7258_MIC) && \
+     defined(CONFIG_BK7258_VOICE_SERVICE) || \
+     defined(CONFIG_DOLPHIN_RECORDER)) && defined(CONFIG_BK7258_MIC) && \
     !defined(CONFIG_MEDIA)
 
 #include <errno.h>

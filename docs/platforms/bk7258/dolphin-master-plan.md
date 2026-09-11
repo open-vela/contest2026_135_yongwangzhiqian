@@ -1,8 +1,130 @@
 # 小海豚固件（OpenVela / BK7258）
 
-状态：用户确认0.1.0+10可用，DMA2D滑动体验获单次物理确认；实际FPS未量化。此前信道卡死、拖动和闪烁均已逐项修复；BLE射频及多轮工具切换仍待验收，整体功能未完成。
+状态：0.1.0+18 Files文件系统容量、目录浏览及返回已获用户实板确认；本轮成果进入提交发布，后续主线切回傻妞。USB/ADC/相机未完成项仍保留，不宣称Dolphin全功能完成。
 
-## 当前目标：无线诊断第一版（0.1.0+10 DMA2D流畅度待实测）
+## 当前目标：T5 多功能便携工具（2026-09-10扩展范围）
+
+基线为`d633799`，板上direct包0.1.0+10。现有未跟踪日志及三份撤回SD探针保留，不进入本轮实现。以下以用户最新范围覆盖旧M0及无线第一版限定；旧记录仅作版本证据。
+
+| 能力 | 已确认链路 | 当前缺口与本轮验收 |
+|---|---|---|
+| 显示/触摸 | T35P128CQ-02 ILI9488 RGB、GT1151 → framebuffer/input → 双缓冲+DMA2D → Dolphin；用户已确认卡死/拖动/闪烁修复 | 保留基线，工具详情/取消/重入回归；FPS未量化 |
+| Wi-Fi/BLE | AP worker与radio_mode、既有scan/monitor及NuttX BLE host → 有界列表 | 详情/报告/保存错误；实板13含AP本地32条带截断，CP wire仍4条；32条射频、BLE及连续切换待验收 |
+| SD | TF P2–P5，一位SDIO避让P10/P11下载UART；FAT `/mnt/tf` → 只读浏览已接入 | 报告、录音、图片、受控复制；卡检测无有效实板证据，仍仅开机前插卡，不声称热插拔 |
+| 按键 | SW5=P12/ADC14单键，数字别名与SARADC不能并用；LED P1与控制台共享 | 只按真实单键设计导航/确认/返回；不套用AIDK三键，不驱动共享LED |
+| 麦克风 | 双模拟麦→板级mic配置→AP `/dev/audio` NuttX lower-half，配置已启用 | 复用已有采集接口，显式WAV录音+相对电平+有界保存；不启动云语音 |
+| USB Host | 原生接口存在，已有BK7258 HCD→NuttX waiter/class；当前产品未启用 | 核实VBUS/连接器策略后启用MSC及设备信息接口；实物待用户说明，不能跳过软件接入 |
+| 相机 | DVP连接器/P13、P15 SCCB及P27–P39数据，已有V4L2绑定 | RGB LCD与DVP真实引脚冲突；装配未知，先核对安全可用模式，不在屏幕主配置硬开摄像头 |
+| 缺失模块 | 无已确认Sub-GHz、NFC、125k RFID、IR、iButton模块 | 排除，不建立占位菜单 |
+
+执行批次：先完成无线详情→显式保存SD报告→文件浏览；其后按接口准备程度接录音/USB交换，单独处理相机冲突及单键导航。每批记录真实输入、退出/取消、资源回收和保存结果，未实测不称完成。
+
+调度事实：现有collaboration支持指定模型及工具执行；`dolphin_publish_check`已以`gpt-5.6-terra` medium完成上一轮实际源码审查，现复用该代理实施app/dolphin及对应host测试。根代理处理硬件/资源所有权及独占COM3构建刷写，Shell/编译器处理机械工作。不宣称后端计费或路由独立验证。新增`gpt-5.6-luna`请求因宿主agent thread limit被拒绝，未执行，不再加代理；无付费入口/额度变更。
+
+执行续接：原terra代理报告当前上下文token余额耗尽（非API额度错误），随后新建指定 `gpt-5.6-luna` 的 `dolphin_connect` 成功，并实际完成临时Wi-Fi连接UI与host用例。再申请并行terra被宿主thread limit拒绝，未执行；继续复用luna串行实现，不把普通UI交回根模型。
+
+目标管理工具仍保存旧无线目标为blocked，并拒绝创建新目标（unfinished goal）；不把旧目标冒充完成。本页作为本轮实际恢复入口，该工具状态不阻塞已授权开发。
+
+## 2026-09-11 本轮提交检查点
+
+用户在18容量显示、目录浏览与返回复测请求后回复“正常”，据此记录该版本对应正常路径实板通过；镜像与证据沿用容量小节。随后用户授权提交推送，再回到傻妞开发。
+
+本轮提交范围：Dolphin无线连接/显式断网采样/网关检查及报告、WAV录音、Files容量/扫描栈修复；包含默认关闭的ADC单键、受控复制、USB快照/UI候选与对应测试，后者未实板验收。复用共享media_recorder接入，不改SDK。排除原始日志及三份引用已撤回实现的SD探针。
+
+发布验证：`stall/publication-host.log`记录既有Dolphin check、真实LVGL ui-check通过；wifi_async 4项、USB snapshot 4项、ADC 1项通过。当前主配置构建及18下载/启动/用户确认沿用已有有效证据。未重复全量clean或签名，未操作密钥。Git结果以实际提交及远端SHA为准；不将推送算作未验收外设通过。
+
+## 网关检查接入（0.1.0+17已安装）
+
+`gpt-5.6-luna`复用既有CPU0工作线程和NuttX psock ICMP，实现ping_async/poll/cancel以及NETWORK的CHECK GATEWAY。AP请求固定PING，local_ping区分其它票据；前后检查取消，等socket关闭后才发布完成并释放busy。CP wire与SDK不变。页面显示真实网关响应/错误，可保存报告；离页仍消费旧任务但不重绘，结果不代表互联网连通。既有wifi_async 4项和真实LVGL host测试通过。
+
+固定流水线已完成增量构建、打包、校验与目标预检，日志`stall/{build-gateway17,package-gateway17,verify-gateway17,preflight-gateway17}.log`；8MiB direct镜像SHA256 `72275eeb061b0d3623a8db41122c944ade5af34cc204d3fb04b1c9d20e75de38`，同设备data保持，T5 COM3 PNP身份匹配。`stall/hil-gateway17/result.json`下载成功marker全部通过；`stall/boot-gateway17/serial.txt`包含FINALINIT PASS、SRAM-DMA2D及显示触摸初始化。已请求从UI连接Wi-Fi→CHECK GATEWAY→保存报告→再次检查并取消；真实结果待回报，不能用启动通过代替。
+
+后续独立推进Files容量显示，所有statfs在现有后台扫描worker中，不能因显示容量再次阻塞LVGL。USB供电/实物、相机RGB冲突和ADC校准仍未解决，不用主机测试替代实板验收。
+
+### 0.1.0+17网关实板确认
+
+用户明确反馈“Wi-Fi 验证检查、报告保存及取消返回验证成功”，据此记录17的网关检查、报告保存、取消返回正常路径通过。对应镜像SHA256 `72275eeb061b0d3623a8db41122c944ade5af34cc204d3fb04b1c9d20e75de38`，下载/启动证据沿用`stall/hil-gateway17/result.json`和`stall/boot-gateway17/serial.txt`。功能依据为用户物理反馈，未新增抓包或报告读回；不外推互联网连通、所有异常路径或USB通过。
+
+### Files容量显示（0.1.0+18已安装）
+
+`gpt-5.6-luna`在既有扫描worker加入标准statfs，锁内发布文件系统总量/可用量及错误；64位乘法溢出检查。容量失败仍继续目录扫描，LVGL不执行额外文件系统I/O，不新增线程、挂载或格式化。现有UI host测试覆盖正常容量、EIO、EOVERFLOW且文件仍可浏览；`stall/build-files-capacity.log`目标增量构建通过。复用该有效构建生成18，`stall/package-capacity18.log`与`verify-capacity18.log`通过；8MiB镜像SHA256 `2aca538a6fbbccfcc6b362dba242058ab4b1b005b0ee8a59b9f3a2f863db383a`，同设备data保持。`stall/hil-capacity18/result.json`下载通过；`stall/boot-capacity18/serial.txt`包含FINALINIT PASS、SRAM-DMA2D和显示触摸初始化。待用户进入Files确认总量/可用量显示且目录、返回正常；不宣称物理卡容量或本次UI已实测。
+
+17网关验收首次55秒被动采集`stall/gateway17-acceptance.raw`为0字节，采集已结束，用户真实结果待回报；不据此判连接失败。保留17供用户操作，不用下一候选打断验收。未提交、推送或清理用户数据。
+
+## 0.1.0+16切换验收确认
+
+用户在“连接Wi-Fi→CHANNEL STATS→DISCONNECT & SAMPLE→统计→START AGAIN”明确复测步骤后回复“好了，继续推进”，据此记录该路径用户实板通过。固件身份及下载/启动证据沿用下节16；未新增串口采样日志，不外推异常恢复、BLE或其它外设验收。下一批复用已有NuttX ICMP与工作线程实现显式网关检查、取消/结果和报告，不把网关响应等同互联网可用。
+
+## 当前修复：已连接网络与信道采样互斥
+
+用户确认15连接成功，随后CHANNEL STATS及START AGAIN显示Sampling stopped(-16)。源码 `bk7258_wifi_channels_run` 明确在LINK_CONNECTED时返回-EBUSY，避免逐信道monitor静默断开STA；重复重试不能改变状态。这不是已证实的无线故障，原互斥保护保留。
+
+最小处置：普通进页检查链路并说明互斥；仅显式DISCONNECT & SAMPLE走新增AP-local请求，在既有worker中停止STA、等断开并同步native link后开始采样，失败或取消不继续，不自动重连。CP wire结构、版本、SDK及板配置不变。`gpt-5.6-luna`实现新AP-local `channels_switch_async`及显式UI按钮，公开link-state枚举保持原数值。旧票据未消费时不重入；worker检查预取消、stop、断开等待与native同步，成功stop后清除saved连接。现有wifi_async 4项测试（含stop失败、链路超时、sync失败、stop→sync→monitor顺序及预取消）和真实LVGL UI测试通过。`stall/build-channels16.log`增量构建及`verify-channels16.log`校验通过，8MiB direct镜像SHA256 `e2350f4bd2eec4b5c07cc6201ace28d52692148cfa441ef1462f1e04cc269464`，同设备data保持。16已完成COM3下载（`stall/hil-channels16/result.json`全部成功marker）和RTS启动（`stall/boot-channels16/serial.txt`含FINALINIT PASS、SRAM-DMA2D、显示触摸初始化）。复测：连接Wi-Fi→CHANNEL STATS说明页→DISCONNECT & SAMPLE→真实统计→START AGAIN；返回NETWORK后需手动重连。15连接证据为用户实测反馈，不外推16切换通过。无提交、推送或SDK修改。
+
+## 当前修复：CONNECT点击后表单空白（0.1.0+15已安装）
+
+用户进一步澄清14的现象是“没有失败，点击connect没反应然后输入密码栏空白”，不是已经得到Connect failed错误。当前源码在async受理/拒绝后均清空输入，受理后的提示追加在较长表单底部，缺乏可见状态。chip提交函数先复制SSID和密码到独占请求，再返回；不能仅因UI清空推断发送空密码或SDK故障。失败采集`stall/connect14-failure.raw`55秒0字节，没有射频错误证据。
+
+`gpt-5.6-luna`最小修复：同步拒绝保留masked输入及重试能力；安全网络空密码在UI拒绝；受理后清旧表单，进入独立WI-FI CONNECTING页，显示SSID/30秒期限/CANCEL，再绑定ticket与generation，避免换页误取消。另修正清屏后访问旧输入对象的UAF，改清屏前清理。现有LVGL host验证提交拒绝、再次提交、进度页、取消及离页通过。
+
+增量构建`stall/build-connect15.log`、包校验`stall/verify-connect15.log`通过；8MiB direct镜像SHA256 `2df4e4b4ff1a83728382bea9748072ac317f035f68121a295eb8d1eba979b154`，data与同设备基底逐字节一致。候选包含已完成报告增强，USB/ADC/相机保持关闭；COM3下载成功marker齐全（`stall/hil-connect15/result.json`）；RTS启动包含FINALINIT PASS、SRAM-DMA2D和显示触摸初始化（`stall/boot-connect15/serial.txt`）。当前待用户从UI重新提交并观察进度/结果；启动通过不代替连接通过。未提交或推送。
+
+## 当前检查点：Wi-Fi连接（0.1.0+14，2026-09-11）
+
+- 复用 `gpt-5.6-luna` 实现连接候选，根代理负责COM3独占构建、下载和启动；现有host已验证输入、取消、离页旧结果隔离。连接仅临时生效，不持久化密码。
+- `stall/build-connect14.log`增量构建通过；`verify-connect14.log`校验通过；direct 8MiB镜像SHA256 `5010b120ad6e4deeed16716ceb7f0f95c66ed5a4c414dd0044660a3e2abdfdbc`。同设备data逐字节保持，TF未擦写，非签名OTA。
+- 当前枚举COM3 CH342 A/MI00与原设备一致。`stall/hil-connect14/result.json`全部成功marker通过；RTS后`stall/boot-connect14/serial.txt`包含FINALINIT PASS、SRAM-DMA2D与显示触摸初始化。已安装不等于实际Wi-Fi连接通过。
+- 最小物理步骤：NETWORK → SCAN WI-FI → 自有热点 → CONNECT，板端输入密码，检查IP/网关并返回首页再进入NETWORK。已请求操作，真实结果待回报；`stall/connect14-acceptance.raw`首次55秒被动窗口为0字节，采集已结束，不将零日志判作连接失败或假称仍在监听。不在会话或日志输入密码。
+- 后续源码已增加连接状态报告并通过现有LVGL host测试，尚不在14内。USB-A原生信号与CH342 Type-C分离已由板README确认，VBUS供电策略仍缺证据，Host/ADC/相机保持关闭。未提交或推送。
+
+### 后续工具源码（未安装，2026-09-11）
+
+- `gpt-5.6-luna` 继续修改现有UI及host harness：连接成功页可显式保存真实链路状态；Wi-Fi/BLE列表可保存本次有界结果，注明发现/显示/截断数量，报告缓冲不足保留完整行并注明遗漏条数。复用原后台保存线程，不保存密码。根代理发现正文/换行/NUL容量边界后最小修正，现有harness增加exact-fit与保护字节验证通过。
+- USB Host信息页仅在 `CONFIG_BK7258_USBHOST` 生效时出现，使用公开只读快照显示枚举状态、VID/PID、设备类、速度及描述符有效性/截断；手动刷新，无周期清屏、无初始化和供电副作用。现有真实LVGL host覆盖已连接、未初始化、未连接、枚举失败、忙及离页不重绘。USB MSC挂载、受控复制的产品入口尚未接入，不能以此页宣称USB文件交换完成。
+- 本批host命令为 `make -C tests/host/dolphin ui-check`，代理实际执行并返回 `DOLPHIN_UI_HOST_PASS`。完整当前配置增量构建通过：`stall/build-tools-next-final.log`。USB宏启用的UI翻译单元检查通过：`stall/usb-ui-target-compile.log`（存在原录音状态文本的有界snprintf截断警告，非零诊断通过）；Host驱动最终翻译单元零诊断：`stall/usbhost-final-target-compile.log`。这些不是启用USB的完整ELF或射频/USB物理验收。
+- 板上保持14等待实际连接反馈；后续源码未打包安装，无提交或推送。USB-A VBUS原理图/现有U盘条件已向用户询问；相机RGB引脚冲突、ADC P12所有权与阈值验证继续独立待处理。无需重做已通过的13文件保存基线，修改后的功能仍需对应版本验收。
+
+## 当前检查点：FILES修复（0.1.0+13）
+
+**已修复故障记录：** 用户报告0.1.0+12点击FILES卡死。COM3 `free`仍正常返回，证据`stall/files-stall.raw`，不能判定CP整体死机。AP实际默认pthread栈2048B；FILES扫描线程未设attr，scan及嵌套path校验各有3×192B路径数组再叠加stat/FAT调用，栈余量明显不足，作为首个可区分假设。先仅将扫描线程显式设16KiB，与已有preview/report存储线程一致；不同时改目录渲染。录音和报告实板闭环暂停于此，不能计通过。 实际目标对象反汇编确认scan栈帧712B、嵌套verify栈帧704B，合计1416B（尚未计libc/FAT），见`stall/files-stack-before.txt`。0.1.0+13显式16KiB扫描栈候选已构建及校验，SHA256 `af12ab9a55744ac370b7c8be5a6b0beccd6582f89ddece8e2aaa5a38634152f8`；同设备data保留，COM3下载及RTS启动通过（`stall/hil-files-stack/result.json`、`stall/boot-files-stack/serial.txt`），已请求真实FILES→HOME→FILES复测并开启55秒采集；结果未确认。该候选同时包含已完成主机及目标构建的AP32扫描改动；文件故障修复不改64项渲染策略。
+
+
+- 无线详情及报告由明确指定的 `gpt-5.6-terra` 代理实现并运行现有 `tests/host/dolphin` 的 `check ui-check`：有界快照、详情页、显式 `SAVE REPORT`、独占创建、写入/同步/关闭错误及旧页面完成隔离。报告位置 `/mnt/tf/dolphin/reports`，经现有 Files 浏览；未自动覆盖或删除。
+- 0.1.0+11 增量构建、delivery 校验及同设备 data 逐字节保留通过。8 MiB SHA256 `3fb93aab20187b827ed56340bd638a410396462fe993aa94a27db8ca0db306ac`；COM3 下载与 RTS 启动通过，日志确认 `FINALINIT PASS`、`render=sram-dma2d` 和显示/触摸初始化。证据工作区 `out/dolphin-t5-wireless-20260910/stall/{build-reports.log,verify-reports.log,image-reports.json,hil-reports/result.json,boot-reports/serial.txt}`。已请求用户执行真实扫描→详情→保存→Files 打开，尚无该流程实板通过结论。
+- 录音源码复用现有 `bk7258_agent_media_recorder.c`/NuttX audio，以 `DOLPHIN_RECORDER` 单独接入，不开启语音助手。实际候选构建通过（`stall/build-recorder.log`），公共 media_recorder 头与链接有效；尚未安装。现有主机 harness 覆盖 WAV 头、STOP、ENOSPC、线程失败 FD 所有权与关闭失败防重入。上板前补充读长度边界和 UI 错误保留；不得以 mock PCM 代替真实录音。
+- 0.1.0+12 录音候选最终增量构建、有效 `DOLPHIN_RECORDER`/MIC 配置及 delivery 校验通过。8 MiB SHA256 `da0c89cc4a1062ed77795a1ad4f1bf5bc9bae502d851a4e81f89eb5a505bf1fa`；同设备data保留，COM3 HIL与RTS启动通过，显示/触摸仍走DMA2D。证据 `stall/{build-recorder-final.log,verify-recorder.log,image-recorder.json,hil-recorder/result.json,boot-recorder/serial.txt}`。已请求用户从 RECORDER 开始真实说话并停止保存；未获录音实测结果，不能写成麦克风闭环通过。
+- 后续AP本地Wi-Fi32条源码和定向主机测试通过，CP wire保持4条；有界选择算法复用，新增约1552字节chip缓存及1344字节UI快照。最终目标构建进行中，尚未下载；当前实板仍为12，不用主机结果冒充32条射频实测。
+- USB Host 的标准 HCD、waiter 和 MSC notifier 可复用，但当前板资料未确定原生口 VBUS 控制/供电安全条件；只阻塞相关硬件启用，不阻塞其他功能。摄像头装配及可用于验收的现有 USB 外设待用户说明。无 NFC 等缺失模块入口。
+
+### 后续源码候选（未安装）
+
+- 安全类型可读名称及未知值保留数值：既有Wi-Fi/UI主机测试与目标增量构建通过，`stall/build-security-label.log`；实板13尚未包含此后续名称改动。
+- USB Host只读枚举快照：复用现有GET_DESCRIPTOR真实返回，不主动新增USB传输；主机短包/截断/generation用例通过，高风险生命周期复核仍在修正，未启用Host及VBUS、未目标构建、未实测。
+- USB快照后续已补真实C运行用例（共4项，代数跨priv重置/饱和拒绝/snapshot忙返回/真实描述符边界），完整driver目标编译器检查通过：`stall/usbhost-final-target-compile.log`；属于显式USB宏下的翻译单元检查，不是启用Host的ELF或物理验收。
+- 单键ADC消费：通过标准ADC设备后台采样及有界事件队列驱动LVGL手势，默认关闭。host手势逻辑通过，不代表ADC实测；配置阈值未确定时拒绝输入。现有CP `GPIO_LOWERHALF` 已占P12，启用SARADC前须解除该互斥，并配套CP SARADC_SERVER；本批尚未改板配置。RPMsgFS现有ioctl表不支持GPIOC_READ，不能简单把CP `/dev/gpio1`路径当作AP可用按键接口。
+
+- 临时Wi-Fi连接UI退出密码页的已释放对象访问已修正：先清除密码引用再删除LVGL对象；提交后禁用输入，离页取消仍消费旧事务但不重绘。修复后目标构建 `stall/build-connect-fixed.log` 通过，现有真实LVGL主机回归 `stall/ui-connect-recheck.log` 通过。尚未安装或实测连接；USB与ADC也保持未启用，当前板仍是13。
+
+- 相机切换核对：现有 `bk7258_lcd_setpower()`只调用显示使能及背光回调，不释放RGB引脚；因此不能将FB关屏等同于安全DVP切换。触摸与SCCB还共享P13/P15，需同一I2C生命周期协调。未改板互斥配置，未在RGB主版启用相机。
+
+### 0.1.0+13实板反馈
+
+用户在下载及启动后回复“可以了”，确认本次FILES卡死修复。55秒只读窗口没有新字节（`stall/files-stack-acceptance.raw`），因此证据是用户物理确认，不虚构扫描完成日志。栈余量不足是本次最小修复依据；未获得溢出异常栈，不声称有完整崩溃回溯。下一步保持13验证报告保存及真实录音；未变化的文件访问已恢复不需再次扩大排障。
+
+### 2026-09-11 报告与录音实板确认
+
+用户在明确询问“扫描报告保存成功、录音停止后生成WAV，且两者都能在Files中看到”后回复“确认”。据此将这三项正常路径记录为T5-Board 0.1.0+13用户实板验收通过；连同此前Files不再卡死的确认，完成本批保存及浏览正常路径。对应已安装镜像SHA256：`af12ab9a55744ac370b7c8be5a6b0beccd6582f89ddece8e2aaa5a38634152f8`，下载/启动证据沿用`stall/hil-files-stack/result.json`与`stall/boot-files-stack/serial.txt`。
+
+本次功能证据为用户明确反馈，未新增串口日志、文件读回或音频解码证据；不外推音质、WAV内容完整性、异常恢复、长稳或USB复制通过。后续候选连接UI、USB后端与ADC未安装；后续先推进Wi-Fi连接实板闭环，USB仍须核实供电与实际外设条件。本次仅更新验收记录，未刷写、提交或推送。
+
+### 2026-09-11 文件交换后端检查点
+
+`gpt-5.6-luna` 实现受控SD/USB单文件复制后端及默认关闭的构建接入；未增加假可用菜单，未启用USB供电。根代理针对线程生命周期确认4KiB局部缓冲不能使用AP默认2KiB栈，已改显式16KiB及创建前detached属性，属性/创建失败无文件副作用。路径文件系统检查在worker执行，不阻塞UI入口；独占创建禁止覆盖，取消/失败保留并标记不完整文件，不自动删除。
+
+现有host测试通过（`stall/copy-final-host.log`），实际AP编译器翻译单元检查零诊断（`stall/copy-target-compile.log`）；不是已启用的ELF或USB实测。CMake/Make共用默认关闭`DOLPHIN_FILE_COPY`，存储根配置不依赖NSH命令目录。当前板仍为13，报告保存和真实录音待物理验收；USB供电及现有外设条件未确认，相机与RGB引脚冲突仍未解决。未提交、推送或重新刷机。
+
+## 前一批无线第一版记录
+
 
 最新实板反馈：用户确认进入 CHANNEL STATS 后黑屏卡住；0.1.0+6该功能验收失败。COM3被动15秒、只读状态命令12秒及COM4被动10秒均0字节，两CH342接口仍枚举OK。用户说重启后的50秒被动窗口也没有字节，因此未捕获崩溃栈或复位事件，不能仅凭零日志判定CPU死机。证据`out/dolphin-t5-wireless-20260910/stall/`。
 
