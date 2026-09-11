@@ -1101,9 +1101,10 @@ config BK7258_BT_HOST_BUFFER_SIZE_COMPAT
 		opcode or status.
 
 config BK7258_BT_CONN_RX_REF_COMPAT
-	bool "N13 inbound ACL connection-reference compatibility wrapper"
+	bool "Inbound ACL connection-reference compatibility wrapper"
 	default n
-	depends on BK7258_BT_IPC_TRACE
+	depends on BK7258_BT_IPC && BK7258_AP_CORE
+	depends on WIRELESS_BLUETOOTH_HOST
 	---help---
 		Release the caller-owned bt_conn reference after the stock
 		bt_conn_receive implementation returns.  The current NuttX hci_acl
@@ -1111,14 +1112,15 @@ config BK7258_BT_CONN_RX_REF_COMPAT
 		ACL packet but does not release it, so a completed GATT session leaves
 		the single connection slot permanently occupied.
 
-		This chip-owned link wrapper keeps NuttX unmodified.  The N13 verifier
-		checks the exact upstream ownership pattern and fails closed if the
-		NuttX implementation changes, preventing a future double release.
+		This chip-owned link wrapper keeps NuttX unmodified.  The public build
+		entry's kernel_compat.json source checks pin the reviewed ownership
+		pattern; target regression remains required when that source changes.
 
 config BK7258_BT_ATT_MTU_COMPAT
-	bool "N13 oversized peer ATT MTU compatibility wrapper"
+	bool "Oversized peer ATT MTU compatibility wrapper"
 	default n
-	depends on BK7258_BT_IPC_TRACE
+	depends on BK7258_BT_IPC && BK7258_AP_CORE
+	depends on WIRELESS_BLUETOOTH_HOST
 	---help---
 		Clamp an inbound ATT Exchange MTU request above the stock NuttX host
 		limit to that limit before passing it to the unmodified host stack.

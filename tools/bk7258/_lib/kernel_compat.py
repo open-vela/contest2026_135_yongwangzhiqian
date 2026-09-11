@@ -25,11 +25,18 @@ FILES = frozenset({
     "sched/init/nx_start.c",
     "sched/init/nx_bringup.c",
     "sched/init/nx_smpstart.c",
+    "wireless/bluetooth/bt_hcicore.c",
+    "wireless/bluetooth/bt_conn.c",
+    "wireless/bluetooth/bt_l2cap.c",
+    "wireless/bluetooth/bt_att.c",
+    "wireless/bluetooth/bt_att.h",
 })
 WRAPPERS = {
     "__wrap_arm_doirq": ("ap", "cp"),
     "__wrap_nxsched_resume_scheduler": ("ap", "cp"),
     "__wrap_nx_bringup": ("ap",),
+    "__wrap_bt_conn_receive": ("ap",),
+    "__wrap_bt_l2cap_receive": ("ap",),
 }
 
 
@@ -163,7 +170,10 @@ def verify_role_config(role: str, dotconfig: Path) -> None:
         raise KernelCompatError(f"invalid kernel compatibility role: {role}")
     values = _config(dotconfig)
     enabled = lambda name: values.get(name) == "y"
-    wrappers_active = role == "cp" or enabled("CONFIG_BK7258_AP_SMP_SCHED_ONLINE")
+    smp_wrapper = enabled("CONFIG_BK7258_AP_SMP_SCHED_ONLINE")
+    bt_wrapper = any(enabled(name) for name in (
+        "CONFIG_BK7258_BT_CONN_RX_REF_COMPAT", "CONFIG_BK7258_BT_ATT_MTU_COMPAT"))
+    wrappers_active = role == "cp" or smp_wrapper or bt_wrapper
     if not wrappers_active:
         return
     missing = [name for name in ("CONFIG_BUILD_FLAT", "CONFIG_ARCH_ARMV8M", "CONFIG_ARCH_CHIP_BK7258", "CONFIG_LTO_NONE")
@@ -176,5 +186,5 @@ def verify_role_config(role: str, dotconfig: Path) -> None:
         raise KernelCompatError("kernel wrappers require CONFIG_ARCH_HIPRI_INTERRUPT disabled")
     if role == "cp" and enabled("CONFIG_SMP"):
         raise KernelCompatError("CP kernel wrappers require non-SMP resolved config")
-    if role == "ap" and not enabled("CONFIG_SMP"):
+    if role == "ap" and smp_wrapper and not enabled("CONFIG_SMP"):
         raise KernelCompatError("AP SMP_ONLINE wrappers require CONFIG_SMP=y")

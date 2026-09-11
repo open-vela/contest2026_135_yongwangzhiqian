@@ -2,10 +2,198 @@
 
 状态：`IN_PROGRESS`
 
-本次发布仅补充以下实板检查点，基于官方`50cdc6f`，不包含新的程序代码。
-当前结论：/data初始化及认领身份供应、文件重启保留通过；真实BLE扫描通过，
-GATT服务发现和手机认领尚未通过。下方各阶段的授权与未提交描述保留为当时状态，
-以本段及最新检查点为准；原始日志、激活资料及私钥不随本次文档提交发布。
+本次提交基于官方b60677ad，包含BLE客户端解析路径选项、蓝牙兼容修复及本文证据。
+419构建时的父提交34ca8771与b60677ad树一致；功能证据对应本次提交中的修复源码。
+当前AIDK运行18.6.355+419，原认领身份恢复并重启后保留；Windows真实GATT、MTU及
+断开重连已通过。真实手机认领/配网未验收，当前ADB仅emulator-5554。下方历史记录不替代本结论。
+
+## 2026-09-11 BLE兼容修复实板验收通过，返回App首次使用
+
+- 用户本轮明确授权本台内部1MiB /data初始化和原身份恢复。执行此前同一
+  forceformat命令成功，mount显示/data type littlefs；没有新增整片备份、
+  再次构建/签发/刷机或生成身份。旧审批拒绝已由本轮具体授权解除。
+- 现有voice pairing --direct-cloud --resume成功发送627字节，复用原证书、
+  私钥及owner activation，不改写原身份。正常reboot后config.bin仍691字节、0600。
+- 419包含两项chip层兼容修复：ATT MTU请求上限兼容及连接RX引用释放。
+  使用现有Windows原生客户端，固定AEP解析、单次连接、uncached服务发现；
+  两个独立进程依次完成扫描→连接→发现2个服务→GAP设备名Shaniu读取→关闭→广播再发现，
+  两次均退出0、RESULT PASS。没有使用N13服务、缓存发现或模拟数据。
+- 两次会话均由max_pdu=23变为Active max_pdu=71。板端现有统计显示
+  mtu_clamped=2 last_mtu=527->517，HCI connected=2 disconnected=2，acl_rx=32
+  acl_tx=32，invalid_rx=0 receive_errors=0。兼容输入上限517与最终协商71不是同一含义。
+  正常断开后第二次重新连接成功，证明本轮对应路径可复用；未做长期重连压力测试。
+- 最终bkota：pair=confirmed version=18.6.355+419 counter=419；AP/CPU2健康，
+  supervisor faults=0 recoveries=0。该结果证明修复组合在本台AIDK与当前Windows
+  中心设备上有效，没有通过逐项禁用对照单独归因，也不代表真实App认证认领已通过。
+- 分层状态：源码修改已落地（随本次提交发布）；构建通过（复用现有产物）；package/trust
+  校验通过（复用既有记录）；全量烧录通过；新版本启动通过；本轮GATT/MTU/两次连接
+  功能实板通过。没有将主机或签名结果替代功能结果。
+- 证据根out/shaniu-product-acceptance-20260910：ble-full419-data-restore.raw、
+  ble-full419-identity-resume.log、ble-full419-restored-boot.raw、
+  gatt-full419-restored-aep.log、gatt-full419-reconnect-aep.log、
+  gatt-full419-final-stats.raw。固件BIN SHA256仍为
+  2407927981c32ebe2ce1b4aa4db63a070002616f5ed3b2bbfe9bdb0cfa8828a6；
+  已有构建/签名/烧录证据见下一节，未用418旧功能证据替代。
+- 已返回产品首次使用下一步并查询实际连接：ble-full419-adb-devices.log仅显示
+  emulator-5554，无真实手机。下一最小动作是接入并授权真实手机ADB，复用现有App
+  和已保存激活资料执行BLE认证认领→配网→云配置→重启恢复；模拟器不替代BLE射频。
+  不增加另一套Windows认领协议，不重复已经完成的模拟器验收。COM8已释放。
+
+## 2026-09-11 419全量下载及启动通过，认领恢复受阻
+
+- 用户明确授权直接全量烧录、不新增备份。复用已接受的同设备历史基底；
+  未执行新的Flash读回，未写OTP。事前已说明私有配置回退及复用原认领资料恢复。
+- 419完整包已通过package/trust校验；现有规则要求generation等于编译下限，
+  本次均为419，未改变计数策略。完整包artifact-id=ble-compat-20260911-02；
+  BIN大小8388608，SHA256
+  2407927981c32ebe2ce1b4aa4db63a070002616f5ed3b2bbfe9bdb0cfa8828a6。
+  包内easyflash/easyflash_ap/sys_rf/sys_net/persistent_data均与接受基底字节一致；
+  这不表示下载工具跳过这些地址，也不代表新鲜设备数据未回退。
+- COM8软件复位自动下载成功，152.405秒，EraseFlash/WriteFlash/Writing Flash OK
+  均通过。新串口读到pair=confirmed version=18.6.355+419 counter=419，
+  AP state=2 error=0、CPU2 ready=1 online=3、supervisor faults=0 recoveries=0。
+- /data未自动挂载，普通littlefs挂载失败14。forceformat命令被自动审批拒绝，
+  理由为既有授权未明确覆盖本台该分区且可能删除身份；命令未执行，不绕过。
+  原本机认领资料保持原样，尚未恢复到419。
+- 真实Windows BLE试验退出4：target not found stage=initial_scan。
+  未进入服务发现，不能据此宣称兼容修复通过或仍发生原GATT超时。
+- 证据根out/shaniu-product-acceptance-20260910：ble-full419-ready.json、
+  ble-full419-hil-run/result.json及bkloader.raw、ble-full419-boot.raw、
+  ble-full419-data-mount.raw、gatt-full419-aep.log。
+- 下一步：明确授权本台/dev/mtdblock0对应内部1MiB /data初始化后，复用原身份
+  及owner activation进行resume供应、重启确认，再验证真实GATT。无提交或推送。
+
+## 2026-09-11 新开发身份已获授权并签发419候选，设备尚未部署
+
+- 用户明确授权“直接新的密钥验证”。已在授权的构建目录外持久目录创建两把P-256
+  开发签名密钥，目录0700、文件0600，使用排他创建，没有替换既有身份。私钥与身份
+  路径引用仅保存在本机受限目录，不进入仓库、公开产物或日志；普通清理不得删除。
+- 公开DER指纹：BL1→BL2 manifest身份
+  58e384ae78f88ef7f2b183dc254b7798538c663f285c160db1b743e873475dee；
+  应用/CP/AP/catalog身份
+  4979ece7072284b2582bb9358198fa21baa415d9340d32779ecb0ba9a48dd984。
+  它们与设备认领身份分别管理，不能互相替代。
+- 使用新公钥完成AIDK构建，保留rollback-floor418及现有验签策略。新AP角色为
+  bk7258-role-7c65259f248f064a，含本次BLE兼容修复及新catalog公钥。
+  经现有release ota入口签发18.6.355+419，artifact-id=ble-compat-20260911-01。
+  该新链OTA不能直接作为旧418接受的过渡包；包自身签名正确不证明设备接受新根。
+- 当前影子寄存器读取尝试使用xd字节读取，在输出Hex dump后立即出现启动日志，
+  没有取得有效根哈希/LCS/计数；已停止，不复用这些无效读数推断根状态。
+  随后COM8确认418 confirmed、AP/CPU2正常、supervisor faults=0，认领config.bin
+  仍691字节。尚不能确认重启具体异常类型，不能将本次读取写成安全状态核查通过。
+- 为保护新认领数据，拟在整机更新前只读获取当前8MiB Flash；自动审批拒绝该命令，
+  理由是新密钥授权未明确覆盖包含设备凭据/专属数据的完整读回。命令未执行，未复位
+  接管、未生成读回、未擦写，不改走其他方式绕过拒绝。需明确授权本台数据只读备份。
+- 证据根out/shaniu-product-acceptance-20260910：ble-new-identity-build.log、
+  ble-new-identity-build-command.json（仅公钥参数）、ble-new-identity-sign.log、
+  ble-new-identity-verify.log、ble-new-identity-ota/、new-signing-readonly-state.raw、
+  new-signing-recovery-status.raw。原418封存包保留，未宣称换链后的恢复已验证。
+- 状态：新的应用签发能力已建立；BL1签名身份已创建，尚未用于本轮完整恢复包。
+  实板仍418，BLE修复未上板。设备读回权限及设备接受新软件根条件尚未闭合；
+  没有OTP写入、数据清除、固件下载、提交或推送。本段覆盖下方“缺签名能力”的历史状态。
+
+## 2026-09-11 兼容修复补充验证（不重复实板旧版本测试）
+
+- 复用实际AP编译命令，仅将对象及依赖输出放到现有证据目录；临时强制包含配置
+  用于编译分支验证，没有修改有效.config或固件配置。全部关闭、仅引用兼容、仅MTU
+  兼容、仅trace、trace加两项兼容五种组合全部编译通过，零警告；对象中分别有
+  0/1/1/8/8个预期wrapper。该检查是源文件编译组合，不是五套已配置产品固件。
+- 对实际Make.defs中本次修改的条件块使用GNU Make求值，六种组合的链接选项均符合
+  预期且没有重复；这是条件块检查，不冒充完整Make固件构建。CMake产品ELF证据沿用
+  上一检查点，源码及有效配置未变，不重复构建。
+- 从生产源码提取两个wrapper和实际LE读写辅助函数，以最小调用边界替身编译运行，
+  ASan/UBSan通过：原函数返回后只释放一次引用；MTU 0/23/517保留，527/65535变517；
+  非ATT CID、非MTU opcode、不匹配长度、6字节短报文不改写，均转交原接收入口。
+  该检查不覆盖真实NuttX连接对象、完整协议栈或无线链路。宿主ptrace使LeakSanitizer
+  无法运行；此无堆分配夹具禁用该项后保留ASan/UBSan，不声称做过泄漏检测。
+- 临时测试源码、对象、日志仅在现有证据输出目录，未新增仓库测试框架或长期入口。
+  初次组合编译遇ccache临时目录只读，改用同一工具链直接编译；初次函数提取表达式
+  失败未运行测试，修正提取后才记录运行结果，不把这些失败计作通过。
+- 证据：`out/shaniu-product-acceptance-20260910/ble-guard-check/`下
+  `result.json`、`make-options.json`、`compat-behaviour.c`、`compat-behaviour.json`
+  及各对象/日志。行为验证对应bt_hci.c SHA256
+  922ecf024172ac95f62d062fd88823ea0afef2347be40e21e6068d4a591b7011。
+- 本批没有追加生产代码改动、刷机、密钥操作或提交推送。实板仍418；匹配签名能力
+  缺失继续单独阻塞新版本部署。下一实板步骤：安装修复版本后检查真实服务发现、
+  MTU响应和连续重连；不以旧418反复失败或以上主机结果替代验收。
+
+## 2026-09-11 蓝牙兼容修复：构建及实际链接通过，实板待验证
+
+- 修复确定的软件集成缺口：CONN_RX_REF_COMPAT、ATT_MTU_COMPAT不再依赖
+  BT_IPC_TRACE；AP/Host前提保留。chip源文件分别编译所需wrapper，Make/CMake按
+  选中的兼容项传递链接选项。跟踪分支保留原功能，未新增历史诊断服务或产品入口。
+  AIDK openvela_ap/defconfig启用两项兼容，BT_IPC_TRACE仍关闭。
+- 复用既有连接引用释放和MTU上限兼容实现，不修改SDK及官方NuttX checkout。
+  兼容命中统计仍可读，但其余HOST零计数仍受各自编译条件限制。
+  这两项是已确认缺口的修复候选，不宣称已证明它们解释首次连接全部故障。
+- 复用kernel_compat.json及现有校验器，加入实际评审的bt_hcicore.c、bt_conn.c、
+  bt_l2cap.c、bt_att.c/h摘要；canonical源码和构建源码均检查。上游引用所有权或
+  MTU规则漂移时拒绝继续，需重新评审。兼容项独立启用时也禁止LTO。
+- 普通常规改动由指定gpt-5.6-terra子代理实现；根代理负责引用所有权核对、集成和
+  最终ELF检查，后端模型路由未独立核实。首次构建发现新增条件编译块漏闭合，
+  已补齐后复测；失败日志保留，不掩盖失败。
+- 现有定向测试`python3 tests/host/bk7258/test_kernel_compat.py`五项通过，
+  新增项验证兼容开启/trace关闭时仍拒绝LTO；源码漂移和路径校验用原测试覆盖。
+  `git diff --check`通过。复用保存的build-command.json执行普通公钥构建，无clean，
+  无私钥操作；AP配置变化产生新role身份，CP复用既有身份。最终构建零warning。
+- 实际AP：role bk7258-role-c9619bfcfea0ef1e，ELF SHA256
+  f81d11895422300bd79db0315890ce590c274811b9933729416e3577b422aa39，
+  config SHA256 33204b87925a4b7c0afeac7e13cc4ae1d1e76296598bf23bc2daa4e25b9ad053。
+  用既有test_kernel_wrapper_elf解析器检查实际反汇编，五条调用通过：
+  hci_rx_work→__wrap_bt_conn_receive→bt_conn_receive，然后bt_conn_release；
+  bt_conn_receive→__wrap_bt_l2cap_receive→bt_l2cap_receive。
+  未发现对两个被包装函数的其他直接调用；未把仅存在符号当成截获证明。
+  全跟踪TX/GATT/PDU包装未链接。Make入口已同步，未执行第二套Make构建。
+- 证据：`out/shaniu-product-acceptance-20260910/ble-compat-build.log`（首轮失败）、
+  `ble-compat-build-fixed.log`（通过）、`ble-compat-ap.disassembly`、
+  `ble-compat-elf-check.json`。具体构建参数复用
+  `out/bk7258-workflow-a1-a8/build-command.json`，rollback-floor继续418，未改策略。
+- 当前板端仍418；新产物为公钥构建结果，未签名、未安装。匹配固件签名能力缺失
+  单独阻塞部署，本批没有恢复旧钥查找或生成替代身份。新版本需验证：首次发现、
+  MTU响应/兼容命中、连续断开重连、真实认领；如果仍无ACL响应，再沿Host发送链定位。
+  认领身份与固件签名身份不混用；本轮未提交或推送，保留此前未提交成果。
+
+## 2026-09-11 GATT 三组差异对照与418实际程序核对
+
+- 当前模式：hardware-fast iteration。串口仅COM8，目标Shaniu
+  c8:47:8c:cb:7f:81；未操作T5板或手机。普通工具参数修改由指定
+  gpt-5.6-luna子代理完成，根代理串行编译和硬件验证；后端实际模型路由未独立核实。
+- 本轮新增三组真实对照（均不配对、不写GATT）：
+  1. 地址解析，操作上限45秒：服务发现返回Unreachable（退出7）。
+  2. 强制FromIdAsync/AEP，操作上限45秒：服务发现超时（退出8）。
+     同步串口捕获AP的LE_CONN_COMPLETE，累计ACL RX从3增至5，ACL TX仍0。
+  3. 已授权软件reboot后首次AEP连接，操作上限40秒：仍超时（退出8）。
+     新启动首次统计connected=1/disconnected=0、ACL RX=1/TX=0；随后Windows栈
+     在同一应用请求期间重连，统计connected=2/disconnected=1、RX=2/TX=0。
+     CLI只提交一次发现请求，不将控制器重连次数冒充独立人工试验次数。
+- 已确认：问题不限于地址解析入口或工具15秒等待上限；重启未消除首次连接问题。
+  AP确实处理到旧式LE连接事件，不能以不支持增强连接事件解释本轮现象。
+  `ps`来自CP控制台，不作为AP线程状态证据。
+- 418证据复用`out/chip-board-remediation-20260910/download418/signed-elf-audit/`：
+  AP记录SHA256为53c8ab3479b20a2faba5397e39c471a30e2ff0fe5d389f6f7686dae3fdd49fef；
+  保存配置与记录的config_sha256匹配，BT_IPC_TRACE确实关闭。HOST零计数无定位效力。
+  AP反汇编hci_rx_work调用未包装bt_conn_receive；att_mtu_req接受23至517。
+  本轮真实ACL头00072001、载荷00040003/00020f02解码为CID4的ATT Exchange MTU
+  Request，客户端接收MTU527。当前代码在超上限时返回错误，正常错误路径也应尝试发送
+  响应；因此“MTU大于517”不能单独解释所有ACL TX=0，更不能宣布唯一根因已找到。
+- 已确认的源码集成缺口：现有CONN_RX_REF_COMPAT和ATT_MTU_COMPAT同时依赖
+  BT_IPC_TRACE，源文件及Make/CMake的wrapper链接也由trace门控；正常Shaniu未带入。
+  引用释放缺陷可能影响后续连接，但不能单独解释刚重启的首次连接失败。
+  本轮未改SDK/NuttX或直接打开历史诊断服务来绕过问题。
+- 仅扩展既有原生客户端`--lookup-source auto|address|aep`：默认行为不变，允许
+  单次请求直接走备用解析路径。现有build.ps1编译通过，EXE SHA256
+  87d1325e167be4582c67d6e48923dc8d971d8f69b1b02d2292be7b09d4d28334；
+  非法参数退出2且未访问适配器；git diff --check通过。不新增框架。
+- 新证据均在`out/shaniu-product-acceptance-20260910/`：
+  `gatt-long-wait-20260911.log`、`gatt-long-wait-stats.raw`、
+  `gatt-aep-20260911.log`、`gatt-aep-live.raw`、`gatt-fresh-boot.raw`、
+  `gatt-fresh-aep.log`、`gatt-fresh-aep.raw`、`gatt-lookup-build.log`、
+  `gatt-lookup-invalid.log`、`gatt-final-state.raw`。收尾connected=disconnected=2，
+  COM8采集已结束；认领config.bin仍691字节、0600。未产生成功服务列表，不声称认领通过。
+- 下一软件动作：将必要兼容机制与诊断开关解耦前，核对实际源码契约及最终链接调用，
+  保留引用所有权保护；针对首次连接的ATT接收/响应发送链继续缩小故障点。
+  不再无变化循环同一Windows请求。真实手机可提供独立中心设备对照，模拟器无法替代。
+  新固件部署仍单独缺少匹配签名能力；它不阻塞上述源码工作，也不恢复旧钥扩搜。
 
 ## 2026-09-11 宿主真实BLE扫描恢复，GATT尚未通过
 

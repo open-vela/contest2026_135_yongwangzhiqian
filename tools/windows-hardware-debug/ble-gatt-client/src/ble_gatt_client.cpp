@@ -126,6 +126,13 @@ private:
 
 struct options_s
 {
+  enum class lookup_source
+  {
+    auto_select,
+    address,
+    aep,
+  };
+
   std::optional<std::uint64_t> address;
   std::string name;
   std::string expected_device_name;
@@ -134,6 +141,7 @@ struct options_s
   unsigned int rediscover_timeout_ms{kDefaultRediscoverTimeoutMs};
   unsigned int connect_attempts{kDefaultConnectAttempts};
   unsigned int n13_burst_count{kDefaultN13BurstCount};
+  lookup_source device_lookup_source{lookup_source::auto_select};
   std::filesystem::path result_file;
   bool probe_only{false};
   bool scan_only{false};
@@ -487,6 +495,7 @@ void print_usage()
     << "  --operation-timeout-ms MS     Per-WinRT-operation deadline (default 15000)\n"
     << "  --rediscover-timeout-ms MS    Post-close scan deadline (default 10000)\n"
     << "  --connect-attempts N          Fresh uncached connection attempts (default 3)\n"
+    << "  --lookup-source SOURCE       Device lookup: auto, address, or aep (default auto)\n"
     << "  --no-rediscover               Skip post-close advertising check\n"
     << "  --scan-only                   Stop after matching advertisement\n"
     << "  --result-file PATH            Write success JSON, replacing stale file\n"
@@ -586,6 +595,20 @@ options_s parse_options(int argc, wchar_t **argv)
           options.connect_attempts = parse_unsigned(
             require_value(index, L"--connect-attempts"), 10,
             "--connect-attempts");
+        }
+      else if (argument == L"--lookup-source")
+        {
+          const std::string source = utf8_from_wide(
+            require_value(index, L"--lookup-source"));
+          if (source == "auto")
+            options.device_lookup_source = options_s::lookup_source::auto_select;
+          else if (source == "address")
+            options.device_lookup_source = options_s::lookup_source::address;
+          else if (source == "aep")
+            options.device_lookup_source = options_s::lookup_source::aep;
+          else
+            throw std::runtime_error(
+              "--lookup-source must be auto, address, or aep");
         }
       else if (argument == L"--result-file")
         {
@@ -1623,7 +1646,10 @@ int run(const options_s &options)
        * Unreachable before ATT discovery.
        */
 
-      const bool use_association_id = (attempt % 2) == 0;
+      const bool use_association_id =
+        options.device_lookup_source == options_s::lookup_source::aep ||
+        (options.device_lookup_source == options_s::lookup_source::auto_select &&
+         (attempt % 2) == 0);
       if (use_association_id)
         {
           device = wait_for_async(

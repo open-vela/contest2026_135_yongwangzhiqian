@@ -123,14 +123,29 @@ extern void bt_ipc_register_hci_send_callback(
 extern void bk7258_os_bt_ipc_init_begin(void);
 extern void bk7258_os_bt_ipc_init_end(void);
 
-#ifdef CONFIG_BK7258_BT_IPC_TRACE
+#if defined(CONFIG_BK7258_BT_IPC_TRACE) || \
+    defined(CONFIG_BK7258_BT_CONN_RX_REF_COMPAT) || \
+    defined(CONFIG_BK7258_BT_ATT_MTU_COMPAT)
 struct bt_conn_s;
+#endif
 
+#if defined(CONFIG_BK7258_BT_IPC_TRACE) || \
+    defined(CONFIG_BK7258_BT_CONN_RX_REF_COMPAT)
 extern void __real_bt_conn_receive(struct bt_conn_s *conn,
                                    struct bt_buf_s *buf, uint8_t flags);
+#endif
+
+#ifdef CONFIG_BK7258_BT_CONN_RX_REF_COMPAT
 extern void bt_conn_release(struct bt_conn_s *conn);
+#endif
+
+#if defined(CONFIG_BK7258_BT_IPC_TRACE) || \
+    defined(CONFIG_BK7258_BT_ATT_MTU_COMPAT)
 extern void __real_bt_l2cap_receive(struct bt_conn_s *conn,
                                     struct bt_buf_s *buf);
+#endif
+
+#ifdef CONFIG_BK7258_BT_IPC_TRACE
 extern void __real_bt_l2cap_send(struct bt_conn_s *conn, uint16_t cid,
                                  struct bt_buf_s *buf);
 extern void __real_bt_conn_send(struct bt_conn_s *conn,
@@ -1016,7 +1031,8 @@ int bk7258_bt_hci_get_stats(struct bk7258_bt_hci_stats_s *stats)
   return OK;
 }
 
-#ifdef CONFIG_BK7258_BT_IPC_TRACE
+#if defined(CONFIG_BK7258_BT_IPC_TRACE) || \
+    defined(CONFIG_BK7258_BT_CONN_RX_REF_COMPAT)
 void __wrap_bt_conn_receive(struct bt_conn_s *conn, struct bt_buf_s *buf,
                             uint8_t flags)
 {
@@ -1035,7 +1051,10 @@ void __wrap_bt_conn_receive(struct bt_conn_s *conn, struct bt_buf_s *buf,
   bt_conn_release(conn);
 #endif
 }
+#endif
 
+#if defined(CONFIG_BK7258_BT_IPC_TRACE) || \
+    defined(CONFIG_BK7258_BT_ATT_MTU_COMPAT)
 void __wrap_bt_l2cap_receive(struct bt_conn_s *conn, struct bt_buf_s *buf)
 {
   uint32_t value = 0;
@@ -1046,17 +1065,21 @@ void __wrap_bt_l2cap_receive(struct bt_conn_s *conn, struct bt_buf_s *buf)
     {
       uint16_t l2cap_length = bk7258_bt_get_le16(buf->data);
       uint16_t cid = bk7258_bt_get_le16(buf->data + 2);
+#ifdef CONFIG_BK7258_BT_IPC_TRACE
       size_t att_length = buf->len - BK7258_BT_L2CAP_HEADER_SIZE;
 
       if (att_length > l2cap_length)
         {
           att_length = l2cap_length;
         }
+#endif
 
       value = (uint32_t)cid | (uint32_t)l2cap_length << 16;
+#ifdef CONFIG_BK7258_BT_IPC_TRACE
       bk7258_bt_trace_att(false, cid,
                           buf->data + BK7258_BT_L2CAP_HEADER_SIZE,
                           att_length);
+#endif
 
 #ifdef CONFIG_BK7258_BT_ATT_MTU_COMPAT
       if (buf->len >= BK7258_BT_L2CAP_HEADER_SIZE +
@@ -1088,6 +1111,9 @@ void __wrap_bt_l2cap_receive(struct bt_conn_s *conn, struct bt_buf_s *buf)
                    __ATOMIC_RELAXED);
   __real_bt_l2cap_receive(conn, buf);
 }
+#endif
+
+#ifdef CONFIG_BK7258_BT_IPC_TRACE
 
 void __wrap_bt_l2cap_send(struct bt_conn_s *conn, uint16_t cid,
                           struct bt_buf_s *buf)

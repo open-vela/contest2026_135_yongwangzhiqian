@@ -111,6 +111,18 @@ class KernelCompatTest(unittest.TestCase):
         with self.assertRaisesRegex(kernel_compat.KernelCompatError, "unsafe|reviewed set"):
             kernel_compat.load(self.repository)
 
+    def test_compat_only_ap_requires_no_lto_without_trace_or_smp(self) -> None:
+        base = ("CONFIG_BUILD_FLAT=y\nCONFIG_ARCH_ARMV8M=y\n"
+                "CONFIG_ARCH_CHIP_BK7258=y\nCONFIG_LTO_NONE=y\n")
+        for symbol in ("CONFIG_BK7258_BT_CONN_RX_REF_COMPAT",
+                       "CONFIG_BK7258_BT_ATT_MTU_COMPAT"):
+            with self.subTest(symbol=symbol):
+                config = base + symbol + "=y\n"
+                kernel_compat.verify_role_config("ap", self._config(config))
+                with self.assertRaises(kernel_compat.KernelCompatError):
+                    kernel_compat.verify_role_config(
+                        "ap", self._config(config + "CONFIG_LTO_FULL=y\n"))
+
     def test_lto_is_rejected_but_nonwrapper_ap_diagnostic_is_allowed(self) -> None:
         lto = self._config(
             "CONFIG_BUILD_FLAT=y\nCONFIG_ARCH_ARMV8M=y\n"
