@@ -2,6 +2,115 @@
 
 状态：`IN_PROGRESS`
 
+本次发布仅补充以下实板检查点，基于官方`50cdc6f`，不包含新的程序代码。
+当前结论：/data初始化及认领身份供应、文件重启保留通过；真实BLE扫描通过，
+GATT服务发现和手机认领尚未通过。下方各阶段的授权与未提交描述保留为当时状态，
+以本段及最新检查点为准；原始日志、激活资料及私钥不随本次文档提交发布。
+
+## 2026-09-11 宿主真实BLE扫描恢复，GATT尚未通过
+
+- Windows将旧0x800710df解释为“设备未就绪”；只读服务查询显示bthserv运行、用户蓝牙
+  服务停止。打开系统蓝牙设置页后，复用现有原生客户端，实际扫描到Shaniu，
+  地址c8:47:8c:cb:7f:81、RSSI约-32 dBm，scan-only返回PASS。
+  没有切换无线开关、修改服务配置或配对；不能仅按先后关系认定用户服务是唯一根因。
+- 同一目标无配对GATT发现：Windows AEP与设备访问均Allowed，MaintainConnection请求
+  后session仍Closed，15秒服务发现超时，未取得GAP/认领服务或TLS握手证据。
+  板端现有bkbttest stats返回控制器connected=1、disconnected=1、ACL RX=1，说明
+  连接曾到达控制器；HOST零计数受可选BT_IPC_TRACE控制，不能据此证明Host未接收。
+  当前候选AP配置该trace关闭，不能拿它代替418真实Host处理证据。
+- 确认前次已断开后，做一次带同步COM8采集的单次复测，仍为服务发现超时；
+  串口捕获0字节，没有新错误证据。没有叠加未结束连接或新增诊断固件。
+  未据此修改SDK/NuttX、绕过认证或调用历史N13/N17测试。
+- 证据在工作区`out/shaniu-product-acceptance-20260910/`：
+  `device-claim-host-ble.log`、`device-claim-host-gatt.log`、`device-claim-bt-stats.raw`、
+  `device-claim-correlated-{gatt,capture}.log`、`device-claim-correlated-uart.raw`。
+  初次WSL直接执行Windows二进制权限失败未启动扫描，随后用Windows原生方式执行；
+  无可用服务发现结果JSON，不把广播PASS误记为GATT通过。
+- 下一最小区分验证是连接真实手机，使用现有App完成同一设备服务发现和TLS认领，
+  区分Windows互操作与板端问题；目前只有模拟器，手机条件仍缺。
+  身份已供应且持久化通过，不重复生成；固件仍418。本批无源码修改或提交推送。
+
+## 2026-09-11 设备认领身份已供应并验证落盘
+
+- 用户在具体权限请求后明确授权生成、受控保存并供应本台AIDK认领身份。
+  建立唯一引用`aidk-ai-toy-001`，ECDSA P-256，证书仅用于设备认领TLS，
+  私钥保存在仓库外独立0700目录、文件0600；不属于构建输出，不随clean删除。
+  未生成或更换任何固件/BL1/BL2/OTA签名身份。
+- 公共证书DER SHA256：
+  `c18013f58ddedb2ab891f61c6fd19272a6f87c7140802fdcbbe180bdb15f4c94`。
+  使用现有`voice pairing --direct-cloud`供应至PNP核对后的COM8，返回
+  `identity-supplied`、BPI1负载627字节；所有权证明只保存在0600激活资料中，不输出到日志。
+  四字段格式、pin一致、32字节proof及权限校验通过；没有重复生成或替换身份。
+- 实板/data/shaniu/identity/config.bin为691字节、0600，软件reboot前后大小与权限
+  保持，SYSINIT PASS，仍为18.6.354+418、A/confirmed、supervisor faults/recoveries=0/0；
+  voice ready=1、last_error=0、configured=0。此为供应成功及文件保留证据，
+  尚不能替代重启后真实BLE TLS绑定、手机认领或云配置恢复验收。
+- 证据在工作区`out/shaniu-product-acceptance-20260910/`：
+  `device-claim-public-identity.json`、`device-claim-supply.log`、`device-claim-reboot.raw`。
+  无私钥或激活secret进入仓库/日志。此前自动审批拒绝状态已被本次明确授权和执行取代。
+- 下一步为真实手机导入激活资料、BLE认证认领、配置Wi-Fi和云服务并验证重启恢复。
+  不能把只有模拟器连接的状态记为手机就绪；随后宿主扫描恢复结果见最新BLE检查点。
+  固件签名部署仍独立待决，未修改418；本批文档未提交/推送。
+
+## 2026-09-11 已授权初始化片内配置区并实板重启验证
+
+- 认领身份生成的执行申请被自动审批拒绝：用户“持续推进”未被认定为具体长期私钥
+  生成与保存授权。命令未执行，拟用身份目录不存在；未生成、签署或供应认领身份。
+  不通过其他工具绕过。需明确批准“为本台AIDK生成并受控保存认领私钥/证书/证明，
+  通过BPI1写入并生成App激活资料”后才能恢复这一分支，固件签名链不在其范围内。
+- 后续只读核对确认：产品worker自动创建/data/shaniu/identity与voice-ota目录，
+  私有目录权限0700；identity目录为空，voice last_error=0，ready=1、configured=0。
+  证据`first-use-after-format-status.raw`。因此文件系统就绪已实板通过，当前阻塞
+  明确为尚未供应设备认领身份，不能继续将其描述为存储挂载失败。
+  已核对现有`voice pairing --direct-cloud`参数；下一动作需单独授权生成、受控保存
+  并通过BPI1供应这台AIDK的认领证书/私钥/所有权证明。固件签名身份保持原样；
+  当前没有执行任何密钥操作，也没有把模拟器当真实BLE认领证明。
+- 用户明确授权直接格式化。仅对COM8 AIDK的`/dev/mtdblock0`执行一次
+  `mount -t littlefs -o forceformat /dev/mtdblock0 /data`，未备份原内容；
+  用户已授权清除该区域。未改分区表、未操作SD NAND、固件或签名身份。
+- 板级注册将片内persistent_data暴露为mtdblock0；当前布局窗口为
+  `0x600000 + 1 MiB`。它不是SD NAND。格式化后/data正常挂载为LittleFS，
+  df显示4096字节×256块、已用8块、可用248块。
+- 执行一次软件reboot验证：SYSINIT PASS，/data自动挂载且容量保持；
+  仍为`18.6.354+418`、A/confirmed，supervisor faults/recoveries=0/0。
+  voice ready=1、configured=0，初始化文件系统不会自动生成身份或云配置。
+- 证据：工作区`out/shaniu-product-acceptance-20260910/first-use-datafs-format.raw`
+  与`first-use-datafs-reboot.raw`。本次证明现有分区边界和启动挂载路径可用，
+  无须因这次挂载故障修改分区表；不能倒推原介质究竟未初始化还是损坏。
+- 前一节的“等待格式化前备份授权”已被本次明确格式化授权及执行结果取代。
+  下一步恢复设备认领身份与手机BLE联调；身份操作授权与固件签名路径仍分别处理，
+  不把文件系统恢复称为认领/配置重启或持续OTA闭环。未新增功能代码、提交或推送。
+
+## 2026-09-11 首次上手：实板私有文件系统阻塞
+
+- 实际HEAD仍为`e9bb2f1590212d23a46b8f362e92247e0a7e7992`，与已获取的官方
+  `50cdc6fce364c14c61906a2545b7c1b45173d009`文件树一致；未切换或覆盖本地旧诊断。
+  ADB仅有emulator-5554，无真实手机。仍按AIDK开发，不转回Dolphin。
+- 本次按PNP `VID_1A86/PID_7523`核对COM8并独占采集，实际板端仍为
+  `18.6.354+418`、A/confirmed、AP READY、CPU2 online=3、RPTUN connected，
+  supervisor faults/recoveries为0/0；voice ready=1、configured=0。
+  Win32_SerialPort未列出此口，改用PnPEntity确认后才打开；没有尝试其他串口。
+- **新增实板事实：**挂载表仅有/etc与/proc，未挂载/data；/dev/mtdblock0存在且为
+  1048576字节，/data目录存在但为空。已安装的/etc/init.d/rc.sysinit明确包含
+  `mount -t littlefs /dev/mtdblock0 /data`，故不能将身份ENOENT直接判为缺少私钥。
+- 一次显式`mount -t littlefs -o ro /dev/mtdblock0 /data`返回14；随后挂载表仍无/data，
+  卸载返回22，没有残留挂载。当前NuttX适配将LFS_ERR_CORRUPT映射为EFAULT；
+  这尚不能区分未初始化、格式/几何不兼容或文件系统损坏。不归咎硬件，不自动格式化。
+  未读取身份内容、原始私有块、供应身份、改计数、复位或刷写。
+- 证据位于工作区`out/shaniu-product-acceptance-20260910/`：
+  `first-use-metadata.raw`、`first-use-datafs-metadata.raw`、`first-use-datafs-readonly.raw`。
+  首次ls -ld不被NSH支持，后续用ls -l重新确认；无效命令不作为目录证据。
+- 配置恢复的现有主机路径复核通过：`make -C tests/host/bk7258 run-provision`退出0，
+  voice provision 9例、GATT 1例、TLS 1例；证据`first-use-provision-host.log`。
+  SCB2复用host/CA作为云TLS配置，voice_runtime的load_cloud/connect/ready实际分流
+  至bkcloud_runtime，不存在额外Gateway前置；没有因旧字段名称重建协议。
+  普通核对沿用已指定luna代理，主代理完成该跨模块结论复核及独占设备操作；路由未独立核实。
+- 下一步：取得对这台AIDK片内1MiB私有配置区的受控备份授权，先保存现状并校验，
+  再据证据提出是否初始化的决定；不把此前SD/MSC清理许可扩展到此区域。
+  设备认领身份供应与固件签名部署另行处理。真实手机、有效多人官方唤醒模型以及
+  真实认领/语音/打断/图片/OTA/电源验收仍缺，不计项目完成。
+  本批未新增功能代码或框架，未提交/推送此检查点。
+
 ## 2026-09-11 App更新页生命周期与NFC现有接口验证
 
 - 本批修复`MainActivity`固件包后台检查的旧结果回写：页面离开、后台及销毁递增
