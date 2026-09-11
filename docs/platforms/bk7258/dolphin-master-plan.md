@@ -31,7 +31,7 @@
 
 本轮提交范围：Dolphin无线连接/显式断网采样/网关检查及报告、WAV录音、Files容量/扫描栈修复；包含默认关闭的ADC单键、受控复制、USB快照/UI候选与对应测试，后者未实板验收。复用共享media_recorder接入，不改SDK。排除原始日志及三份引用已撤回实现的SD探针。
 
-发布验证：`stall/publication-host.log`记录既有Dolphin check、真实LVGL ui-check通过；wifi_async 4项、USB snapshot 4项、ADC 1项通过。当前主配置构建及18下载/启动/用户确认沿用已有有效证据。未重复全量clean或签名，未操作密钥。Git结果以实际提交及远端SHA为准；不将推送算作未验收外设通过。
+发布验证：团队仓相对路径 `out/dolphin-t5-wireless-20260910/stall/publication-host.log`（与工作区根 out 中的构建/下载证据目录不同）记录既有Dolphin check、真实LVGL ui-check通过；wifi_async 4项、USB snapshot 4项、ADC 1项通过。当前主配置构建及18下载/启动/用户确认沿用已有有效证据。未重复全量clean或签名，未操作密钥。Git结果以实际提交及远端SHA为准；不将推送算作未验收外设通过。
 
 ## 网关检查接入（0.1.0+17已安装）
 
@@ -47,7 +47,7 @@
 
 ### Files容量显示（0.1.0+18已安装）
 
-`gpt-5.6-luna`在既有扫描worker加入标准statfs，锁内发布文件系统总量/可用量及错误；64位乘法溢出检查。容量失败仍继续目录扫描，LVGL不执行额外文件系统I/O，不新增线程、挂载或格式化。现有UI host测试覆盖正常容量、EIO、EOVERFLOW且文件仍可浏览；`stall/build-files-capacity.log`目标增量构建通过。复用该有效构建生成18，`stall/package-capacity18.log`与`verify-capacity18.log`通过；8MiB镜像SHA256 `2aca538a6fbbccfcc6b362dba242058ab4b1b005b0ee8a59b9f3a2f863db383a`，同设备data保持。`stall/hil-capacity18/result.json`下载通过；`stall/boot-capacity18/serial.txt`包含FINALINIT PASS、SRAM-DMA2D和显示触摸初始化。待用户进入Files确认总量/可用量显示且目录、返回正常；不宣称物理卡容量或本次UI已实测。
+`gpt-5.6-luna`在既有扫描worker加入标准statfs，锁内发布文件系统总量/可用量及错误；64位乘法溢出检查。容量失败仍继续目录扫描，LVGL不执行额外文件系统I/O，不新增线程、挂载或格式化。现有UI host测试覆盖正常容量、EIO、EOVERFLOW且文件仍可浏览；`stall/build-files-capacity.log`目标增量构建通过。复用该有效构建生成18，`stall/package-capacity18.log`与`verify-capacity18.log`通过；8MiB镜像SHA256 `2aca538a6fbbccfcc6b362dba242058ab4b1b005b0ee8a59b9f3a2f863db383a`，同设备data保持。`stall/hil-capacity18/result.json`下载通过；`stall/boot-capacity18/serial.txt`包含FINALINIT PASS、SRAM-DMA2D和显示触摸初始化。后续用户已确认Files总量/可用量、目录与返回正常，见本轮提交检查点；不据此宣称物理卡容量检测通过。
 
 17网关验收首次55秒被动采集`stall/gateway17-acceptance.raw`为0字节，采集已结束，用户真实结果待回报；不据此判连接失败。保留17供用户操作，不用下一候选打断验收。未提交、推送或清理用户数据。
 
