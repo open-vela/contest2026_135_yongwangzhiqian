@@ -589,6 +589,14 @@ if(CONFIG_BK7258_BT_IPC_TRACE)
     bt_gatt_connected
     bt_gatt_disconnected
     bt_l2cap_create_pdu)
+else()
+  if(CONFIG_BK7258_BT_CONN_RX_REF_COMPAT)
+    bk7258_wrap_kernel_symbol(bt_conn_receive)
+  endif()
+
+  if(CONFIG_BK7258_BT_ATT_MTU_COMPAT)
+    bk7258_wrap_kernel_symbol(bt_l2cap_receive)
+  endif()
 endif()
 
 if(CONFIG_BK7258_RPTUN_MBOX)

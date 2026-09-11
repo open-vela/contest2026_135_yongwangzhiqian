@@ -13,11 +13,18 @@
     {"path": "sched/sched/sched_switchcontext.c", "sha256": "f08bf1f34fca4164f40b858a689242b667951d439aeb37aaead9cc08933ba49b"},
     {"path": "sched/init/nx_start.c", "sha256": "2b7179bf54c3fd0b5a1ecaa0a40a650fe663135da0635485c13cf6ca315fb1b8"},
     {"path": "sched/init/nx_bringup.c", "sha256": "804a514de526369fdeeda95c45527b1902b057ef9bed20568024ed3c3f2b68d1"},
-    {"path": "sched/init/nx_smpstart.c", "sha256": "f251ffc0cb9cdf231fcda00a0d31380cd8d734734474918263c472c3eff80e1a"}
+    {"path": "sched/init/nx_smpstart.c", "sha256": "f251ffc0cb9cdf231fcda00a0d31380cd8d734734474918263c472c3eff80e1a"},
+    {"path": "wireless/bluetooth/bt_hcicore.c", "sha256": "8982fb974876dbe0938ca47a22a213c43068d21e10fa5fb94b53d7a038020e1a"},
+    {"path": "wireless/bluetooth/bt_conn.c", "sha256": "7b010cd0f3f9b3fdbebac903f1713cb4033e1fd3937df80442860387346247c8"},
+    {"path": "wireless/bluetooth/bt_l2cap.c", "sha256": "9ceb32fcdab4f6eb135dda580b5bacf89a4b4db37ce172b52644f62dbcce3d4b"},
+    {"path": "wireless/bluetooth/bt_att.c", "sha256": "bb9cb43390bb22abd92f3622de4ce5d9b00be08793a5cdaa9235ea182fb31aa2"},
+    {"path": "wireless/bluetooth/bt_att.h", "sha256": "5eb257d9f0b4f00f2416455defe1d2705262a1bf3e83c354f3f22ab1113643b7"}
   ],
   "wrappers": {
     "__wrap_arm_doirq": {"disposition": "C", "physical_validation": "pending", "roles": ["ap", "cp"]},
     "__wrap_nxsched_resume_scheduler": {"disposition": "C", "physical_validation": "pending", "roles": ["ap", "cp"]},
-    "__wrap_nx_bringup": {"disposition": "C", "physical_validation": "pending", "roles": ["ap"]}
+    "__wrap_nx_bringup": {"disposition": "C", "physical_validation": "pending", "roles": ["ap"]},
+    "__wrap_bt_conn_receive": {"disposition": "C", "physical_validation": "pending", "roles": ["ap"]},
+    "__wrap_bt_l2cap_receive": {"disposition": "C", "physical_validation": "pending", "roles": ["ap"]}
   }
 }

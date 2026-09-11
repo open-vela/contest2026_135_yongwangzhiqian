@@ -47,6 +47,13 @@ freshly observed ID. A timed-out discovery is not retried because Windows
 does not currently expose cancellation for the underlying connection process;
 stacking another request can leave more queued host work.
 
+The native executable accepts `--lookup-source address` or `--lookup-source aep`
+to force every fresh
+connection attempt through `FromBluetoothAddressAsync` or `FromIdAsync`,
+respectively. `--lookup-source auto` (the default) retains the alternating
+address/AEP retry behavior. This only selects the device lookup source; it does
+not change pairing, security, or the bounded timeout and cleanup behavior.
+
 With `--n13`, the same bounded process additionally discovers the fixed N13
 service and characteristics, reads and validates the 20-byte status frame,
 uses write-with-response for an echo request, verifies the matching read and

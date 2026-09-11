@@ -565,6 +565,13 @@ LDFLAGS += --wrap=bt_conn_receive --wrap=bt_l2cap_receive
 LDFLAGS += --wrap=bt_l2cap_send --wrap=bt_conn_send --wrap=bt_send
 LDFLAGS += --wrap=bt_gatt_connected --wrap=bt_gatt_disconnected
 LDFLAGS += --wrap=bt_l2cap_create_pdu
+else
+ifeq ($(CONFIG_BK7258_BT_CONN_RX_REF_COMPAT),y)
+LDFLAGS += --wrap=bt_conn_receive
+endif
+ifeq ($(CONFIG_BK7258_BT_ATT_MTU_COMPAT),y)
+LDFLAGS += --wrap=bt_l2cap_receive
+endif
 endif
 
 ifeq ($(CONFIG_BK7258_RPTUN_MBOX),y)
