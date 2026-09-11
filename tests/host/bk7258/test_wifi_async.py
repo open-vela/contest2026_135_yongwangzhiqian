@@ -13,12 +13,14 @@ PREFIX = r'''
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#define FAR
 #define BK7258_WIFI_SSID_MAX_LEN 32
 #define BK7258_WIFI_PASSWORD_MAX_LEN 64
 #define BK7258_WIFI_PASSWORD_MIN_LEN 8
 #define BK7258_WIFI_CONNECT_MIN_MS 5000
 #define BK7258_WIFI_CONNECT_MAX_MS 60000
 #define BK7258_WIFI_OPERATION_CONNECT 1
+#define BK7258_WIFI_OPERATION_PING 4
 #define BK7258_WIFI_OPERATION_SCAN 10
 #define BK7258_WIFI_SCAN_MIN_MS 1000
 #define BK7258_WIFI_CHANNEL_STATS_MAX 13u
@@ -26,14 +28,16 @@ PREFIX = r'''
 struct bk7258_wifi_monitor_result_s {int status;unsigned channel,frame_count;};
 struct bk7258_wifi_channel_stats_s {int status;unsigned returned,dwell_ms;struct bk7258_wifi_monitor_result_s channels[13];};
 struct bk7258_wifi_scan_result_s { int status; unsigned returned; };
+struct bk7258_wifi_scan_snapshot_s {int status;unsigned found,returned,truncated;unsigned char aps[32];};
 struct bk7258_wifi_result_s {int status;uint32_t link_state;};
-#define BK7258_WIFI_LINK_CONNECTED 2
+#define BK7258_WIFI_LINK_CONNECTED 3
 struct bk7258_wifi_control_wire_s {int operation;uint32_t timeout_ms;size_t ssid_len,password_len;
  char ssid[33],password[65];};
 struct bk7258_wifi_control_dev_s {
- bool initialized,busy,local_pending,local_done,local_cancel,request_local,local_scan,local_channels,local_monitor_cleanup;
+ bool initialized,busy,local_pending,local_done,local_cancel,request_local,local_scan,local_channels,local_ping,local_monitor_cleanup;
  struct bk7258_wifi_channel_stats_s local_channel_result;
  struct bk7258_wifi_scan_result_s local_scan_result;
+ struct bk7258_wifi_scan_snapshot_s local_scan_snapshot;
  bool trial_active,trial_touched,trial_connected,trial_restore_failed,saved_valid,trial_was_connected;
  uint32_t trial_lease;
  struct bk7258_wifi_control_wire_s saved_connection,trial_connection;
@@ -49,13 +53,24 @@ static int connect_result, current_link, connect_calls;
 static char observed_ssid[33];
 static int bk7258_wifi_read_link(struct bk7258_wifi_result_s *r) { r->link_state=current_link;return 0; }
 static int bk7258_wifi_connect(const struct bk7258_wifi_control_wire_s *q,struct bk7258_wifi_result_s *r) {
- connect_calls++;strcpy(observed_ssid,q->ssid);r->link_state=connect_result?0:2;return connect_result;
+ connect_calls++;strcpy(observed_ssid,q->ssid);r->link_state=connect_result?0:3;return connect_result;
 }
-static int bk7258_wifi_stop_sta(void) { current_link=0;return 0; }
-static int bk7258_wifi_sync_native_link(struct bk7258_wifi_result_s *r) { r->link_state=current_link;return 0; }
+static int sta_stop_calls, sta_stop_error, hold_link_connected;
+static int sync_link_error, operation_order, stop_order, sync_order, monitor_order;
+static int bk7258_wifi_stop_sta(void) {
+ sta_stop_calls++;stop_order=++operation_order;
+ if (sta_stop_error)return sta_stop_error;
+ if (!hold_link_connected)current_link=0;
+ return 0;
+}
+static int bk7258_wifi_sync_native_link(struct bk7258_wifi_result_s *r) {
+ sync_order=++operation_order;
+ if (sync_link_error)return sync_link_error;
+ r->link_state=current_link;return 0;
+}
 static struct {unsigned active;} g_bk7258_wifi_monitor;
 static int monitor_starts,monitor_stops,monitor_stop_error,cancel_dwell;
-static int bk7258_wifi_monitor_start_capture(unsigned channel) {(void)channel;monitor_starts++;return 0;}
+static int bk7258_wifi_monitor_start_capture(unsigned channel) {(void)channel;monitor_order=++operation_order;monitor_starts++;return 0;}
 static int bk7258_wifi_monitor_stop_capture(void) {monitor_stops++;return monitor_stop_error;}
 static void bk7258_wifi_monitor_snapshot(struct bk7258_wifi_monitor_result_s *r) {r->frame_count=3;}
 static void nxsig_usleep(unsigned t) {(void)t;if(cancel_dwell)g_bk7258_wifi_control.local_cancel=true;}
@@ -77,23 +92,44 @@ int main(void) {
  assert(bk7258_wifi_channels_async(99,&first)==-EINVAL);
  assert(bk7258_wifi_channels_async(300,&first)==0);
  assert(bk7258_wifi_channels_poll(first,&channels)==-EAGAIN);
- assert(bk7258_wifi_channels_run(300)==0);
+ assert(bk7258_wifi_channels_run(300,false)==0);
  assert(monitor_starts==13 && monitor_stops==13);
  p->local_done=true;p->busy=false;
  assert(bk7258_wifi_channels_poll(first,&channels)==0 && channels.returned==13);
  assert(bk7258_wifi_channels_async(300,&first)==0);
  cancel_dwell=1;
- assert(bk7258_wifi_channels_run(300)==-ECANCELED);
+ assert(bk7258_wifi_channels_run(300,false)==-ECANCELED);
  assert(monitor_starts==14 && monitor_stops==14);
  p->local_done=true;p->busy=false;
  assert(bk7258_wifi_channels_poll(first,&channels)==0);
- cancel_dwell=0;current_link=2;
- assert(bk7258_wifi_channels_run(300)==-EBUSY);
+ cancel_dwell=0;current_link=3;
+ assert(bk7258_wifi_channels_run(300,false)==-EBUSY);
+ p->local_cancel=true;sta_stop_calls=0;
+ assert(bk7258_wifi_channels_run(300,true)==-ECANCELED && sta_stop_calls==0);
+ p->local_cancel=false;p->saved_valid=true;
+ assert(bk7258_wifi_channels_run(300,true)==0 && sta_stop_calls==1 &&
+        !p->saved_valid && current_link==0);
+ current_link=3;p->saved_valid=true;sta_stop_error=-EIO;
+ { int before=monitor_starts;
+   assert(bk7258_wifi_channels_run(300,true)==-EIO && monitor_starts==before &&
+          p->saved_valid); }
+ sta_stop_error=0;hold_link_connected=1;sta_stop_calls=0;current_link=3;
+ { int before=monitor_starts;
+   assert(bk7258_wifi_channels_run(300,true)==-ETIMEDOUT &&
+          monitor_starts==before); }
+ hold_link_connected=0;sync_link_error=-EIO;current_link=3;sta_stop_calls=0;
+ p->saved_valid=true;
+ { int before=monitor_starts;
+   assert(bk7258_wifi_channels_run(300,true)==-EIO && monitor_starts==before &&
+          !p->saved_valid); }
+ sync_link_error=0;current_link=3;operation_order=0;stop_order=sync_order=monitor_order=0;
+ assert(bk7258_wifi_channels_run(300,true)==0 && stop_order < sync_order &&
+        sync_order < monitor_order);
  current_link=0;posts=0;
  p->local_cancel=false;monitor_stop_error=-EIO;
- assert(bk7258_wifi_channels_run(300)==-EIO && p->local_monitor_cleanup);
+ assert(bk7258_wifi_channels_run(300,false)==-EIO && p->local_monitor_cleanup);
  monitor_stop_error=0;
- assert(bk7258_wifi_channels_run(300)==0 && !p->local_monitor_cleanup);
+ assert(bk7258_wifi_channels_run(300,false)==0 && !p->local_monitor_cleanup);
  struct bk7258_wifi_scan_result_s scan;
  assert(bk7258_wifi_scan_async(0,&first)==-EINVAL);
  assert(bk7258_wifi_scan_async(15000,&first)==0);
@@ -104,7 +140,24 @@ int main(void) {
  p->local_scan_result.returned=3;p->local_done=true;p->busy=false;
  assert(bk7258_wifi_scan_poll(first+1,&scan)==-ESTALE);
  assert(bk7258_wifi_scan_poll(first,&scan)==0 && scan.returned==3);
+  assert(bk7258_wifi_scan_poll(first,&scan)==-ESTALE);
+ assert(bk7258_wifi_scan_async(15000,&first)==0);
+ p->local_scan_snapshot.found=33;p->local_scan_snapshot.returned=32;
+ p->local_scan_snapshot.truncated=1;p->local_done=true;p->busy=false;
+ struct bk7258_wifi_scan_snapshot_s snapshot;
+ assert(bk7258_wifi_scan_snapshot_poll(first,&snapshot)==0 &&
+        snapshot.returned==32 && snapshot.truncated==1);
  assert(bk7258_wifi_scan_poll(first,&scan)==-ESTALE);
+ assert(bk7258_wifi_ping_async(999,&first)==-EINVAL);
+ assert(bk7258_wifi_ping_async(3000,&first)==0 &&
+        p->local_ping && !p->local_scan &&
+        p->request.operation==BK7258_WIFI_OPERATION_PING);
+ assert(bk7258_wifi_connect_poll(first,&result)==-ESTALE);
+ assert(bk7258_wifi_ping_poll(first,&result)==-EAGAIN);
+ assert(bk7258_wifi_ping_cancel(first)==0);
+ p->local_result.status=-ECANCELED;p->local_done=true;p->busy=false;
+ assert(bk7258_wifi_ping_poll(first,&result)==0 && result.status==-ECANCELED);
+ assert(bk7258_wifi_ping_poll(first,&result)==-ESTALE);
  post_result=-EIO;
  assert(bk7258_wifi_scan_async(15000,&first)==-EIO);
  assert(!p->busy && !p->local_pending);
@@ -152,7 +205,7 @@ int main(void) {
  assert(bk7258_wifi_connect_poll(done,&result)==0 && result.status==0);
  assert(!strcmp(p->saved_connection.ssid,"original"));
 
- current_link=2;connect_result=-EACCES;
+ current_link=3;connect_result=-EACCES;
  assert(bk7258_wifi_trial_start("wrong-password","",5000,&lease)==0);
  finish_worker();assert(p->busy && !p->trial_connected);
  assert(bk7258_wifi_connect_poll(lease,&result)==0 && result.status==-EACCES);
@@ -171,13 +224,110 @@ int main(void) {
  finish_worker();assert(connect_calls==previous_calls);
  assert(bk7258_wifi_connect_poll(lease,&result)==0 && result.status==-ENOKEY);
  assert(bk7258_wifi_trial_finish(lease,false,&done)==0);
- finish_worker();assert(bk7258_wifi_connect_poll(done,&result)==0 && !p->busy && current_link==2);
+ finish_worker();assert(bk7258_wifi_connect_poll(done,&result)==0 && !p->busy && current_link==3);
  return 0;
 }
 '''
 
 
 class WifiAsyncTest(unittest.TestCase):
+    def test_scan_security_names_cover_vendor_values_and_unknowns(self):
+        source = (ROOT / 'chips/bk7258/common/bk7258_wifi_control.c').read_text()
+        names = source[source.index('const char *bk7258_wifi_security_name('):
+                       source.index('static bool bk7258_wifi_password_length_valid')]
+        harness = r'''
+#include <assert.h>
+#include <stddef.h>
+#include <string.h>
+#include <stdint.h>
+#define BK7258_WIFI_SECURITY_NONE 0
+#define BK7258_WIFI_SECURITY_WEP 1
+#define BK7258_WIFI_SECURITY_WPA_TKIP 2
+#define BK7258_WIFI_SECURITY_WPA_AES 3
+#define BK7258_WIFI_SECURITY_WPA_MIXED 4
+#define BK7258_WIFI_SECURITY_WPA2_TKIP 5
+#define BK7258_WIFI_SECURITY_WPA2_AES 6
+#define BK7258_WIFI_SECURITY_WPA2_MIXED 7
+#define BK7258_WIFI_SECURITY_WPA3_SAE 8
+#define BK7258_WIFI_SECURITY_WPA3_WPA2_MIXED 9
+#define BK7258_WIFI_SECURITY_EAP 10
+#define BK7258_WIFI_SECURITY_OWE 11
+#define BK7258_WIFI_SECURITY_AUTO 12
+#define BK7258_WIFI_SECURITY_WAPI_PSK 13
+#define BK7258_WIFI_SECURITY_WAPI_CERT 14
+#define BK7258_WIFI_SECURITY_WAPI_UNKNOWN 15
+'''
+        test = r'''
+int main(void) {
+ assert(!strcmp(bk7258_wifi_security_name(0), "Open"));
+ assert(!strcmp(bk7258_wifi_security_name(6), "WPA2-AES"));
+ assert(!strcmp(bk7258_wifi_security_name(8), "WPA3-SAE"));
+ assert(!strcmp(bk7258_wifi_security_name(11), "OWE"));
+ assert(!strcmp(bk7258_wifi_security_name(15), "WAPI-Unknown"));
+ assert(bk7258_wifi_security_name(16) == NULL);
+ return 0;
+}
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / 'test.c').write_text(harness + names + test)
+            subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror',
+                            str(path / 'test.c'), '-o', str(path / 'test')], check=True)
+            subprocess.run([str(path / 'test')], check=True)
+
+    def test_scan_selection_is_capacity_parameterized(self):
+        source = (ROOT / 'chips/bk7258/common/bk7258_wifi_control.c').read_text()
+        selection = source[source.index('static void bk7258_wifi_scan_copy_ap('):
+                           source.index('static int bk7258_wifi_scan_cleanup(void)')]
+        harness = r'''
+#include <assert.h>
+#include <stdint.h>
+#include <string.h>
+#define FAR
+#define BK7258_WIFI_SSID_MAX_LEN 32u
+#define BK7258_WIFI_SCAN_MAX_RESULTS 4u
+struct bk7258_wifi_scan_ap_s {char ssid[33];uint8_t bssid[6];int32_t rssi;
+ uint8_t channel,security,reserved[2];};
+struct bk7258_wifi_scan_result_s {int32_t status;uint32_t found,returned,truncated;
+ struct bk7258_wifi_scan_ap_s aps[4];};
+struct bk7258_wifi_scan_snapshot_s {int32_t status;uint32_t found,returned,truncated;
+ struct bk7258_wifi_scan_ap_s aps[32];};
+struct bk7258_wifi_scan_ap_sdk_s {char ssid[33];uint8_t bssid[6];int32_t rssi;
+ uint8_t channel,security,reserved[2];};
+struct bk7258_wifi_scan_result_sdk_s {int ap_num;struct bk7258_wifi_scan_ap_sdk_s *aps;};
+'''
+        test = r'''
+int main(void) {
+ struct bk7258_wifi_scan_ap_sdk_s source[33];
+ struct bk7258_wifi_scan_ap_s four[4], thirtytwo[32];
+ struct bk7258_wifi_scan_snapshot_s snapshot;
+ struct bk7258_wifi_scan_result_s legacy;
+ uint32_t found,returned,truncated;
+ for (unsigned i=0;i<33;i++) { source[i].rssi=-(int32_t)i; source[i].channel=i; }
+ struct bk7258_wifi_scan_result_sdk_s sdk={33,source};
+ memset(four,0,sizeof(four)); found=returned=truncated=0;
+ bk7258_wifi_scan_select_strongest(four,4,&found,&returned,&truncated,&sdk);
+ assert(found==33 && returned==4 && truncated==29 && four[0].rssi==0 && four[3].rssi==-3);
+ memset(thirtytwo,0,sizeof(thirtytwo)); found=returned=truncated=0;
+ bk7258_wifi_scan_select_strongest(thirtytwo,32,&found,&returned,&truncated,&sdk);
+ assert(found==33 && returned==32 && truncated==1 && thirtytwo[0].rssi==0 && thirtytwo[31].rssi==-31);
+ memset(&snapshot,0,sizeof(snapshot)); snapshot.found=found; snapshot.returned=returned;
+ snapshot.truncated=truncated; memcpy(snapshot.aps,thirtytwo,sizeof(thirtytwo));
+ bk7258_wifi_scan_result_from_snapshot(&legacy,&snapshot);
+ assert(legacy.found==33 && legacy.returned==4 && legacy.truncated==29 && legacy.aps[3].rssi==-3);
+ sdk.aps=NULL; found=returned=truncated=0;
+ bk7258_wifi_scan_select_strongest(thirtytwo,32,&found,&returned,&truncated,&sdk);
+ assert(found==33 && returned==0 && truncated==33);
+ return 0;
+}
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / 'test.c').write_text(harness + selection + test)
+            subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror',
+                            str(path / 'test.c'), '-o', str(path / 'test')], check=True)
+            subprocess.run([str(path / 'test')], check=True)
+
     def test_scan_cleanup_retains_lease_on_stop_or_unregister_failure(self):
         source = (ROOT / 'chips/bk7258/common/bk7258_wifi_control.c').read_text()
         cleanup = source[source.index('static int bk7258_wifi_scan_cleanup(void)'):

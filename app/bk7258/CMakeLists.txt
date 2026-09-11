@@ -20,7 +20,7 @@ if(CONFIG_BK7258_APP_AGENT)
   target_sources(apps PRIVATE bk7258_agent_product.c)
 endif()
 
-if(CONFIG_BK7258_APP_AGENT OR CONFIG_BK7258_VOICE_SERVICE)
+if(CONFIG_BK7258_APP_AGENT OR CONFIG_BK7258_VOICE_SERVICE OR CONFIG_DOLPHIN_RECORDER)
   if(NOT CONFIG_MEDIA AND CONFIG_BK7258_MIC)
     target_include_directories(apps PRIVATE
         ${NUTTX_APPS_DIR}/frameworks/multimedia/media/include)

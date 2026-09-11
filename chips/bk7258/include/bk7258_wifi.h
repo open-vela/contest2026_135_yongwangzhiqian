@@ -36,6 +36,8 @@ extern "C"
 #define BK7258_WIFI_SCAN_MIN_MS          1000u
 #define BK7258_WIFI_SCAN_DEFAULT_MS      15000u
 #define BK7258_WIFI_SCAN_MAX_RESULTS     4u
+/* AP-local scan snapshots are never serialized on the CP control wire. */
+#define BK7258_WIFI_AP_SCAN_MAX_RESULTS  32u
 
 /****************************************************************************
  * Public Types
@@ -53,6 +55,37 @@ enum bk7258_wifi_operation_e
   BK7258_WIFI_OPERATION_MONITOR_STATUS,
   BK7258_WIFI_OPERATION_MONITOR_CHANNEL,
   BK7258_WIFI_OPERATION_SCAN
+};
+
+enum bk7258_wifi_link_state_e
+{
+  BK7258_WIFI_LINK_IDLE = 0,
+  BK7258_WIFI_LINK_CONNECTING,
+  BK7258_WIFI_LINK_DISCONNECTED,
+  BK7258_WIFI_LINK_CONNECTED,
+  BK7258_WIFI_LINK_CONNECT_FAILED
+};
+
+/* Numeric scan values match the vendor wifi_security_t ABI.  They are kept
+ * here so AP applications do not need to include vendor SDK headers. */
+enum bk7258_wifi_security_e
+{
+  BK7258_WIFI_SECURITY_NONE = 0,
+  BK7258_WIFI_SECURITY_WEP,
+  BK7258_WIFI_SECURITY_WPA_TKIP,
+  BK7258_WIFI_SECURITY_WPA_AES,
+  BK7258_WIFI_SECURITY_WPA_MIXED,
+  BK7258_WIFI_SECURITY_WPA2_TKIP,
+  BK7258_WIFI_SECURITY_WPA2_AES,
+  BK7258_WIFI_SECURITY_WPA2_MIXED,
+  BK7258_WIFI_SECURITY_WPA3_SAE,
+  BK7258_WIFI_SECURITY_WPA3_WPA2_MIXED,
+  BK7258_WIFI_SECURITY_EAP,
+  BK7258_WIFI_SECURITY_OWE,
+  BK7258_WIFI_SECURITY_AUTO,
+  BK7258_WIFI_SECURITY_WAPI_PSK,
+  BK7258_WIFI_SECURITY_WAPI_CERT,
+  BK7258_WIFI_SECURITY_WAPI_UNKNOWN
 };
 
 struct bk7258_wifi_echo_s
@@ -109,6 +142,15 @@ struct bk7258_wifi_scan_result_s
   struct bk7258_wifi_scan_ap_s aps[BK7258_WIFI_SCAN_MAX_RESULTS];
 };
 
+struct bk7258_wifi_scan_snapshot_s
+{
+  int32_t status;
+  uint32_t found;
+  uint32_t returned;
+  uint32_t truncated;
+  struct bk7258_wifi_scan_ap_s aps[BK7258_WIFI_AP_SCAN_MAX_RESULTS];
+};
+
 /* Local AP diagnostics only: never serialized into the CP wire message. */
 #define BK7258_WIFI_CHANNEL_STATS_MAX 13u
 struct bk7258_wifi_channel_stats_s
@@ -145,13 +187,25 @@ int bk7258_wifi_connect_async(const char *ssid, const char *password,
 int bk7258_wifi_connect_poll(uint32_t ticket,
                              struct bk7258_wifi_result_s *result);
 int bk7258_wifi_connect_cancel(uint32_t ticket);
+int bk7258_wifi_ping_async(uint32_t timeout_ms, uint32_t *ticket);
+int bk7258_wifi_ping_poll(uint32_t ticket, struct bk7258_wifi_result_s *result);
+int bk7258_wifi_ping_cancel(uint32_t ticket);
 /* Scan completion is consumed with scan_poll, including after leaving a UI
  * page. It shares the worker with connect/CP requests and returns -EBUSY
  * while reserved. Scanning stops at timeout; navigation need not block. */
 int bk7258_wifi_scan_async(uint32_t timeout_ms, uint32_t *ticket);
 int bk7258_wifi_scan_poll(uint32_t ticket,
                          struct bk7258_wifi_scan_result_s *result);
+/* AP-local extended scan result. It shares the scan ticket and is consumed
+ * exactly once, just like bk7258_wifi_scan_poll(). */
+int bk7258_wifi_scan_snapshot_poll(
+  uint32_t ticket, struct bk7258_wifi_scan_snapshot_s *result);
+/* Returns a stable display name for a documented scan security value, or
+ * NULL for a value unknown to this chip interface. */
+const char *bk7258_wifi_security_name(uint8_t security);
 int bk7258_wifi_channels_async(uint32_t dwell_ms, uint32_t *ticket);
+/* Explicitly disconnect STA before local channel sampling. */
+int bk7258_wifi_channels_switch_async(uint32_t dwell_ms, uint32_t *ticket);
 int bk7258_wifi_channels_poll(uint32_t ticket,
                              struct bk7258_wifi_channel_stats_s *result);
 /* Stop is cooperative: poll the matching result until completed before restart. */

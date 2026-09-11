@@ -17,6 +17,27 @@ config DOLPHIN_STACKSIZE
 
 endif
 
+config DOLPHIN_FILE_COPY
+	bool "Dolphin SD to USB file copy backend"
+	default n
+	depends on DOLPHIN_UI
+	help
+		Build the controlled single-file copy backend. It performs no mount,
+		format, USB class, or user-interface operation.
+
+config DOLPHIN_STORAGE_ROOT
+	string "Dolphin removable storage root"
+	default "/mnt/tf"
+	depends on DOLPHIN_UI || DOLPHIN_FILE_COPY
+
+if DOLPHIN_FILE_COPY
+
+config DOLPHIN_USB_ROOT
+	string "Dolphin USB storage root"
+	default "/mnt/usb"
+
+endif
+
 config DOLPHIN_UI
 	bool "Dolphin touchscreen desktop"
 	default n
@@ -36,11 +57,33 @@ config DOLPHIN_UI_STACKSIZE
 	default 16384
 	range 8192 65536
 
-config DOLPHIN_STORAGE_ROOT
-	string "Dolphin read-only file browser root"
-	default "/mnt/tf"
+config DOLPHIN_RECORDER
+	bool "Dolphin WAV recorder"
+	default n
+	depends on DOLPHIN_UI && BK7258_MIC && !MEDIA
 	help
-		Use the board-mounted removable filesystem. Dolphin does not mount,
-		format, create or delete files and cannot navigate above this root.
+		Record a user-started 16 kHz, 16-bit mono WAV file to removable
+		storage through the existing BK7258 media_recorder compatibility ABI.
+
+config DOLPHIN_ADC_KEY
+	bool "Dolphin ADC single key"
+	default n
+	depends on DOLPHIN_UI && ADC
+
+if DOLPHIN_ADC_KEY
+config DOLPHIN_ADC_KEY_DEVPATH
+	string "ADC device path"
+	default "/dev/adc0"
+config DOLPHIN_ADC_KEY_CHANNEL
+	int "ADC channel"
+	default 14
+config DOLPHIN_ADC_KEY_RELEASE_MIN
+	int "Calibrated released raw minimum"
+	default 0
+	# Zero deliberately disables input until the board owner supplies a raw gate.
+config DOLPHIN_ADC_KEY_ACTIVE_LOW
+	bool "Pressed level is lower than released level"
+	default y
+endif
 
 endif

@@ -75,7 +75,7 @@ ifeq ($(CONFIG_BK7258_APP_AGENT),y)
 CSRCS += bk7258_agent_product.c
 endif
 
-ifneq ($(filter y,$(CONFIG_BK7258_APP_AGENT) $(CONFIG_BK7258_VOICE_SERVICE)),)
+ifneq ($(filter y,$(CONFIG_BK7258_APP_AGENT) $(CONFIG_BK7258_VOICE_SERVICE) $(CONFIG_DOLPHIN_RECORDER)),)
 ifeq ($(CONFIG_MEDIA),)
 ifeq ($(CONFIG_BK7258_MIC),y)
 CFLAGS += ${INCDIR_PREFIX}$(APPDIR)$(DELIM)frameworks$(DELIM)multimedia$(DELIM)media$(DELIM)include
