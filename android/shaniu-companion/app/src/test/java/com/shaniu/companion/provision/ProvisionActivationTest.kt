@@ -42,6 +42,11 @@ class ProvisionActivationTest {
         "gateway_host" to "gateway.test", "gateway_ipv4" to "192.168.1.2", "gateway_port" to "8443",
         "gateway_ca_der" to Base64.getEncoder().encodeToString(ca),
     )
+    private fun bootstrapValues() = linkedMapOf(
+        "protocol" to "provision-bootstrap-v1", "device_id" to "test-device",
+        "certificate_sha256" to "ab".repeat(32),
+        "possession_secret" to Base64.getEncoder().encodeToString(ByteArray(32) { 42 }),
+    )
     private fun reject(text: String) {
         try { ProvisionActivation.parse(text.toCharArray()).close(); fail("Accepted invalid activation") }
         catch (error: IllegalArgumentException) { assertEquals("Invalid device activation", error.message) }
@@ -50,13 +55,24 @@ class ProvisionActivationTest {
         val activation = ProvisionActivation.parse(Gson().toJson(values()).toCharArray())
         assertEquals("gateway.test", activation.host)
         assertEquals(8443, activation.port)
-        assertArrayEquals(ca, activation.caCopy())
+        assertArrayEquals(ca, activation.caCopy()!!)
+        assertTrue(activation.hasLegacyRoute)
         assertEquals("ProvisionActivation(redacted)", activation.toString())
         val bootstrap = activation.takeBootstrap()
         activation.close()
         assertEquals("test-device", bootstrap.deviceId)
         bootstrap.usePossessionSecret { assertArrayEquals(ByteArray(32) { 42 }, it) }
         bootstrap.close()
+    }
+    @Test fun fourFieldBootstrapPackageIsNormalActivationWithoutGatewayRoute() {
+        val activation = ProvisionActivation.parse(Gson().toJson(bootstrapValues()).toCharArray())
+        assertFalse(activation.hasLegacyRoute)
+        assertNull(activation.caCopy())
+        assertNull(activation.host)
+        assertNull(activation.address)
+        assertNull(activation.port)
+        activation.takeBootstrap().use { assertEquals("test-device", it.deviceId) }
+        activation.close()
     }
     @Test fun rejectsDuplicateMissingUnknownAndTrailingFields() {
         val valid = Gson().toJson(values())
@@ -73,5 +89,11 @@ class ProvisionActivationTest {
             "gateway_ca_der" to Base64.getEncoder().encodeToString(ca + byteArrayOf(0)))) {
             reject(Gson().toJson(values().apply { put(field, value) }))
         }
+    }
+    @Test fun rejectsInvalidBootstrapAndMixedFields() {
+        reject(Gson().toJson(bootstrapValues().apply { put("certificate_sha256", "zz".repeat(32)) }))
+        reject(Gson().toJson(bootstrapValues().apply { put("possession_secret", "bad") }))
+        reject(Gson().toJson(bootstrapValues().apply { put("gateway_host", "gateway.test") }))
+        reject(Gson().toJson(bootstrapValues().apply { put("protocol", "provision-activation-v1") }))
     }
 }

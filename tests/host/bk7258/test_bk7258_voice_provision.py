@@ -7,6 +7,7 @@ import sys
 import json
 import base64
 import hashlib
+import subprocess
 import tempfile
 import time
 from unittest.mock import patch
@@ -21,6 +22,100 @@ from _lib import voice
 
 
 class VoiceProvisionTests(unittest.TestCase):
+    def test_runtime_identity_bind_busy_retries_only_after_persistence(self):
+        source = (ROOT / "app/bk7258/bk7258_voice_runtime.c").read_text()
+        start = source.index("static void bkvoice_identity_progress")
+        end = source.index("\nstatic void bkvoice_configuration_progress", start)
+        function = source[start:end]
+        harness = r'''
+#include <assert.h>
+#include <errno.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#define BKVOICE_CONFIG_MAX_BYTES 4096u
+struct bkprov_identity_s { unsigned char *record; size_t size; };
+struct bkvoice_runtime_s {
+  struct bkprov_identity_s identity;
+  bool identity_pending, identity_bind_pending, identity_bound;
+  int identity_result, last_error;
+  uint64_t provision_restore_ms;
+  void *upload;
+};
+static uint64_t clock_ms;
+static int install_result, storage_result, bind_results[4], bind_count;
+static int install_calls, storage_calls, bind_calls;
+static unsigned char stable_record[4096];
+static uint64_t bkvoice_now(void) { return clock_ms; }
+static void mbedtls_platform_zeroize(void *p, size_t n) { memset(p, 0, n); }
+static int bkprov_storage_refresh(void) { return 0; }
+static int bkprov_storage_identity_install(const void *record, size_t size)
+{ (void)record; (void)size; install_calls++; return install_result; }
+static int bkprov_storage_identity(void *record, size_t max, size_t *size)
+{ (void)record; (void)max; storage_calls++; if (storage_result == 0) *size = 4; return storage_result; }
+static int bkprov_identity_load(struct bkprov_identity_s *identity,
+                                const void *record, size_t size)
+{ memcpy(stable_record, record, size); identity->record = stable_record;
+  identity->size = size; return 0; }
+static int bkvoice_identity_bind(struct bkvoice_runtime_s *runtime)
+{ int ret = bind_results[bind_calls < bind_count ? bind_calls : bind_count - 1];
+  bind_calls++; if (ret == 0) runtime->identity_bound = true; return ret; }
+'''
+        harness += function + r'''
+static void reset(struct bkvoice_runtime_s *r)
+{
+  memset(r, 0, sizeof(*r)); clock_ms = 1000; install_result = 0;
+  storage_result = -ENOENT; install_calls = storage_calls = bind_calls = 0;
+  bind_count = 0; memset(bind_results, 0, sizeof(bind_results));
+}
+int main(void)
+{
+  struct bkvoice_runtime_s r; unsigned char record[4] = {1, 2, 3, 4};
+  reset(&r); storage_result = 0; bind_results[0] = -EBUSY;
+  bind_results[1] = 0; bind_count = 2;
+  bkvoice_identity_progress(&r); assert(r.identity_bind_pending && bind_calls == 1);
+  assert(storage_calls == 1 && install_calls == 0);
+  bkvoice_identity_progress(&r);
+  assert(bind_calls == 1 && storage_calls == 1 && install_calls == 0);
+  clock_ms += 1000; bkvoice_identity_progress(&r);
+  assert(r.identity_bound && !r.identity_bind_pending && bind_calls == 2);
+  bkvoice_identity_progress(&r);
+  assert(bind_calls == 2 && storage_calls == 1 && install_calls == 0);
+
+  reset(&r); r.identity.record = record; r.identity.size = sizeof(record);
+  r.identity_pending = true; install_result = -EIO; bind_count = 1;
+  bkvoice_identity_progress(&r);
+  assert(!r.identity_pending && !r.identity_bind_pending && bind_calls == 0);
+
+  reset(&r); storage_result = 0; bind_results[0] = -EIO; bind_count = 1;
+  bkvoice_identity_progress(&r); assert(bind_calls == 1 && !r.identity_bind_pending);
+  clock_ms += 1000; bkvoice_identity_progress(&r); assert(bind_calls == 1);
+
+  reset(&r); r.identity.record = record; r.identity.size = sizeof(record);
+  r.identity_pending = true; install_result = 0; bind_results[0] = -EBUSY;
+  bind_results[1] = 0; bind_count = 2; bkvoice_identity_progress(&r);
+  assert(!r.identity_pending && r.identity_bind_pending && bind_calls == 1);
+  assert(install_calls == 1);
+  bkvoice_identity_progress(&r);
+  assert(bind_calls == 1 && install_calls == 1);
+  clock_ms += 1000; bkvoice_identity_progress(&r);
+  assert(r.identity_bound && bind_calls == 2);
+  bkvoice_identity_progress(&r);
+  assert(bind_calls == 2 && install_calls == 1);
+  return 0;
+}
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            c_file, binary = root / "identity_progress.c", root / "identity_progress"
+            c_file.write_text(harness, encoding="utf-8")
+            subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror",
+                            str(c_file), "-o", str(binary)], check=True,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            subprocess.run([str(binary)], check=True, stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE)
+
     def test_console_enrollment_reads_private_token_and_never_returns_it(self):
         pin = "sha256/" + base64.b64encode(b"p" * 32).decode("ascii")
         token = "a" * 32
@@ -117,7 +212,9 @@ class VoiceProvisionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "activation.json"
             args = SimpleNamespace(device_id="test-device", host="gateway.test", peer="192.168.1.2",
-                     port=8443, console_port="COM8", activation_output=output)
+                     port=8443, console_port="COM8", activation_output=output,
+                     server_ca=Path("ca"), client_cert=Path("cert"), client_key=Path("key"),
+                     openssl=Path("openssl"), direct_cloud=False)
             captured = []
             with patch.object(voice, "_bundle", return_value=bundle), patch.object(voice, "_run_console",
                     side_effect=lambda port, payload: captured.append(bytes(payload))):
@@ -146,6 +243,44 @@ class VoiceProvisionTests(unittest.TestCase):
                     output.write_text(json.dumps(invalid))
                     with self.assertRaises(voice.VoiceProvisionError): voice._pairing(args)
                 self.assertEqual(len(captured), 2)
+
+    def test_direct_cloud_writes_four_field_bootstrap_and_resume_is_immutable(self):
+        cert, key = b"test-cert", b"private-test-key"
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "bootstrap.json"
+            args = SimpleNamespace(device_id="test-device", console_port="COM8",
+                                   activation_output=output, direct_cloud=True,
+                                   client_cert=Path("cert"), client_key=Path("key"),
+                                   openssl=Path("openssl"))
+            captured = []
+            with patch.object(voice, "_identity_parts", return_value=(cert, key)), \
+                 patch.object(voice, "_run_console", side_effect=lambda port, payload: captured.append(bytes(payload))):
+                voice._pairing(args)
+                saved = output.read_bytes()
+                document = json.loads(saved)
+                self.assertEqual(set(document), {"protocol", "device_id",
+                                                  "certificate_sha256", "possession_secret"})
+                self.assertEqual(document["protocol"], "provision-bootstrap-v1")
+                self.assertEqual(document["certificate_sha256"], hashlib.sha256(cert).hexdigest())
+                self.assertEqual(base64.b64decode(document["possession_secret"]), captured[0][16:48])
+                args.resume = True
+                with patch.object(voice.os, "urandom", side_effect=AssertionError("must reuse proof")):
+                    voice._pairing(args)
+                self.assertEqual(output.read_bytes(), saved)
+                self.assertEqual(captured[1], captured[0])
+                args.direct_cloud = False
+                args.host = "gateway.test"; args.peer = "192.168.1.2"; args.server_ca = Path("ca")
+                with self.assertRaises(voice.VoiceProvisionError): voice._pairing(args)
+                args.direct_cloud = True; args.host = "gateway.test"
+                with self.assertRaises(voice.VoiceProvisionError): voice._pairing(args)
+                invalid_output = Path(directory) / "invalid.json"
+                invalid = SimpleNamespace(device_id="test-device", console_port="ttyUSB0",
+                                          activation_output=invalid_output, direct_cloud=True,
+                                          client_cert=Path("cert"), client_key=Path("key"),
+                                          openssl=Path("openssl"))
+                with patch.object(voice, "_identity_parts", side_effect=AssertionError("must reject first")):
+                    with self.assertRaises(voice.VoiceProvisionError): voice._pairing(invalid)
+                self.assertFalse(invalid_output.exists())
 
     def test_helper_starts_command_before_secret_protocol(self) -> None:
         helper = voice._POWERSHELL

@@ -80,7 +80,7 @@ class ProvisionActivity : Activity() {
     private var ca: ByteArray? = null
     private var selected: BluetoothDevice? = null
     private var connection: ProvisioningConnection? = null
-    private var recoveryControl: DeviceControlConnection? = null
+    private var recoveryControl: AutoCloseable? = null
     private var scanning = false
     private var outcomeUnknown = false
     private var epoch = 0L
@@ -274,8 +274,8 @@ class ProvisionActivity : Activity() {
     private fun nextPage() {
         if (selected == null) { status.text = "请先选择附近的傻妞。"; return }
         // Owner activation is required before collecting a Wi-Fi password.
-        if (bootstrap == null || ca == null ||
-            (developerMode && (host.text.isNullOrBlank() || address.text.isNullOrBlank()))) {
+        if (bootstrap == null ||
+            (developerMode && (ca == null || host.text.isNullOrBlank() || address.text.isNullOrBlank()))) {
             status.text = "请先导入随设备提供的激活资料，再继续设置网络。"
             return
         }
@@ -289,6 +289,10 @@ class ProvisionActivity : Activity() {
     }
     private fun goBack() {
         if (connection != null) { connection?.close(); return }
+        if (recoveryControl != null) {
+            cancelRecoveryToDiscovery()
+            return
+        }
         if (page > 0) {
             cloudLookupGeneration++; cloudResolving = false
             password.text.clear(); cloudKey.text.clear()
@@ -335,7 +339,8 @@ class ProvisionActivity : Activity() {
                         val nextBootstrap = next.takeBootstrap()
                         bootstrap?.close(); ca?.fill(0)
                         bootstrap = nextBootstrap; ca = nextCa
-                        host.setText(next.host); address.setText(next.address); port.setText(next.port.toString())
+                        host.setText(next.host ?: ""); address.setText(next.address ?: "")
+                        port.setText(next.port?.toString() ?: "8443")
                         val pending = hasPending(nextBootstrap.deviceId)
                         if (pending == null) {
                             nextButton.isEnabled = false
@@ -557,7 +562,16 @@ class ProvisionActivity : Activity() {
             if (!terminal) connect(recover = true, controlFirst = false)
         } }, bindingStore, transaction)
         recoveryControl = control
-        resultButton.setOnClickListener { ++epoch; recoveryControl?.close(); recoveryControl = null }
+        resultButton.setOnClickListener { goBack() }
+    }
+
+    private fun cancelRecoveryToDiscovery() {
+        ++epoch
+        val control = recoveryControl
+        recoveryControl = null
+        control?.close()
+        showPage(0)
+        status.text = "已取消本次连接，认领结果仍需核对。"
     }
 
     private fun hasPending(deviceId: String): Boolean? = try {
@@ -665,7 +679,12 @@ class ProvisionActivity : Activity() {
         // Closing drives the protocol's UNCONFIRMED state after APPLY; its
         // durable receipt locator survives. Never treat backgrounding as a
         // failed commit or silently continue an owner confirmation offscreen.
-        connection?.close(); recoveryControl?.close(); recoveryControl = null
+        if (recoveryControl != null) {
+            cancelRecoveryToDiscovery()
+        } else {
+            connection?.close()
+            recoveryControl = null
+        }
         super.onStop()
     }
     override fun onDestroy() {

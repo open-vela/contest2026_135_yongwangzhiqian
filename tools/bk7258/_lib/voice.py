@@ -62,10 +62,12 @@ def add_arguments(commands: argparse._SubParsersAction[argparse.ArgumentParser])
     pairing = commands.add_parser("pairing", help="supply a device TLS identity and write its private owner activation file")
     pairing.add_argument("--console-port", required=True)
     pairing.add_argument("--device-id", required=True)
-    pairing.add_argument("--host", required=True)
-    pairing.add_argument("--peer", required=True)
-    pairing.add_argument("--port", type=int, default=8765)
-    pairing.add_argument("--server-ca", type=Path, required=True)
+    pairing.add_argument("--direct-cloud", action="store_true",
+                         help="write the four-field cloud bootstrap without a Gateway route")
+    pairing.add_argument("--host")
+    pairing.add_argument("--peer")
+    pairing.add_argument("--port", type=int)
+    pairing.add_argument("--server-ca", type=Path)
     pairing.add_argument("--client-cert", type=Path, required=True)
     pairing.add_argument("--client-key", type=Path, required=True)
     pairing.add_argument("--activation-output", type=Path, required=True)
@@ -117,10 +119,25 @@ def _read_der(openssl: Path, arguments: list[str], label: str) -> bytes:
     return result.stdout
 
 
+def _identity_parts(args: argparse.Namespace) -> tuple[bytes, bytes]:
+    _regular(args.client_cert, "client certificate")
+    _regular(args.client_key, "client key", private=True)
+    cert = _read_der(args.openssl, ["x509", "-in", str(args.client_cert), "-outform", "DER"], "certificate")
+    key = _read_der(
+        args.openssl,
+        ["pkcs8", "-topk8", "-nocrypt", "-in", str(args.client_key), "-outform", "DER"],
+        "key",
+    )
+    return cert, key
+
+
 def _bundle(args: argparse.Namespace) -> bytes:
+    port = getattr(args, "port", None)
+    if port is None:
+        port = 8765
     if not _CONSOLE_RE.fullmatch(args.console_port):
         raise VoiceProvisionError("console port is invalid")
-    if not isinstance(args.port, int) or not 1 <= args.port <= 65535:
+    if not isinstance(port, int) or not 1 <= port <= 65535:
         raise VoiceProvisionError("gateway port is invalid")
     if not isinstance(args.host, str) or not _HOST_RE.fullmatch(args.host):
         raise VoiceProvisionError("gateway host is invalid")
@@ -136,19 +153,12 @@ def _bundle(args: argparse.Namespace) -> bytes:
         raise VoiceProvisionError("gateway peer is invalid")
 
     _regular(args.server_ca, "server CA")
-    _regular(args.client_cert, "client certificate")
-    _regular(args.client_key, "client key", private=True)
     ca = _read_der(args.openssl, ["x509", "-in", str(args.server_ca), "-outform", "DER"], "CA")
-    cert = _read_der(args.openssl, ["x509", "-in", str(args.client_cert), "-outform", "DER"], "certificate")
-    key = _read_der(
-        args.openssl,
-        ["pkcs8", "-topk8", "-nocrypt", "-in", str(args.client_key), "-outform", "DER"],
-        "key",
-    )
+    cert, key = _identity_parts(args)
     if len(hostname) > 127:
         raise VoiceProvisionError("gateway host is invalid")
     record = _BVC1_HEADER.pack(
-        b"BVC1", 1, 0, int(time.time()), len(hostname), args.port,
+        b"BVC1", 1, 0, int(time.time()), len(hostname), port,
         peer.packed, len(ca), len(cert), len(key), 0,
     ) + hostname + ca + cert + key
     if len(record) > _MAX_TOTAL:
@@ -450,26 +460,43 @@ def _run_console(port: str, payload: bytes) -> None:
 
 
 def _pairing(args: argparse.Namespace) -> dict[str, object]:
+    if not _CONSOLE_RE.fullmatch(getattr(args, "console_port", "")):
+        raise VoiceProvisionError("console port is invalid")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", args.device_id):
         raise VoiceProvisionError("device identity is invalid")
-    source = bytearray(_bundle(args))
+    direct = bool(getattr(args, "direct_cloud", False))
+    if direct and any(getattr(args, name, None) is not None
+                      for name in ("host", "peer", "server_ca", "port")):
+        raise VoiceProvisionError("direct cloud mode does not accept Gateway parameters")
+    if not direct and any(getattr(args, name, None) is None
+                          for name in ("host", "peer", "server_ca")):
+        raise VoiceProvisionError("Gateway parameters are required")
+    source = bytearray() if direct else bytearray(_bundle(args))
     payload = bytearray()
+    cert = bytearray()
+    key = bytearray()
     try:
-        fields = _BVC1_HEADER.unpack_from(source)
-        host_size, ca_size, cert_size, key_size = fields[4], fields[7], fields[8], fields[9]
-        start = _BVC1_HEADER.size + host_size
-        ca = source[start:start + ca_size]
-        cert = source[start + ca_size:start + ca_size + cert_size]
-        key = source[start + ca_size + cert_size:]
+        if direct:
+            cert_bytes, key_bytes = _identity_parts(args)
+            cert.extend(cert_bytes); key.extend(key_bytes)
+            ca = bytearray()
+            cert_size, key_size = len(cert), len(key)
+        else:
+            fields = _BVC1_HEADER.unpack_from(source)
+            host_size, ca_size, cert_size, key_size = fields[4], fields[7], fields[8], fields[9]
+            start = _BVC1_HEADER.size + host_size
+            ca = source[start:start + ca_size]
+            cert.extend(source[start + ca_size:start + ca_size + cert_size])
+            key.extend(source[start + ca_size + cert_size:])
         proof = bytearray()
         try:
-            activation = {
-                "protocol": "provision-activation-v1", "device_id": args.device_id,
-                "certificate_sha256": hashlib.sha256(cert).hexdigest(),
-                "gateway_host": args.host, "gateway_ipv4": args.peer,
-                "gateway_port": str(args.port),
-                "gateway_ca_der": base64.b64encode(ca).decode("ascii"),
-            }
+            activation = {"protocol": "provision-bootstrap-v1" if direct else "provision-activation-v1",
+                          "device_id": args.device_id,
+                          "certificate_sha256": hashlib.sha256(cert).hexdigest()}
+            if not direct:
+                activation.update({"gateway_host": args.host, "gateway_ipv4": args.peer,
+                                   "gateway_port": str(getattr(args, "port", None) or 8765),
+                                   "gateway_ca_der": base64.b64encode(ca).decode("ascii")})
             if getattr(args, "resume", False):
                 _regular(args.activation_output, "owner activation", private=True)
                 with args.activation_output.open("rb") as stored:
@@ -509,6 +536,8 @@ def _pairing(args: argparse.Namespace) -> dict[str, object]:
         raise VoiceProvisionError("identity supply failed; preserve any owner activation file for reconciliation") from error
     finally:
         source[:] = b"\0" * len(source)
+        cert[:] = b"\0" * len(cert)
+        key[:] = b"\0" * len(key)
         payload[:] = b"\0" * len(payload)
 
 

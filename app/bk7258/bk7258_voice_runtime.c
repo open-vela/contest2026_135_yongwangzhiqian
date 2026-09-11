@@ -114,6 +114,7 @@ struct bkvoice_runtime_s
 #ifdef CONFIG_BK7258_PROVISION_GATT
   struct bkprov_identity_s identity;
   bool identity_pending;
+  bool identity_bind_pending;
   bool identity_bound;
   int identity_result;
   uint64_t provision_restore_ms;
@@ -2749,6 +2750,8 @@ static int bkvoice_identity_bind(struct bkvoice_runtime_s *runtime)
 
 static void bkvoice_identity_progress(struct bkvoice_runtime_s *runtime)
 {
+  uint64_t now;
+
 #ifdef BKVOICE_RUNTIME_SOFT_OFF
   if (bkvoice_soft_off_pending(runtime)) return;
 #endif
@@ -2759,19 +2762,49 @@ static void bkvoice_identity_progress(struct bkvoice_runtime_s *runtime)
       return;
     }
 #endif
+  now = bkvoice_now();
+  if (runtime->identity_bind_pending)
+    {
+      int ret;
+
+      if (now < runtime->provision_restore_ms) return;
+      ret = bkvoice_identity_bind(runtime);
+      if (ret == -EBUSY)
+        {
+          runtime->identity_result = -EAGAIN;
+          runtime->provision_restore_ms = now + 1000;
+          return;
+        }
+
+      runtime->identity_bind_pending = false;
+      runtime->identity_result = ret;
+      if (ret < 0 && ret != -EAGAIN) runtime->last_error = ret;
+      return;
+    }
   if (runtime->identity_pending)
     {
       int ret = bkprov_storage_identity_install(runtime->identity.record, runtime->identity.size);
       if (ret == -EAGAIN) return;
-      if (ret == 0) ret = bkvoice_identity_bind(runtime);
+      if (ret == 0)
+        {
+          ret = bkvoice_identity_bind(runtime);
+          if (ret == -EBUSY)
+            {
+              runtime->identity_bind_pending = true;
+              runtime->identity_result = -EAGAIN;
+              runtime->provision_restore_ms = now + 1000;
+              runtime->identity_pending = false;
+              return;
+            }
+        }
       runtime->identity_result = ret;
       runtime->identity_pending = false;
       if (ret < 0) runtime->last_error = ret;
       return;
     }
   if (runtime->identity.record != NULL || runtime->upload != NULL ||
-      bkvoice_now() < runtime->provision_restore_ms) return;
-  runtime->provision_restore_ms = bkvoice_now() + 1000;
+      now < runtime->provision_restore_ms) return;
+  runtime->provision_restore_ms = now + 1000;
   uint8_t *record = malloc(BKVOICE_CONFIG_MAX_BYTES);
   if (record == NULL) return;
   size_t size;
@@ -2779,9 +2812,19 @@ static void bkvoice_identity_progress(struct bkvoice_runtime_s *runtime)
   if (ret == 0)
     {
       ret = bkprov_identity_load(&runtime->identity, record, size);
-      if (ret == 0) ret = bkvoice_identity_bind(runtime);
+      if (ret == 0)
+        {
+          ret = bkvoice_identity_bind(runtime);
+          if (ret == -EBUSY)
+            {
+              runtime->identity_bind_pending = true;
+              runtime->identity_result = -EAGAIN;
+              runtime->provision_restore_ms = now + 1000;
+              ret = -EAGAIN;
+            }
+        }
       runtime->identity_result = ret;
-      if (ret < 0) runtime->last_error = ret;
+      if (ret < 0 && ret != -EAGAIN) runtime->last_error = ret;
     }
   else if (ret == -ENODEV || ret == -EXDEV || ret == -ENOTCONN)
     {
@@ -3024,7 +3067,8 @@ int bkvoice_runtime_command(const struct bkvoice_rpc_request_s *request,
             if (ret == 0)
               {
                 bkvoice_identity_progress(runtime);
-                ret = runtime->identity_pending ? -EAGAIN : runtime->identity_result;
+                ret = runtime->identity_pending || runtime->identity_bind_pending ?
+                      -EAGAIN : runtime->identity_result;
               }
             if (ret == -EAGAIN)
               {
@@ -3940,6 +3984,8 @@ int bkvoice_runtime_uninitialize(void)
   (void)bkprov_owner_unbind();
   (void)bkprov_network_unbind();
   bkprov_identity_clear(&runtime->identity);
+  runtime->identity_pending = false;
+  runtime->identity_bind_pending = false;
   runtime->identity_bound = false;
 #endif
 
