@@ -122,16 +122,14 @@ class ProvisionTlsTest {
             client.start()
             drain()
             assertTrue(client.established && server.established)
-            client.negotiatedMtu(client.generation, 185)
-            server.negotiatedMtu(server.generation, 185)
-            maximumPayload = 182
+            client.negotiatedMtu(client.generation, 70)
+            server.negotiatedMtu(server.generation, 70)
             val message = ByteArray(4096) { (it % 251).toByte() }
             client.send(message)
             drain()
             assertArrayEquals(message, serverPlain.toByteArray())
-            client.negotiatedMtu(client.generation, 517)
-            server.negotiatedMtu(server.generation, 517)
-            maximumPayload = 244
+            client.negotiatedMtu(client.generation, 185)
+            server.negotiatedMtu(server.generation, 185)
             client.send(message)
             drain()
             assertArrayEquals(message + message, serverPlain.toByteArray())

@@ -75,6 +75,11 @@ Gateway 的自有协议、MiMo 适配、外部依赖及测试来源独立维护�
 派生自 OpenVela NuttX `76354c637858ecb0aa4601629327acb6f44a26bb`
 的 GATT 源码/头文件，保留其 BSD-3-Clause 许可；相应 host harness 为本项目
 Apache-2.0 实现。官方 NuttX 工作树不作修改，补丁仅应用到隔离构建副本。
+`nuttx/patches/bluetooth/0003-gatt-ccc-do-not-allocate-unbonded-key-slot.patch`
+派生自同一 GATT 源码，使用既有非分配式 key 查询区分长期密钥与未配对连接，
+同样仅应用到隔离构建副本。
+`nuttx/patches/bluetooth/0004-att-cap-mtu-to-receive-buffer.patch` 派生自同一
+NuttX 的 ATT 源码，保持较小 peer MTU，仅限制不能完整进入接收缓冲的协商上限。
 
 ## 认领 TLS 与 GATT
 

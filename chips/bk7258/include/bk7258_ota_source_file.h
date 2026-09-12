@@ -29,10 +29,21 @@ struct bk7258_ota_file_source_s
   char path[2][BK7258_OTA_FILE_PATH_SIZE];
   int fd[2];
   volatile bool canceled;
+  bool prepared;
   struct bk7258_ota_catalog_s catalog;
 };
 
 #ifdef CONFIG_BK7258_OTA_SOURCE_FILE
+typedef int (*bk7258_ota_file_source_prepare_t)(const char *root);
+typedef int (*bk7258_ota_file_source_release_t)(void);
+
+/* A product registers one optional, process-lifetime filesystem pair during
+ * AP startup.  The OTA manager serializes each source open through close;
+ * release must also tolerate a failed prepare.
+ */
+int bk7258_ota_file_source_register(
+  bk7258_ota_file_source_prepare_t prepare,
+  bk7258_ota_file_source_release_t release);
 int bk7258_ota_file_source_initialize(
   struct bk7258_ota_file_source_s *source, const char *root);
 const struct bk7258_ota_source_ops_s *bk7258_ota_file_source_ops(void);

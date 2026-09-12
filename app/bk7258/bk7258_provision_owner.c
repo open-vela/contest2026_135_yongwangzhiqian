@@ -2,6 +2,7 @@
 #include "bk7258_provision_owner.h"
 #include "bk7258_provision_gatt.h"
 #include "bk7258_provision_storage.h"
+#include "bk7258_provision_scan.h"
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
@@ -51,7 +52,8 @@ static uint64_t owner_now(void *unused)
 
 bool bkprov_owner_busy(void)
 {
-  return g_owner.pair != NULL || g_owner.control != NULL || !bkprov_gatt_idle();
+  return g_owner.pair != NULL || g_owner.control != NULL || bkprov_scan_busy() ||
+         !bkprov_gatt_idle();
 }
 
 bool bkprov_owner_pairing(void)
@@ -211,6 +213,8 @@ bool bkprov_owner_step(uint64_t now, uint32_t epoch, bool link,
                         bool pressed, bool voice_idle)
 {
   bool was_active = g_owner.pair != NULL;
+  /* A closed BLE session cannot abandon the shared Wi-Fi worker ticket. */
+  bkprov_scan_drain();
   bool rollback = g_owner.sampled && now < g_owner.now;
   int ret = bkprov_gatt_poll();
   g_owner.now = now;

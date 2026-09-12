@@ -22,6 +22,8 @@ class ProvisionTlsTest(unittest.TestCase):
         self.assertTrue((source / 'CMakeLists.txt').is_file())
         with tempfile.TemporaryDirectory(prefix='bkprov-tls-test-') as directory:
             temp = Path(directory)
+            (temp / 'include/nuttx').mkdir(parents=True)
+            (temp / 'include/nuttx/config.h').write_text('')
             with (temp / 'build.log').open('w+') as log:
                 def run(args, env=None):
                     result = subprocess.run([str(a) for a in args],
@@ -30,9 +32,10 @@ class ProvisionTlsTest(unittest.TestCase):
                         log.seek(0)
                         self.fail(log.read()[-6000:])
                 run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror',
-                     '-I', source / 'include', '-I', ROOT / 'app/bk7258',
+                     '-I', temp / 'include', '-I', source / 'include', '-I', ROOT / 'app/bk7258',
                      ROOT / 'tests/host/bk7258/test_provision_owner.c',
                      ROOT / 'app/bk7258/bk7258_provision_owner.c',
+                     ROOT / 'app/bk7258/bk7258_provision_scan.c',
                      '-o', temp / 'owner'])
                 run([temp / 'owner'])
                 chip_include = temp / 'include/arch/chip'
@@ -81,12 +84,14 @@ class ProvisionTlsTest(unittest.TestCase):
                      build / 'library/libmbedx509.a',
                      build / 'library/libmbedcrypto.a', '-o', temp / 'settings'])
                 run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror',
-                     '-I', source / 'include', '-I', ROOT / 'app/bk7258',
+                     '-DCONFIG_BK7258_WIFI_VNET', '-DCONFIG_BK7258_AP_CORE',
+                     '-I', temp / 'include', '-I', source / 'include', '-I', ROOT / 'app/bk7258',
                      ROOT / 'tests/host/bk7258/test_provision_tls.c',
                      ROOT / 'app/bk7258/bk7258_provision_tls.c',
                      ROOT / 'app/bk7258/bk7258_provision_claim.c',
                      ROOT / 'app/bk7258/bk7258_provision_store.c',
                      ROOT / 'app/bk7258/bk7258_provision_pair.c',
+                     ROOT / 'app/bk7258/bk7258_provision_scan.c',
                      ROOT / 'app/bk7258/bk7258_control_pair.c',
                      ROOT / 'app/bk7258/bk7258_control_session.c',
                      build / 'library/libmbedtls.a',

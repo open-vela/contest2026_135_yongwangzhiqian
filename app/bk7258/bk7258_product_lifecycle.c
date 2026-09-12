@@ -16,6 +16,11 @@
 
 #include "bk7258_product_lifecycle.h"
 
+#if defined(CONFIG_BK7258_OTA_SOURCE_FILE) && defined(CONFIG_BK7258_USBMODE)
+#include "bk7258_media_volume.h"
+#include <arch/chip/bk7258_ota_source_file.h>
+#endif
+
 #ifdef CONFIG_DOLPHIN_UI
 #include "dolphin_ui.h"
 #endif
@@ -41,6 +46,15 @@
 int bk7258_ap_application_prepare(void)
 {
   int ret = 0;
+
+#if defined(CONFIG_BK7258_OTA_SOURCE_FILE) && defined(CONFIG_BK7258_USBMODE)
+  ret = bk7258_ota_file_source_register(bk7258_media_volume_ota_prepare,
+                                        bk7258_media_volume_ota_release);
+  if (ret < 0)
+    {
+      return ret;
+    }
+#endif
 
 #ifdef CONFIG_BK7258_APP_AGENT
   ret = bk7258_agent_product_prepare();

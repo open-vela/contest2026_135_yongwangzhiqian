@@ -41,6 +41,7 @@ static uint32_t g_generation;
 static bool g_registered;
 static bool g_window;
 static bool g_ready;
+static uint16_t g_ccc_value;
 
 static int read_name(struct bt_conn_s *conn, const struct bt_gatt_attr_s *attr,
                      void *buf, uint8_t len, uint16_t offset)
@@ -62,11 +63,13 @@ static void ccc_changed(uint16_t value)
   irqstate_t flags = spin_lock_irqsave(&g_lock);
   old = g_peer;
   g_peer = NULL;
+  g_ccc_value = value;
   g_head = 0;
   g_count = 0;
   memset(g_input, 0, sizeof(g_input));
   g_ready = false;
-  if (value == BT_GATT_CCC_NOTIFY && g_window && g_connection != NULL && g_generation != UINT32_MAX)
+  if (g_ccc_value == BT_GATT_CCC_NOTIFY && g_window &&
+      g_connection != NULL && g_generation != UINT32_MAX)
     {
       g_generation++;
       g_ready = true;
@@ -91,6 +94,12 @@ static void connected(struct bt_conn_s *conn, void *context)
       g_connection = bt_conn_addref(conn);
       g_locator_valid = false;
       memset(g_locator, 0, sizeof(g_locator));
+      if (g_ccc_value == BT_GATT_CCC_NOTIFY && g_window &&
+          g_generation != UINT32_MAX)
+        {
+          g_generation++;
+          g_ready = true;
+        }
     }
   spin_unlock_irqrestore(&g_lock, flags);
 }

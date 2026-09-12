@@ -25,6 +25,8 @@ done
 | `contactless/0001` | MFRC522 检测到卡但选卡失败时返回原始错误，避免使用未初始化 UID 误报成功 |
 | `bluetooth/0002` | 将既有 Host 连接回调、广播及断开接口声明公开，产品无需引用私有头文件；不改协议实现 |
 | `bluetooth/0001` | 增加可检查通知结果的 GATT API，保留 16 位句柄、按每个 peer 的 CCC 发送并释放断开连接引用 |
+| `bluetooth/0003` | CCC 写入只查询已有 LTK，避免未配对 peer 占用 key/持久 CCC 槽 |
+| `bluetooth/0004` | 接收 H4 头空间小于发送预留时，将协商 ATT MTU 限制到接收缓冲容量 |
 
 `bt_gatt_notify_checked` 返回已交给 L2CAP 的 PDU 数量；无发送时返回负错误。
 正数可能代表广播部分成功，不能直接重发，也不是远端接收确认。无订阅/连接返回
@@ -34,7 +36,9 @@ done
 `bt_gatt_notify_peer` 只向指定连接发送；异步持有 Host 回调连接时使用已公开的
 `bt_conn_addref` / `bt_conn_release`，不能把裸指针跨断线留存后再使用。
 执行 `python3 tests/host/bk7258/test_gatt_notify_result.py`，会在临时固定基线副本
-应用补丁，编译实际通知函数，验证分配失败、部分成功、peer CCC、断连引用和 16 位句柄。
+按顺序应用 Bluetooth 补丁，编译实际通知及 CCC 写入函数，验证分配失败、部分成功、
+peer CCC、断连引用、16 位句柄，以及未配对 peer 不分配 key/不固定 CCC 槽而已配对
+peer 的 CCC 仍会持久化。
 
 `video/0001` 涉及控制编号 ABI，内核与客户端必须一起重建。
 AIDK 配置选择一个扇区读、16 个扇区写、禁用 ACMD23；其他板卡默认值不变。

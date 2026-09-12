@@ -469,6 +469,14 @@ int bkcloud_runtime_clear(struct bkcloud_runtime_s **runtime)
       int ret=reap(r);if(ret) return ret;
     }
   int ret=bkvoice_ptt_session_close(r->ptt,-ECANCELED);
+  /* A failed probe never opens PTT capture.  Its already-closed result is
+   * safe only after confirming that no PTT worker remains to be joined.
+   */
+  if(ret==-EALREADY)
+    {
+      if(r->ptt->worker_joinable) return -EAGAIN;
+      ret=0;
+    }
   if(ret) return ret;
   wipe_audio(r);mbedtls_platform_zeroize(r,sizeof(*r));free(r);*runtime=NULL;
   return 0;
