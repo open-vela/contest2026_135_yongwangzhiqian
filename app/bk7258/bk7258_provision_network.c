@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <syslog.h>
 #include <time.h>
 #include <mbedtls/platform_util.h>
 
@@ -43,6 +44,11 @@ static uint8_t g_last_transaction[16];
 static bool g_commit_known;
 static int g_last_error;
 
+static void bkprov_failure(const char *stage, int ret)
+{
+  syslog(LOG_WARNING, "BKVOICE PROVISION stage=%s ret=%d\n", stage, ret);
+}
+
 bool bkprov_network_busy(void) { return g_trial != NULL; }
 int bkprov_network_bind(struct bkprov_identity_s *identity,
                          const struct bkprov_voice_ops_s *voice, void *context)
@@ -73,19 +79,34 @@ static int begin(void *context, const uint8_t *bundle, size_t size)
   if (g_identity == NULL || !g_voice->available(g_context)) return -EBUSY;
   if (bundle == NULL || size == 0 || size > BKPROV_BUNDLE_MAX) return -EINVAL;
   struct trial_s *t = calloc(1, sizeof(*t));
-  if (t == NULL) return -ENOMEM;
+  if (t == NULL)
+    {
+      bkprov_failure("alloc", -ENOMEM);
+      return -ENOMEM;
+    }
   memcpy(t->bundle, bundle, size); t->size = size;
   int ret = bkprov_settings_decode(&t->settings, t->bundle, size);
+  if (ret < 0) bkprov_failure("decode", ret);
   if (ret == 0)
-    ret = bkprov_settings_voice(&t->settings, g_identity->record + 48,
-              g_identity->certificate_size,
-              g_identity->record + 48 + g_identity->certificate_size,
-              g_identity->key_size, t->voice, sizeof(t->voice), &t->voice_size);
+    {
+      ret = bkprov_settings_voice(&t->settings, g_identity->record + 48,
+                g_identity->certificate_size,
+                g_identity->record + 48 + g_identity->certificate_size,
+                g_identity->key_size, t->voice, sizeof(t->voice), &t->voice_size);
+      if (ret < 0) bkprov_failure("voice_record", ret);
+    }
   if (ret == 0 && t->settings.cloud_size && !g_voice->load_cloud) ret = -ENOTSUP;
-  if (ret == 0) ret = bkvoice_config_validate(t->voice, t->voice_size);
   if (ret == 0)
-    ret = bk7258_wifi_trial_start(t->settings.ssid, t->settings.password,
-                                   30000, &t->lease);
+    {
+      ret = bkvoice_config_validate(t->voice, t->voice_size);
+      if (ret < 0) bkprov_failure("validate", ret);
+    }
+  if (ret == 0)
+    {
+      ret = bk7258_wifi_trial_start(t->settings.ssid, t->settings.password,
+                                     30000, &t->lease);
+      if (ret < 0) bkprov_failure("wifi_start", ret);
+    }
   if (ret < 0)
     { mbedtls_platform_zeroize(t, sizeof(*t)); free(t); return ret; }
   t->ticket = t->lease; t->wifi_pending = true; t->phase = WIFI;
@@ -159,9 +180,9 @@ void bkprov_network_step(void)
       if (ret == -EAGAIN) return;
       t->wifi_pending = false;
       if (ret < 0)
-        { t->error = ret; t->phase = QUARANTINE; return; }
+        { bkprov_failure("wifi_poll", ret); t->error = ret; t->phase = QUARANTINE; return; }
       if (result.status < 0)
-        { t->error = result.status; t->phase = ABORTING; }
+        { bkprov_failure("wifi_result", result.status); t->error = result.status; t->phase = ABORTING; }
       if (t->phase == WIFI) t->phase = t->restoring ? TIME : VOICE;
     }
   uint64_t now_ms = bkvoice_config_now_ms(NULL);
@@ -199,7 +220,12 @@ void bkprov_network_step(void)
           else ret = g_voice->load(g_context, t->voice, t->voice_size);
           mbedtls_platform_zeroize(t->voice, sizeof(t->voice));
           t->voice_loaded = true;
-          if (ret == 0) ret = g_voice->connect(g_context);
+          if (ret < 0) bkprov_failure("voice_load", ret);
+          if (ret == 0)
+            {
+              ret = g_voice->connect(g_context);
+              if (ret < 0) bkprov_failure("voice_connect", ret);
+            }
           if (ret < 0) { t->error = ret; t->phase = ABORTING; }
           else t->phase = SERVICE;
         }
@@ -212,7 +238,7 @@ void bkprov_network_step(void)
           t->phase = t->restoring ? FINISH : VERIFIED;
           if (t->restoring) t->committing = true;
         }
-      else if (ret < 0) { t->error = ret; t->phase = ABORTING; }
+      else if (ret < 0) { bkprov_failure("service_ready", ret); t->error = ret; t->phase = ABORTING; }
     }
   if (t->phase == PERSIST)
     persist_result(bkprov_storage_commit(0, t->transaction, t->bundle, t->size));

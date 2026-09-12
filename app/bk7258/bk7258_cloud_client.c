@@ -10,6 +10,49 @@
 #  include <cJSON.h>
 #endif
 
+#define BKCLOUD_REQUEST_CAPACITY 65536u
+
+static int bkcloud_request_serialize(cJSON *root, char **body,
+                                     size_t *body_size, size_t *body_capacity)
+{
+  size_t capacity = 256;
+
+  *body = NULL;
+  *body_size = 0;
+  *body_capacity = 0;
+  for (;;)
+    {
+      char *request = cJSON_malloc(capacity);
+      if (request == NULL) return -ENOMEM;
+      if (cJSON_PrintPreallocated(root, request, capacity, false))
+        {
+          *body = request;
+          *body_size = strlen(request);
+          *body_capacity = capacity;
+          return 0;
+        }
+      mbedtls_platform_zeroize(request, capacity);
+      cJSON_free(request);
+      if (capacity == BKCLOUD_REQUEST_CAPACITY) return -E2BIG;
+      capacity *= 2;
+      if (capacity > BKCLOUD_REQUEST_CAPACITY)
+        capacity = BKCLOUD_REQUEST_CAPACITY;
+    }
+}
+
+static void bkcloud_request_clear(char **body, size_t *body_size,
+                                  size_t *body_capacity)
+{
+  if (*body != NULL)
+    {
+      mbedtls_platform_zeroize(*body, *body_capacity);
+      cJSON_free(*body);
+    }
+  *body = NULL;
+  *body_size = 0;
+  *body_capacity = 0;
+}
+
 int bkcloud_recognize(struct bkcloud_client_s *client,
                      const struct bkcloud_config_s *config,
                      const struct bkvoice_wss_tls_ops_s *tls, void *tls_context,
@@ -126,6 +169,9 @@ int bkcloud_chat(struct bkcloud_client_s *client,
                  char *text, size_t capacity)
 {
   cJSON *root = NULL, *messages;
+  char *body_data = NULL;
+  size_t body_size = 0;
+  size_t body_capacity = 0;
   int ret = -ENOMEM;
   if (text == NULL || capacity == 0) return -EINVAL;
   memset(text, 0, capacity);
@@ -156,12 +202,12 @@ int bkcloud_chat(struct bkcloud_client_s *client,
     if (!add_message(messages, "user", history->turns[i].user) ||
         !add_message(messages, "assistant", history->turns[i].assistant)) goto out;
   if (!add_message(messages, "user", input)) goto out;
-  if (!cJSON_PrintPreallocated(root, client->request, sizeof(client->request), false))
-    { ret = -E2BIG; goto out; }
+  ret = bkcloud_request_serialize(root, &body_data, &body_size, &body_capacity);
+  if (ret != 0) goto out;
   cJSON_Delete(root); root = NULL;
   struct webclient_context body;
   webclient_set_defaults(&body);
-  webclient_set_static_body(&body, client->request, strlen(client->request));
+  webclient_set_static_body(&body, body_data, body_size);
   ret = bkcloud_http_post(&client->http, config, "chat/completions", tls,
                           tls_context, deadline_ms, body.body_callback,
                           body.body_callback_arg, body.bodylen,
@@ -170,7 +216,7 @@ int bkcloud_chat(struct bkcloud_client_s *client,
     ret = bkcloud_text_parse(client->response, client->http.received, text, capacity);
 out:
   cJSON_Delete(root);
-  mbedtls_platform_zeroize(client->request, sizeof(client->request));
+  bkcloud_request_clear(&body_data, &body_size, &body_capacity);
   mbedtls_platform_zeroize(client->response, sizeof(client->response));
   return ret;
 }
@@ -188,6 +234,9 @@ int bkcloud_understand_jpeg(struct bkcloud_client_s *client,
   struct bkcloud_image_source_s source;
   cJSON *root = NULL;
   cJSON *messages;
+  char *body_data = NULL;
+  size_t body_size = 0;
+  size_t body_capacity = 0;
   char *location;
   int ret = -ENOMEM;
   if (text == NULL || capacity == 0) return -EINVAL;
@@ -217,15 +266,15 @@ int bkcloud_understand_jpeg(struct bkcloud_client_s *client,
   for (size_t i = 0; i < history->count; i++)
     if (!add_message(messages, "user", history->turns[i].user) ||
         !add_message(messages, "assistant", history->turns[i].assistant)) goto out;
-  if (!add_image_message(messages, prompt, "") ||
-      !cJSON_PrintPreallocated(root, client->request, sizeof(client->request), false))
-    { ret = -E2BIG; goto out; }
-  location = strstr(client->request, image_prefix);
+  if (!add_image_message(messages, prompt, "")) goto out;
+  ret = bkcloud_request_serialize(root, &body_data, &body_size, &body_capacity);
+  if (ret != 0) goto out;
+  location = strstr(body_data, image_prefix);
   if (location == NULL ||
       strstr(location + sizeof(image_prefix) - 1, image_prefix) != NULL)
     { ret = -EBADMSG; goto out; }
-  ret = bkcloud_image_source_init(&source, client->request,
-                                  (size_t)(location - client->request) +
+  ret = bkcloud_image_source_init(&source, body_data,
+                                  (size_t)(location - body_data) +
                                   sizeof(image_prefix) - 1,
                                   location + sizeof(image_prefix) - 1,
                                   strlen(location + sizeof(image_prefix) - 1),
@@ -240,7 +289,7 @@ int bkcloud_understand_jpeg(struct bkcloud_client_s *client,
 out:
   cJSON_Delete(root);
   if (ret != 0) memset(text, 0, capacity);
-  mbedtls_platform_zeroize(client->request, sizeof(client->request));
+  bkcloud_request_clear(&body_data, &body_size, &body_capacity);
   mbedtls_platform_zeroize(client->response, sizeof(client->response));
   return ret;
 }
@@ -252,6 +301,9 @@ static int synthesize_pcm(struct bkcloud_client_s *client,
                           bkcloud_write_t pcm, void *context)
 {
   int ret = -ENOMEM;
+  char *body_data = NULL;
+  size_t body_size = 0;
+  size_t body_capacity = 0;
   memset(client, 0, sizeof(*client));
   cJSON *root = cJSON_CreateObject();
   if (!root) return ret;
@@ -262,13 +314,13 @@ static int synthesize_pcm(struct bkcloud_client_s *client,
       !cJSON_AddStringToObject(root, "input", text) ||
       !cJSON_AddStringToObject(root, "voice", "alloy") ||
       !cJSON_AddStringToObject(root, "response_format", "pcm")) goto done;
-  if (!cJSON_PrintPreallocated(root, client->request, sizeof(client->request), false))
-    { ret = -E2BIG; goto done; }
+  ret = bkcloud_request_serialize(root, &body_data, &body_size, &body_capacity);
+  if (ret != 0) goto done;
   ret = bkcloud_http_pcm(&client->http, config, tls, tls_context, deadline_ms,
-      client->request, strlen(client->request), pcm, context, 8u * 1024u * 1024u);
+      body_data, body_size, pcm, context, 8u * 1024u * 1024u);
 done:
   cJSON_Delete(root);
-  mbedtls_platform_zeroize(client->request, sizeof(client->request));
+  bkcloud_request_clear(&body_data, &body_size, &body_capacity);
   return ret;
 }
 
@@ -280,6 +332,9 @@ int bkcloud_synthesize(struct bkcloud_client_s *client,
                        bkcloud_write_t pcm, void *context)
 {
   cJSON *root = NULL, *messages, *audio;
+  char *body_data = NULL;
+  size_t body_size = 0;
+  size_t body_capacity = 0;
   int ret = -ENOMEM;
   if (!client || !decoder || !config || !pcm || !valid_text(text)) return -EINVAL;
   if (config->dialect == 1)
@@ -297,17 +352,17 @@ int bkcloud_synthesize(struct bkcloud_client_s *client,
       !cJSON_AddStringToObject(audio, "format", "pcm16") ||
       !cJSON_AddStringToObject(audio, "voice", "mimo_default") ||
       !add_message(messages, "assistant", text)) goto out;
-  if (!cJSON_PrintPreallocated(root, client->request, sizeof(client->request), false))
-    { ret = -E2BIG; goto out; }
+  ret = bkcloud_request_serialize(root, &body_data, &body_size, &body_capacity);
+  if (ret != 0) goto out;
   cJSON_Delete(root); root = NULL;
   ret = bkcloud_http_events(&client->http, config, tls, tls_context, deadline_ms,
-                            client->request, strlen(client->request),
+                            body_data, body_size,
                             bkcloud_tts_feed, decoder, 8u * 1024u * 1024u);
   if (ret == 0) ret = bkcloud_tts_finish(decoder);
 out:
   cJSON_Delete(root);
   bkcloud_tts_clear(decoder);
-  mbedtls_platform_zeroize(client->request, sizeof(client->request));
+  bkcloud_request_clear(&body_data, &body_size, &body_capacity);
   return ret;
 }
 

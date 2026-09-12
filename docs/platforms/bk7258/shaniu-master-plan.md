@@ -2,9 +2,74 @@
 
 状态：`IN_PROGRESS`
 
-当前开发基线：官方a4d542cf1d7f3c9401980517fc7fb820a91064a7，工作分支feat/shaniu-first-use-p0，保留现有未提交成果。
-424整包已按用户明确授权下载成功（未新增备份），实板18.6.355+424 confirmed，CP/AP/CPU2正常，supervisor faults0/recoveries0。原认领身份通过--resume恢复，正常重启后持久化检查完成。最后已安装手机APK为724e3563…，当前手机断开。
-424真实手机Wi-Fi扫描status0 count19 truncated=false，已从列表选中用户网络。用户手动提交后VERIFY返回-12；失败后configured=0、bkwifi status=0，424失败回收实板通过，未完成配网/云连接。App本地失败保留输入修复已安装（APK 724e3563…），模拟器本地校验及重复保存通过，真实配置-12来源待定位。
+当前开发基线：官方`6e90f2112950cfa069df2dc8584214d407c3eb01`，工作分支`feat/shaniu-config-recovery`。原d3350c8f与官方6e90f211的源码树一致；本批仅承接尚未合入的修复，保留无关本地成果。
+当前实板为18.6.355+426：已按明确授权全量下载，复用原签名身份并恢复同一claim-20260912认领身份，未新增备份或换钥。VERIFY -12的client_alloc失败经最小内存修复后，真实Mi10完成认证、Wi-Fi/云配置提交；板端cloud ready=1，正常重启后配置和联网恢复，App进程重启后绑定保留，重新认证连接回读Wi-Fi状态通过。控制连接仍有后续断开：App已补齐错误原因并安装复测，实际记录TLS阶段gatt_status=19、elapsed_ms=89037；已确认配置恢复通过，但持续连接及会话到期后的恢复尚未闭环。真实唤醒/语音、NFC、图片理解及App OTA仍未验收，不将本轮配置成功写成产品完成。
+
+## 2026-09-12 配置恢复修复提交检查点
+
+- 本批包括App本地校验、失败提示/输入保留/生命周期恢复及现有模拟器用例，云请求工作区按需分配，固定阶段错误记录和控制关闭原因。保留426真实配置、正常重启恢复证据，以及约89秒GATT断开未解决的限制；不作为全产品验收完成。
+- 复用本轮已执行的Android单元/模拟器验收、cloud-http/cloud-request、426增量构建及包校验、真实手机/实板记录。提交前检查精确差异、敏感内容及diff格式；没有为提交重刷、重签、clean或重跑无变化验收。
+- 目标为个人仓`fork/feat/shaniu-config-recovery`，直接基于最新官方基线，保持Rebase and merge所需线性历史。原始日志、三份未跟踪SDIO探针、固件/设备资料、密钥和凭据保留本地，不纳入Git；远端提交SHA以推送后核对结果为准。
+
+## 2026-09-12 426内存修复，真实手机配置及重启恢复通过
+
+- 实际源码为`d3350c8f6fff9ecd081fa5290d121b523a5c8268`加当前未提交差异，目标AIDK/aidk_ai_toy；保留原Android修改及无关本地成果。`bk7258_cloud_client.h/.c`移除每个client固定65536字节request数组，使用有界临时JSON缓冲：从256字节扩展到原65536字节上限，在同步HTTP消费后及错误路径清零整个已分配容量并释放。保留response32768、认证、TLS、协议及资源所有权；未改SDK/NuttX或增加堆配置。425同次实板日志已确定具体失败分配点，426同条件真实提交成功证明本次配置路径的修复有效，不代表所有音频/并发负载已经验收。
+- 定向验证：现有`make -C tests/host/bk7258 run-cloud-http run-cloud-request`通过；HTTP测试仅移除已不存在的固定request成员断言，保留原HTTP、响应及凭据清理验证，没有新建测试框架。AIDK增量构建426通过，原签名身份签发；package/trust及HIL预检通过。构建/校验证据为`phone-joint-client426-build.log`、`phone-joint-client426-release.log`、`phone-joint-client426-check.log`；上述host命令结果保留于本轮执行记录。实现委派指定`gpt-5.6-terra`，实际模型路由未独立核实，硬件由根代理独占操作。
+- 全量文件为`phone-joint-client426-full/flash/shaniu-bk7258-aidk_ai_toy-app__openvela_ap-v18.6.355+426-bcloud-request-full-20260912-01-full.bin`，8388608字节，SHA256 `2c159a6808ce2ba9298a9e133b3316d3a21b881f74269e5854641cd8b9b1156b`。COM8/2Mbps既有HIL入口约75秒完成，五项成功标记齐全，`phone-joint-client426-hil-run/result.json`为passed；新鲜启动确认426、CP/AP/CPU2正常。全量后按本次恢复授权初始化内部/data并`voice pairing --resume`恢复同一认领资料，再正常重启；未格式化SD NAND，未声称全量前/data原样保留。证据`phone-joint-client426-boot.raw`、`phone-joint-client426-data-init.raw`、`phone-joint-client426-identity-resume.log`、`phone-joint-client426-identity-reboot.log`。
+- 真实手机Mi10，App `com.shaniu.companion` 0.5.0-a1/code5，APK SHA256 `347a0fd76897f9d4a9851f396736109a3b9a42ffcbf32c082710121809de23ed`。经实际页面扫描、认证、选Wi-Fi及提交已授权配置，页面显示“设置已保存／设备已确认保存连接设置。”，同步串口无client_alloc失败。`phone-joint-client426-config-phone.json`最初观察器漏匹配真实成功文字而记timeout，已追加原始结果更正，未删原记录；此timeout不是App或设备超时。证据`phone-joint-client426-config-uart.raw`及`phone-joint-client426-after-config.raw`显示configured=1、CLOUD ready=1、实际DHCP地址与1269字节0600配置文件。CLOUD ready由实际云预检成功设置；Gateway/WSS connected=0不等同直连云失败。
+- 通过现有`deploy --reboot-only`正常重启426，`phone-joint-client426-config-reboot.log`确认启动；`phone-joint-client426-reboot-status.raw`确认配置1269字节仍在、configured=1/CLOUD ready=1和Wi-Fi地址恢复。App force-stop后正常启动、保留数据，首页“已保存认领结果”；实际扫描选中Shaniu设备后，10:45:34Z状态为“已连接傻妞／设备已连接Wi-Fi”。证据`phone-joint-client426-app-restart-home.xml`、`phone-joint-client426-control-home.json/.xml`。
+- 后续截图`phone-joint-client426-connected-home.png`虽然文件名含connected，实际内容已经是连接断开，不能作为持续在线证据。首轮只读回连8.6秒连接、87.22秒观察到断开（`phone-joint-client426-session-window.json`）；不能仅因TLS有120秒上限就归因于它，同步UART筛选无关闭原因，手机处于Awake。进一步检查确认固件`bk7258_provision_owner.c`的控制WINDOW_MS还从广告窗口打开时起算120秒，早于TLS会话创建，关闭GATT使用0x13；这与后述主动断开一致，但未取得精确owner关闭原因，尚不能把这一候选计时原因当作已修复。尚未完成有效官方唤醒模型、真实自动语音/AEC打断、NFC、看图播报及App OTA；此前425文件OTA读包-2与本次配置修复分开保留。没有提交或推送。
+
+- App最小改动：`AndroidProvisionGatt.kt`保留固定关闭原因、阶段、单调经过时间与GATT状态，每次关闭至多一条非取消错误日志，无载荷、设备ID、秘密或异常原文；`DeviceControlProtocol.kt`用类型保留控制应答超时；`MainActivity.kt`按已知原因显示可重试提示，不再一律要求靠近设备。原会话/握手/写入/控制超时和认证均未放宽。现有DeviceControlProtocolTest及增量assembleDebug通过；首次候选仅安装未测试，完整原因版本APK SHA256 `4913387a927a940b315f71deb67e03af49f93e26412338a940f345a9207f38a9`已用install -r安装，保留原数据，APK路径`android/shaniu-companion/app/build/outputs/apk/debug/app-debug.apk`。
+- 更新App后的真实认证回连8.57秒成功、正常回读设备Wi-Fi状态（`phone-joint-client426-closecode-connected.png/.xml`），随后日志`transport_close reason=disconnected stage=tls elapsed_ms=89037 gatt_status=19`，页面93.61秒观察到断开并恢复“连接我的傻妞”按钮。证据`phone-joint-client426-closecode-phone.json`、`phone-joint-client426-closecode-android.log`、`phone-joint-client426-closecode-closed.png/.xml`；UART筛选仍无关闭原因。这证明本轮是GATT断开回调而非App的session_timeout/control_timeout分支，未证明精确板端关闭条件。配置提交证据属于前述APK347a0fd7，更新APK仅完成保留认领资料、真实回连、状态回读与准确失败提示验收，不能混写为重做了全部配网。下一限定问题是控制广告窗口与已连接会话的生命周期及到期恢复，复用现有owner/GATT路径定位，尚未改变固件426。
+
+本检查点原始证据统一位于工作区`out/shaniu-product-acceptance-20260910/`；上述425记录保留为故障定位历史，不能代替426验收。
+
+## 2026-09-12 425全量安装，实板定位VERIFY内存分配失败
+
+- 用户再次明确要求直接全量下载、不新增备份。复用原持续签名身份及424同设备封存基底，425整包package/trust和HIL预检通过；operator SHA256 `2703dc86404e119d9e619f7032cc95fa2b4e0e80994d627b8e7d550a24eae120`，8MiB，尾64KiB与424一致。COM8按既有成功记录使用2Mbps，仅覆盖波特率，保留禁止RTS/DTR及loader原子软件复位。`phone-joint-verify425-hil-run/result.json`记录75秒、五项成功标记齐全。
+- 新鲜串口确认18.6.355+425 confirmed，CP/AP/CPU2正常，supervisor faults0/recoveries0。全量后的内部/data普通挂载失败14，按本次整包恢复授权初始化内部1MiB并使用`voice pairing --resume`恢复同一claim-20260912身份627字节；正常软件重启再次confirmed。未格式化SD NAND、未生成/轮换身份，不将此描述为原样保留全量前/data。证据`phone-joint-verify425-boot.raw`、`phone-joint-verify425-data-init.raw`、`phone-joint-verify425-identity-resume.log`、`phone-joint-verify425-identity-reboot.log`。
+- 同一Mi10/APK347a0fd7…重新认证扫描成功22条。首轮UI自动化错误地仅匹配显示文字而不是Wi-Fi按钮内容描述，未提交；修正定位后使用现有真实结果提交一次配置，全程同步COM8。Wi-Fi DHCP成功，新增日志明确`BKVOICE CLOUD probe stage=client_alloc ret=-12`，随后`PROVISION stage=service_ready ret=-12`，App同次失败。证据`phone-joint-verify425-config-uart.raw`、`phone-joint-verify425-config-phone.json`。这是具体失败分配点的实板证据；尚不能宣称修复通过。
+- `bkcloud_client_s`固定request65536+response32768，使小型配置预检也申请约96KiB连续对象。下一最小修复将request改为按实际JSON大小临时分配，保留既有上限、协议、清理和认证；实现委派原执行代理，根代理负责集成及同条件实板验证。没有扩大到418恢复、Dolphin或新的OTA框架。未提交/推送。
+
+## 2026-09-12 新认领身份实机通过，配置VERIFY -12复现
+
+- 用户物理复位后，只读目录确认上次改名已生效：`identity-before-claim-20260912/config.bin`仍为691字节，新`identity/`为空；424正常。没有重复改名、格式化或刷机。证据 `phone-joint-after-physical-reset.raw`。
+- 使用已生成且已授权的 `aidk-ai-toy-001/claim-20260912`，既有 `voice pairing --direct-cloud` 供应627字节成功；随后既有 `deploy --reboot-only --expected-version 18.6.355+424 --expected-counter 424` 正常重启并confirmed。证据 `phone-joint-new-identity-supply.log`、`phone-joint-new-identity-persist-reboot.log`。设备认领身份与固件签名身份独立，本轮未新建/轮换固件签名身份。
+- 同一Mi10/App通过实际系统文件选择器导入对应四字段激活资料，显示“资料已就绪”；临时手机JSON已在finally删除并核实不存在，主机受控原件保留。搜索保留旧查询、异步结果及底部按钮边界导致的自动化定位失败已修正操作，不计作App产品故障或认证失败。最终证据 `phone-joint-activation-import-success.json`。
+- 新身份经正常重启后，真实BLE认证Wi-Fi扫描返回可选网络，选中用户已授权网络。证据 `phone-joint-new-identity-wifi-scan.json`及脱敏XML。此结果证明新身份重启后可被真实手机认证，不代表配网已提交。
+- 用真实App输入已授权Wi-Fi和既定MiMo Token Plan配置并点击保存；页面先“正在验证语音服务连接”→“认领进行中”，最终明确“设备验证配置失败（-12）”。未获得提交成功回执。失败后`bkvoice configured=0 connected=0`、`bkwifi status=0`且IP为0，新identity/config.bin为691字节，不能把查询status0当作联网成功。证据 `phone-joint-new-identity-configure-final.json`、`phone-joint-configure-result-ui.json`、`phone-joint-new-identity-after-config-failure.raw`；凭据不写入这些证据。
+- 用户指出初轮没有同步串口采集属实；补做同次424真实App提交的连续COM8采集后，已证实Wi-Fi四次握手及DHCP ACK成功，约0.3秒后开始回收，App仍返回VERIFY -12。不能据此断言具体分配点或云服务根因。证据 `phone-joint-verify424-synchronized-uart.raw`、`phone-joint-verify424-synchronized-phone.json`；已脱敏，未记录秘密。
+- 最小观察修改仅在`bk7258_provision_network.c`和`bk7258_cloud_runtime.c`添加固定stage/errno失败日志，保留原控制流。现有provision/cloud-runtime及实际network.c定向编译运行通过；增量构建只编译2个AP对象，CP/BL1/BL2原始摘要未变。证据 `phone-joint-verify-stage-host.log`、`phone-joint-verify-stage-build-summary.json`及同名前缀构建日志。实现指定`gpt-5.6-terra`，实际模型路由未独立核实。
+- 已从实际424签发记录找回并核实持续签名引用；原先请求用户再次提供引用不再需要。MCUboot公钥指纹4979ece7…、BL1指纹58e384ae…与封存424匹配（`phone-joint-signing-reference-confirmed.json`）。复用应用身份生成425 OTA，不重新签发启动组件或生成身份。`phone-joint-verify425-ota/release.json`绑定18.6.355+425，包SHA256 e00e83a65f18e0c0e4a8cf498172a4c1bdc484c41c499c583c58e86f24f7e7b9；现有verify package和verify trust通过。
+- 425尚未安装，424仍为实际运行版本。当前424 confirmed/manager idle健康核对后，经MSC将四个已验签文件独占写入新的`OTA425`目录、逐个读回哈希通过（`phone-joint-verify425-msc-copy.json`），Windows非强制卸载返回0并切回CDC。仅执行一次当前425 `bkota apply-file /mnt/sdnand/OTA425`，manager state7/phase0/progress0/0/error=-2（`phone-joint-verify425-file-apply.raw`），没有新槽安装/启动证据。当前包结构、FAT/LFN配置已核对，读包失败的具体位置仍未知；停止重复。未清空当前/data，也未回退新认领身份或旧身份留存目录。现有全量路径依赖历史基底，不能证明保留当前1MiB persistent_data；受控保存当前分区或授权原样恢复该区域属于后续数据保护待决项，不能冒充旧私钥缺失。观察包安装后返回VERIFY阶段定位；未提交/推送。
+
+## 2026-09-12 真机联调及新认领身份检查点（供应前历史）
+
+- 源码仍为 `d3350c8f6fff9ecd081fa5290d121b523a5c8268` + 上述本地Android修改；没有固件改动、重编、签发、刷机、提交或推送。Mi10 `59d707dc` 保留数据安装App `0.5.0-a1` / code5，APK SHA256 `347a0fd76897f9d4a9851f396736109a3b9a42ffcbf32c082710121809de23ed`；真实首页和扫描发现 `SHANIU · 7F:81`，未完成新身份导入或配置提交。
+- COM8正常查询先确认424健康，`bkvoice` 为ready1/configured0/connected0；`/data/shaniu` 仅列identity及voice-ota目录，原identity/config.bin为691字节0600。证据仍在 `out/shaniu-product-acceptance-20260910/`：`phone-joint-board-status.log`、`phone-joint-before-identity.raw`、`phone-joint-main.xml`、`phone-joint-scan.xml`。
+- 用户明确授权“直接新身份”。已在受控持久位置生成设备认领身份引用 `aidk-ai-toy-001/claim-20260912`（ECDSA P-256），证书SHA256 `63adae26bf768e10576563a78fa007f66d03252ffd92714e58b004d55d6e64cf`，目录0700/私钥0600；公钥匹配检查通过。只记录公开身份，未生成新的固件签名身份，未输出私钥。公开证据 `phone-joint-claim-public.json`；尚未生成/导入App激活资料或供应板端。
+- 为保留旧身份，尝试将 `/data/shaniu/identity` 改名为 `/data/shaniu/identity-before-claim-20260912`，但串口只返回命令回显，没有成功/失败或后续目录结果。随后正常软件复位也没有取得健康版本标记。不能确认改名结果，也不能据此认定整板死机；已经停止身份供应及后续写入。证据 `phone-joint-identity-preserve.raw`、`phone-joint-new-identity-reboot.log`。
+- 当前最小外部动作：AIDK物理复位或重新上电。恢复后先核对版本和上述两个目录的元数据，再决定是否使用已生成身份继续既有 `voice pairing`；不盲目重复改名、不重新生成身份、不格式化、不重刷。旧激活资料查找已随新身份授权收口。真实认证→配网→云配置→重启恢复仍未通过；已有VERIFY -12待该链路恢复后定位。
+
+## 2026-09-12 Android模拟器专项验收（本阶段完成，实机待验）
+
+- 范围仅 Android 模拟器，源码基线 `d3350c8f6fff9ecd081fa5290d121b523a5c8268` + 本地 Android 修改；未提交/推送。用户已报告手机重新接入，本轮没有操作手机、板卡、生产身份或云服务。
+- 现有 `Medium_Phone_API_36.0` / `emulator-5554`，Android 16 / API 36；App `com.shaniu.companion`、`0.5.0-a1` / code 5。保留数据安装的 APK SHA256 `347a0fd76897f9d4a9851f396736109a3b9a42ffcbf32c082710121809de23ed` 与安装路径内的 APK 摘要一致。可安装文件：`android/shaniu-companion/app/build/outputs/apk/debug/app-debug.apk`。
+- 以下证据均在工作区 `out/shaniu-product-acceptance-20260910/`，身份见 `emu-goal-final-identity.json`。
+
+| 路径 | 实际结果与边界 | 证据 |
+|---|---|---|
+| A 启动/导航 | 真实冷启动、再次启动、首页/认领/心情/设置/OTA及返回；权限拒绝可重试，蓝牙关闭有提示，30秒无设备扫描会结束；OTA无设备不允许开始，系统选文件可取消。最终APK冷启动490ms，无空白页或阻断。 | `emu-goal-final-launch.log`；`emu-goal-final-home/ota/discovery.png`及XML；`emu-goal-permission-denied.xml`、`emu-goal-bluetooth-off.xml`、`emu-goal-no-device.xml`、`emu-goal-ota-cancel-return.xml` |
+| B 表单 | 实际Save验证UTF-8 SSID/非hex 64字节密码、云必填及开放Wi-Fi空密码；缺项在DNS之前拒绝、输入保留、修改后同页重试；实际IME显示及键入、滚动后Save可点，错误完整可见。设备选择/激活前提使用合成fixture。 | `emu-goal-acceptance.log`；`emulator-flow-error.png`；原失败及修复见 `emu-goal-baseline-fixture.log`、`emu-goal-local-fix-fixture.log` |
+| C 失败/取消/重试 | 受控DNS失败无认领会话；真实协议解码认证失败、VERIFY -12、超时；ACK仅处理中，失败返回后重新填写重试，最终type6才显示保存成功并提交隔离绑定；取消后晚回执不覆盖页面。 | `emu-goal-acceptance.log`；`emulator-flow-verify-failure.png`、`emulator-flow-committed.png` |
+| D 生命周期/pending | 真实moveTaskToBack/onStop及同Activity恢复后可修改重试，晚解析结果不会覆盖；未提交密码/Key经实际recreate后旧/新实例均为空；APPLY后pending经recreate及独立进程重启保留，重新进入核对页面。仅测试命名空间prefs/Keystore，未清真实App数据。 | `emu-goal-acceptance.log`；`emu-goal-process-create-final.log`、`emu-goal-process-resume-final.log`；停止后pid为空的执行证据已记录 |
+
+- 修复：`ProvisionSettings.kt`、`CloudSettings.kt`公开纯本地校验并由编码器复用；`ProvisionActivity.kt`在DNS前使用相同约束、本地失败保留输入、显示状态时收起IME并滚到提示、后台终止解析时清除处理中提示；`ProvisionClaimProtocol.kt`仅保留已验证错误帧的非敏感阶段/状态码，`ProvisioningConnection.kt`区分认证/配置验证/超时且不打印原始传输原因。未放宽认证/VERIFY/未知提交状态约束。
+- 验证：`./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest` 增量通过；143项单元用例中141执行通过、2项固件控制互操作按原条件跳过（不算本轮已验）。10项模拟器场景通过，本次crash buffer为空，验收窗口内App ANR事件为0。构建日志 `emu-goal-visible-recovery-build.log`、`emu-goal-acceptance-test-build.log`；结果 `emu-goal-acceptance.log`、`emu-goal-acceptance-crash.log`、`emu-goal-final-health.log`。最终绘制帧截图单项复查见 `emu-goal-capture-visible.log`（测试APK `1dc976e6…`），不重复其余未变场景。
+- 复现入口：现有 `ControlKeyInstrumentation` 的 `-e emulator_flow_probe 1`；可选 `-e emulator_flow_case <精确既有场景名>` 只复测受影响场景，未知名称失败；跨进程入口 `-e emulator_process_fixture create` → `am force-stop com.shaniu.companion` → `-e emulator_process_fixture resume`。进程恢复证据使用测试APK `45257157…`；最终扩展用例使用 `34d435dd…`，同一产品APK、过程函数未变，完整摘要在身份记录。实际IME与页面生命周期属于系统行为；DNS/TLS端点与协议回执为注入响应；恢复页会尝试连接虚拟测试地址，不证明BLE射频或设备确认。安全页面截图由测试对合成字段的View.draw采集，FLAG_SECURE未关闭，不包含系统IME像素。
+- 测试仅扩展现有 `DeviceUiAcceptance.kt`、`ControlKeyInstrumentation.kt`及3个相关单元测试文件；没有新增测试框架。定向实现委派指定 `gpt-5.6-terra`，实际模型路由未独立核实；根代理协调模拟器、集成与验收。
+- 待后续实机：真实BLE/NFC认证认领、板端联网/云验证、真实VERIFY -12根因及OTA升级/重启保持；均未宣称通过。本轮不自动进入这些工作。早期测试APK与App不匹配、任务重排权限和截图时序故障属于测试工具问题，已分别修正，不计作产品端故障。
 
 ## 2026-09-12 开发分支提交检查点
 

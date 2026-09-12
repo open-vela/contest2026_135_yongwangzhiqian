@@ -266,7 +266,7 @@ class DeviceControlProtocolTest {
         protocol.start(); protocol.receive(response(sent.last()))
         protocol.request(DeviceControlProtocol.Command.PERSONA, 4)
         now = 10000
-        assertThrows(IllegalStateException::class.java) { protocol.tick() }
+        assertThrows(DeviceControlProtocol.ControlTimeout::class.java) { protocol.tick() }
         assertTrue(protocol.closed)
         assertEquals(2, sent.size)
         var borrowed: ByteArray? = null

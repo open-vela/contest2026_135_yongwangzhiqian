@@ -25,6 +25,11 @@ class ProvisionClaimProtocol(
         VERIFYING, COMMITTED, NOT_COMMITTED, FAILED, UNCONFIRMED, CLOSED }
     var state = State.NEW
         private set
+    /** Safe context for a terminal failure. It contains no response payload. */
+    var failureStage: State? = null
+        private set
+    var failureCode: Int? = null
+        private set
     private val candidate = bundle.takeIf { it.size in 1..16384 }?.copyOf()
         ?: throw IllegalArgumentException("Invalid configuration size")
     private val secret = try { bootstrap.usePossessionSecret { it.copyOf() } }
@@ -65,6 +70,7 @@ class ProvisionClaimProtocol(
                 }
             }
         } catch (e: Exception) {
+            recordMalformedFailure()
             wipe()
             update(if (state == State.VERIFYING) State.UNCONFIRMED else State.FAILED)
             throw IllegalStateException("Invalid provisioning response")
@@ -82,6 +88,10 @@ class ProvisionClaimProtocol(
         require(remote in 2..9 && result <= 0)
         if (remote == 7 || remote == 8) {
             require(result < 0)
+            // Only retain the code after the complete response has passed all
+            // framing, transaction, sequence and remote-state validation.
+            failureStage = state
+            failureCode = result
             wipe()
             update(if (remote == 8) State.UNCONFIRMED else State.FAILED)
             return
@@ -151,6 +161,9 @@ class ProvisionClaimProtocol(
     }
 
     private fun update(value: State) { state = value; changed(value) }
+    private fun recordMalformedFailure() {
+        if (failureStage == null) failureStage = state
+    }
     private fun wipe() { secret.fill(0); candidate.fill(0); input.fill(0) }
 
     /** A disconnect after APPLY cannot prove whether durable commit happened. */

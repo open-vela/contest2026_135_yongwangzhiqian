@@ -43,4 +43,13 @@ class CloudSettingsTest {
         assertTrue(key.all { it == 'x' })
         key.fill('\u0000'); data.fill(0)
     }
+
+    @Test fun reportsSpecificCloudInputErrors() {
+        assertEquals("语音服务 Key 应为 1 至 4096 个可打印 ASCII 字符。",
+            CloudSettings.inputError("https://cloud.example/v1", CharArray(0),
+                "vendor/asr", "vendor/chat", "vendor/tts"))
+        assertEquals("语音服务 HTTPS 地址无效。",
+            CloudSettings.inputError("not a URI", "fixture-only".toCharArray(),
+                "vendor/asr", "vendor/chat", "vendor/tts"))
+    }
 }

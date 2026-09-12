@@ -99,4 +99,12 @@ class ProvisionSettingsTest {
         assertThrows(IllegalArgumentException::class.java) { encode(ip=byteArrayOf(127,0,0,1)) }
         assertThrows(IllegalArgumentException::class.java) { encode(ssid="lab\u0000x") }
     }
+
+    @Test fun reportsNetworkInputErrorsBeforeEndpointLookup() {
+        assertEquals("Wi-Fi 名称应为 1 至 32 个 UTF-8 字节，且不能包含空字符。",
+            ProvisionSettings.inputError("中".repeat(11), "test-only".toCharArray()))
+        assertEquals("64 字节 Wi-Fi 密码必须为十六进制字符。",
+            ProvisionSettings.inputError("lab", "x".repeat(64).toCharArray()))
+        assertNull(ProvisionSettings.inputError("lab", CharArray(0)))
+    }
 }

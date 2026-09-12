@@ -10,6 +10,34 @@ import java.nio.charset.StandardCharsets
  * Caller clears the returned sensitive bytes after the connection copies them.
  */
 object ProvisionSettings {
+    /** Validates the network fields before an endpoint lookup or bundle allocation. */
+    fun inputError(ssid: String, password: CharArray): String? {
+        var ssidBytes: ByteBuffer? = null
+        var passwordBytes: ByteBuffer? = null
+        try {
+            try { ssidBytes = StandardCharsets.UTF_8.newEncoder().encode(CharBuffer.wrap(ssid)) }
+            catch (_: Exception) { return "Wi-Fi 名称不是有效的 UTF-8 文本。" }
+            try { passwordBytes = StandardCharsets.UTF_8.newEncoder().encode(CharBuffer.wrap(password)) }
+            catch (_: Exception) { return "Wi-Fi 密码不是有效的 UTF-8 文本。" }
+            val name = checkNotNull(ssidBytes)
+            if (name.remaining() !in 1..32 || (0 until name.remaining()).any { name[it] == 0.toByte() })
+                return "Wi-Fi 名称应为 1 至 32 个 UTF-8 字节，且不能包含空字符。"
+            val secret = checkNotNull(passwordBytes)
+            val count = secret.remaining()
+            if (count != 0 && count !in 8..64)
+                return "Wi-Fi 密码可留空用于开放网络；否则应为 8 至 64 个 UTF-8 字节。"
+            if ((0 until count).any { secret[it] == 0.toByte() })
+                return "Wi-Fi 密码不能包含空字符。"
+            if (count == 64 && (0 until count).any {
+                    secret[it].toInt().toChar() !in "0123456789abcdefABCDEF"
+                }) return "64 字节 Wi-Fi 密码必须为十六进制字符。"
+            return null
+        } finally {
+            ssidBytes?.takeIf { it.hasArray() }?.array()?.fill(0)
+            passwordBytes?.takeIf { it.hasArray() }?.array()?.fill(0)
+        }
+    }
+
     /** Extracts only the owner credential from a locally encoded candidate.
      * Validate envelope lengths before treating any trailing bytes as a key.
      * This is not a replacement for the board's complete configuration decoder.
@@ -58,16 +86,11 @@ object ProvisionSettings {
 
     fun encode(ssid: String, password: CharArray, host: String, ipv4: ByteArray,
                port: Int, caDer: ByteArray, utcSeconds: Long): ByteArray {
+        inputError(ssid, password)?.let { require(false) { it } }
         val ssidBytes = StandardCharsets.UTF_8.newEncoder().encode(CharBuffer.wrap(ssid))
         val passwordBytes = StandardCharsets.UTF_8.newEncoder().encode(CharBuffer.wrap(password))
         try {
-            require(ssidBytes.remaining() in 1..32 && (0 until ssidBytes.remaining()).none { ssidBytes[it] == 0.toByte() })
             val count = passwordBytes.remaining()
-            require(count == 0 || count in 8..64)
-            require((0 until count).none { passwordBytes[it] == 0.toByte() })
-            if (count == 64) require((0 until count).all {
-                passwordBytes[it].toInt().toChar() in "0123456789abcdefABCDEF"
-            })
             require(host.length in 1..127 && host.split('.').all {
                 it.length in 1..63 && Regex("[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?").matches(it)
             })

@@ -84,6 +84,12 @@ class ProvisionActivity : Activity() {
     private var ca: ByteArray? = null
     private var selected: BluetoothDevice? = null
     private var connection: ProvisioningConnection? = null
+    private var cloudResolver: (String) -> CloudEndpoint.Verified = CloudEndpoint::resolve
+    private var connectionFactory: (BluetoothDevice, ProvisionBootstrap, ByteArray,
+        (ProvisionClaimProtocol.State) -> Unit, Boolean) -> ProvisioningConnection =
+        { device, identity, candidate, changed, recover ->
+            ProvisioningConnection(this, device, identity, candidate, changed, recover = recover)
+        }
     private var wifiScan: WifiScanConnection? = null
     private var wifiScanGeneration = 0L
     private var recoveryControl: AutoCloseable? = null
@@ -282,6 +288,18 @@ class ProvisionActivity : Activity() {
         resultPage.visibility = if (value == 2) View.VISIBLE else View.GONE
         titleLabel.text = listOf("添加傻妞", "连接 Wi-Fi", "正在连接傻妞")[value]
         stepLabel.text = "${value + 1} / 3  ·  " + listOf("找到设备", "连接 Wi-Fi", "确认结果")[value]
+        revealStatus()
+    }
+    private fun revealStatus() {
+        getSystemService(android.view.inputmethod.InputMethodManager::class.java)
+            ?.hideSoftInputFromWindow(status.windowToken, 0)
+        (form.parent as? ScrollView)?.let { scroll ->
+            scroll.post { if (alive && foreground) scroll.smoothScrollTo(0, 0) }
+        }
+    }
+    private fun reportStatus(message: String) {
+        status.text = message
+        revealStatus()
     }
     private fun nextPage() {
         if (selected == null) { status.text = "请先选择附近的傻妞。"; return }
@@ -435,9 +453,10 @@ class ProvisionActivity : Activity() {
     private fun localConnectInputError(recover: Boolean): String? {
         if (recover) return null
         if (ssid.text.isBlank()) return "请填写 Wi-Fi 名称后再保存。"
-        val passwordLength = password.length()
-        if (passwordLength != 0 && passwordLength !in 8..64)
-            return "Wi-Fi 密码可留空用于开放网络；否则应为 8 至 64 个字符。"
+        val wifiSecret = CharArray(password.length()) { password.text[it] }
+        try {
+            ProvisionSettings.inputError(ssid.text.toString(), wifiSecret)?.let { return it }
+        } finally { wifiSecret.fill('\u0000') }
         if (!developerMode) {
             if (cloudUrl.text.toString().trim().isEmpty())
                 return "请填写语音服务 HTTPS 地址后再保存。"
@@ -445,6 +464,12 @@ class ProvisionActivity : Activity() {
                 return "请填写语音服务 Key 后再保存；当前事务会同时保存 Wi-Fi 和语音服务。"
             if (asrModel.text.isBlank() || chatModel.text.isBlank() || ttsModel.text.isBlank())
                 return "请填写语音识别、对话和语音合成模型后再保存。"
+            val apiKey = CharArray(cloudKey.length()) { cloudKey.text[it] }
+            try {
+                CloudSettings.inputError(cloudUrl.text.toString().trim(), apiKey,
+                    asrModel.text.toString().trim(), chatModel.text.toString().trim(),
+                    ttsModel.text.toString().trim())?.let { return it }
+            } finally { apiKey.fill('\u0000') }
         } else {
             if (host.text.isBlank()) return "请填写 Gateway 主机名后再保存。"
             if (ca == null) return "请先导入 Gateway CA 后再保存。"
@@ -464,7 +489,7 @@ class ProvisionActivity : Activity() {
             return
         }
         localConnectInputError(recover)?.let {
-            status.text = it
+            reportStatus(it)
             return
         }
         if (!developerMode && !recover && endpoint == null) {
@@ -473,16 +498,16 @@ class ProvisionActivity : Activity() {
             val device = selected?.address
             val generation = ++cloudLookupGeneration
             cloudResolving = true
-            status.text = "正在验证语音服务连接…"
+            reportStatus("正在验证语音服务连接…")
             Thread {
-                val resolved = runCatching { CloudEndpoint.resolve(url) }
+                val resolved = runCatching { cloudResolver(url) }
                 handler.post {
                     if (generation != cloudLookupGeneration) return@post
                     cloudResolving = false
                     if (!alive || !foreground || page != 1 || device != selected?.address ||
                         url != cloudUrl.text.toString().trim()) return@post
                     resolved.fold(onSuccess = { connect(endpoint = it) },
-                        onFailure = { status.text = "无法验证语音服务，请检查 HTTPS 地址及网络。" })
+                        onFailure = { reportStatus("无法验证语音服务，请检查 HTTPS 地址及网络。") })
                 }
             }.start()
             return
@@ -532,7 +557,7 @@ class ProvisionActivity : Activity() {
             resultButton.text = "取消连接"
             resultButton.setOnClickListener { connection?.close() }
             val current = ++epoch
-            connection = ProvisioningConnection(this, target, identity, bundle, { state ->
+            connection = connectionFactory(target, identity, bundle, { state ->
                 handler.post {
                     if (!alive || current != epoch) return@post
                     if (state == ProvisionClaimProtocol.State.UNCONFIRMED) outcomeUnknown = true
@@ -542,7 +567,8 @@ class ProvisionActivity : Activity() {
                         ProvisionClaimProtocol.State.COMMITTED -> "设备已确认保存连接设置。"
                         ProvisionClaimProtocol.State.NOT_COMMITTED -> "设备确认没有已提交配置，可以重新认领。"
                         ProvisionClaimProtocol.State.UNCONFIRMED -> "提交结果未确认，请先核对设备状态，勿重复认领。"
-                        ProvisionClaimProtocol.State.FAILED -> "认领失败，未获得提交成功回执。"
+                        ProvisionClaimProtocol.State.FAILED -> connection?.failureMessage()
+                            ?: "认领失败，未获得提交成功回执。"
                         ProvisionClaimProtocol.State.CLOSED -> "连接已关闭。"
                         else -> "认领进行中，请保持设备连接。"
                     }
@@ -559,12 +585,12 @@ class ProvisionActivity : Activity() {
                         resultButton.setOnClickListener { if (state == ProvisionClaimProtocol.State.COMMITTED) finish() else goBack() }
                     }
                 }
-            }, recover = recover)
+            }, recover)
             handedOff = true
         } catch (_: Exception) {
             if (page == 2) showPage(1)
-            status.text = if (developerMode) "Gateway 或 Wi-Fi 配置无效；请检查后再保存。"
-                else "Wi-Fi 或语音服务配置无效；请检查后再保存。"
+            reportStatus(if (developerMode) "Gateway 或 Wi-Fi 配置无效；请检查后再保存。"
+                else "Wi-Fi 或语音服务配置无效；请检查后再保存。")
         }
         finally {
             secret.fill('\u0000'); apiKey.fill('\u0000'); bundle?.fill(0)
@@ -823,6 +849,7 @@ class ProvisionActivity : Activity() {
     }
     override fun onStop() {
         foreground = false
+        if (cloudResolving) status.text = "连接验证已暂停，返回后可再次保存。"
         cloudLookupGeneration++; cloudResolving = false
         cancelWifiScan()
         val wasScanning = scanning
