@@ -140,10 +140,28 @@ int main(void) {
  callbacks->disconnected(&b,NULL);assert(b.refs==1);
  assert(bkprov_gatt_read(second,out,1)==-ESTALE);
  assert(write_tls(&b,NULL,data,1,0)==-EACCES);
+ /* NuttX restores same-peer CCC before product connected(). */
+ assert(bkprov_gatt_window(true)==0);
+ ccc_changed(1);
+ assert(bkprov_gatt_generation()==0);
+ callbacks->connected(&a,NULL);
+ uint32_t third=bkprov_gatt_generation();assert(third>second);
+ assert(write_tls(&a,NULL,data,1,0)==1);
+ assert(bkprov_gatt_window(false)==0 && bkprov_gatt_generation()==0);
+ callbacks->disconnected(&a,NULL);assert(a.refs==1);
+ /* A stale restored CCC cannot re-arm after the window closes. */
+ assert(bkprov_gatt_window(true)==0);
+ ccc_changed(1);
+ assert(bkprov_gatt_generation()==0);
+ assert(bkprov_gatt_window(false)==0);
+ callbacks->connected(&a,NULL);
+ assert(bkprov_gatt_generation()==0);
+ assert(write_tls(&a,NULL,data,1,0)==-EACCES);
+ callbacks->disconnected(&a,NULL);assert(a.refs==1);
  /* A connected peer without CCC/TLS data still disconnects on close. */
  assert(bkprov_gatt_window(true)==0);
  callbacks->connected(&a,NULL);
- assert(bkprov_gatt_window(false)==0 && disconnects==2);
+ assert(bkprov_gatt_window(false)==0 && disconnects==3);
  callbacks->disconnected(&a,NULL);assert(a.refs==1);
  uint8_t hint[8],old_hint[8];
  assert(bkprov_gatt_locator(hint)==-EAGAIN);

@@ -3,6 +3,7 @@ package com.shaniu.companion.provision
 
 import android.bluetooth.BluetoothDevice
 import android.content.Context
+import android.util.Log
 
 /** Device selection/CONNECT permission precede this owner. It copies bootstrap
  * proof and configuration; callers may clear their inputs after construction.
@@ -37,10 +38,16 @@ class ProvisioningConnection(
         object : AndroidProvisionGatt.Events {
             override fun tlsEstablished() = protocol.start()
             override fun plaintext(bytes: ByteArray) = protocol.receive(bytes)
+            override fun tick() { }
             override fun closed(reason: String) {
+                Log.w(CLAIM_LOG_TAG, "claim_transport_closed reason=$reason")
                 try { protocol.disconnected() } finally { protocol.close() }
             }
         })
+
+    private companion object {
+        const val CLAIM_LOG_TAG = "ShaniuProvisionClaim"
+    }
 
     // Starting only after all fields are assigned removes constructor/worker
     // races when a fast callback attempts to send authentication.

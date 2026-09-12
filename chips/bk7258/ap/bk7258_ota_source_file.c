@@ -26,6 +26,26 @@
 #define BK7258_OTA_FILE_CATALOG "catalog.json"
 #define BK7258_OTA_FILE_SIGNATURE "catalog.sig"
 
+static bk7258_ota_file_source_prepare_t g_bk7258_ota_file_prepare;
+static bk7258_ota_file_source_release_t g_bk7258_ota_file_release;
+/* 0: absent, 1: installing, 2: published. */
+static int g_bk7258_ota_file_callbacks;
+
+static void bk7258_ota_file_release_source(
+  struct bk7258_ota_file_source_s *source)
+{
+  if (source->prepared)
+    {
+      if (__atomic_load_n(&g_bk7258_ota_file_callbacks,
+                          __ATOMIC_ACQUIRE) == 2)
+        {
+          (void)g_bk7258_ota_file_release();
+        }
+
+      source->prepared = false;
+    }
+}
+
 static void bk7258_ota_file_close_fds(
   struct bk7258_ota_file_source_s *source)
 {
@@ -105,6 +125,23 @@ static int bk7258_ota_file_open(
     }
 
   bk7258_ota_file_close_fds(source);
+  ret = __atomic_load_n(&g_bk7258_ota_file_callbacks, __ATOMIC_ACQUIRE);
+  if (ret == 1)
+    {
+      return -EAGAIN;
+    }
+  if (ret == 2)
+    {
+      /* Mark first so a failed prepare also invokes its paired cleanup. */
+      source->prepared = true;
+      ret = g_bk7258_ota_file_prepare(source->root);
+      if (ret < 0)
+        {
+          bk7258_ota_file_release_source(source);
+          return ret;
+        }
+    }
+
   ret = bk7258_ota_file_path(path, sizeof(path), source->root,
                              BK7258_OTA_FILE_CATALOG);
   if (ret == 0)
@@ -159,6 +196,7 @@ static int bk7258_ota_file_open(
   if (ret < 0)
     {
       bk7258_ota_file_close_fds(source);
+      bk7258_ota_file_release_source(source);
       return ret;
     }
 
@@ -226,7 +264,13 @@ static int bk7258_ota_file_cancel(void *context)
 
 static void bk7258_ota_file_close(void *context)
 {
-  bk7258_ota_file_close_fds(context);
+  struct bk7258_ota_file_source_s *source = context;
+
+  if (source != NULL)
+    {
+      bk7258_ota_file_close_fds(source);
+      bk7258_ota_file_release_source(source);
+    }
 }
 
 static const struct bk7258_ota_source_ops_s g_bk7258_ota_file_ops =
@@ -237,6 +281,30 @@ static const struct bk7258_ota_source_ops_s g_bk7258_ota_file_ops =
   .cancel = bk7258_ota_file_cancel,
   .close = bk7258_ota_file_close,
 };
+
+int bk7258_ota_file_source_register(
+  bk7258_ota_file_source_prepare_t prepare,
+  bk7258_ota_file_source_release_t release)
+{
+  int expected = 0;
+
+  if (prepare == NULL || release == NULL)
+    {
+      return -EINVAL;
+    }
+
+  if (!__atomic_compare_exchange_n(&g_bk7258_ota_file_callbacks, &expected, 1,
+                                    false, __ATOMIC_ACQ_REL,
+                                    __ATOMIC_ACQUIRE))
+    {
+      return -EALREADY;
+    }
+
+  g_bk7258_ota_file_prepare = prepare;
+  g_bk7258_ota_file_release = release;
+  __atomic_store_n(&g_bk7258_ota_file_callbacks, 2, __ATOMIC_RELEASE);
+  return 0;
+}
 
 int bk7258_ota_file_source_initialize(
   struct bk7258_ota_file_source_s *source, const char *root)

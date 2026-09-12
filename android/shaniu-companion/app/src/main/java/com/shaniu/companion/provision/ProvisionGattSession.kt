@@ -100,9 +100,9 @@ class ProvisionGattSession internal constructor(
         if (closed || pending != null || outbound.isEmpty()) return null
         val head = outbound.peek()
         check(token != Long.MAX_VALUE)
-        // Pinned NuttX GATT write callbacks take uint8_t lengths. Android may
-        // negotiate MTU 517 even after a smaller request; keep writes <=244.
-        val length = minOf(mtu - 3, 244, head.size - offset)
+        // Conservative interoperability cap: negotiated MTU is an upper bound,
+        // not a required write size.
+        val length = minOf(mtu - 3, MAX_COMPATIBLE_ATT_WRITE_BYTES, head.size - offset)
         return Write(generation, ++token, head.copyOfRange(offset, offset + length)).also {
             pending = it
             pendingAt = lastNow
@@ -175,5 +175,6 @@ class ProvisionGattSession internal constructor(
         private val generations = AtomicLong()
         private const val LIMIT = 64 * 1024
         private const val MAX_RX_PACKETS = 256
+        private const val MAX_COMPATIBLE_ATT_WRITE_BYTES = 20
     }
 }

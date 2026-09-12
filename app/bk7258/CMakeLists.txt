@@ -1,7 +1,8 @@
 if(CONFIG_BK7258_PROVISION_GATT)
+  include(${NUTTX_DIR}/../vendor/beken/frameworks/cmake/gatt_ccc_patch.cmake)
   target_sources(apps PRIVATE bk7258_provision_gatt.c bk7258_provision_tls.c
                               bk7258_provision_claim.c bk7258_provision_store.c
-                              bk7258_provision_pair.c bk7258_provision_settings.c
+                              bk7258_provision_pair.c bk7258_provision_scan.c bk7258_provision_settings.c
                               bk7258_provision_storage.c bk7258_provision_owner.c
                               bk7258_provision_identity.c bk7258_provision_network.c
                               bk7258_provision_time.c bk7258_control_session.c
@@ -136,7 +137,8 @@ if(CONFIG_BK7258_VISION_SERVICE)
   endif()
 endif()
 
-if(CONFIG_BK7258_VISION_SERVICE OR CONFIG_BK7258_DISPLAY_SERVICE OR CONFIG_BK7258_PREFERENCES)
+if(CONFIG_BK7258_VISION_SERVICE OR CONFIG_BK7258_DISPLAY_SERVICE OR CONFIG_BK7258_PREFERENCES OR
+   (CONFIG_BK7258_OTA_SOURCE_FILE AND CONFIG_BK7258_USBMODE))
   target_sources(apps PRIVATE bk7258_media_volume.c)
 endif()
 

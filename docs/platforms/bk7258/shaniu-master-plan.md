@@ -2,10 +2,324 @@
 
 状态：`IN_PROGRESS`
 
-本次提交基于官方b60677ad，包含BLE客户端解析路径选项、蓝牙兼容修复及本文证据。
-419构建时的父提交34ca8771与b60677ad树一致；功能证据对应本次提交中的修复源码。
-当前AIDK运行18.6.355+419，原认领身份恢复并重启后保留；Windows真实GATT、MTU及
-断开重连已通过。真实手机认领/配网未验收，当前ADB仅emulator-5554。下方历史记录不替代本结论。
+当前开发基线：官方a4d542cf1d7f3c9401980517fc7fb820a91064a7，工作分支feat/shaniu-first-use-p0，保留现有未提交成果。
+424整包已按用户明确授权下载成功（未新增备份），实板18.6.355+424 confirmed，CP/AP/CPU2正常，supervisor faults0/recoveries0。原认领身份通过--resume恢复，正常重启后持久化检查完成。最后已安装手机APK为724e3563…，当前手机断开。
+424真实手机Wi-Fi扫描status0 count19 truncated=false，已从列表选中用户网络。用户手动提交后VERIFY返回-12；失败后configured=0、bkwifi status=0，424失败回收实板通过，未完成配网/云连接。App本地失败保留输入修复已安装（APK 724e3563…），模拟器本地校验及重复保存通过，真实配置-12来源待定位。
+
+## 2026-09-12 开发分支提交检查点
+
+- 本次发布为功能开发检查点，范围包括认证通道内有界Wi-Fi扫描、CCC/ATT兼容补丁、App回调与本地输入保留、失败cloud回收，以及文件OTA源的只读挂载/占用生命周期。保留真实配置VERIFY -12和产品验收未闭环状态，不作为最终固件发布。
+- 提交前定向回归：media-volume、cloud-runtime、provision GATT、patched GATT/CCC/MTU、provision TLS及verify layers通过；证据out/shaniu-product-acceptance-20260910/publication-*.log。diff检查通过。复用424构建/启动与相关功能证据，没有为推送重刷或全量clean。
+- 清理后Android testDebugUnitTest及assembleDebug通过，APK SHA256 6b28f4a643bca503211860d6a65b462124cd2f4943eb8b9391bfc8c42fcfb248；该包尚未安装实板配套手机。
+- Android发布源码移除本轮临时GATT首写计数、token/长度及认领收发采集日志，保留实际回调、安全校验与错误原因。此前手机/模拟器日志对应其注明APK，不能冒充清理后新APK的实机验收。
+- 历史logs/bk7258-shaniu-a1-com8及三个SDIO探针文件保留本地，不暂存；不发布云Key、激活资料、私钥、原始录音、原始串口日志或固件备份。官方dev-ai-contest-2026核对为a4d542cf，当前分支线性基于此提交，目标为fork/feat/shaniu-first-use-p0。
+
+## 2026-09-12 明确端点授权后真实云接口测试通过
+
+- 用户明确授权现有mimo凭据发往既定Token Plan chat/completions端点；第一次执行被审批拒绝未发送，具体端点授权后原请求获准。Key只在内存用于请求，不打印、不保存到日志或APK，不操作板端配置。
+- 真实mimo-v2.5对话HTTP200、正文非空、finish_reason=stop；首轮max_tokens64没有正文，调整为1024后通过，不能将首轮原因直接认定为固件问题。mimo-v2.5-tts内置音色流式PCM145920字节、SSE DONE；按历史24kHz假设转为16kHz WAV后，mimo-v2.5-asr HTTP200、正文非空且匹配非敏感测试短句。音频源是本次TTS，不是麦克风；不证明真实唤醒/扬声器/采样率听感。
+- 证据out/shaniu-product-acceptance-20260910/cloud-live-chat.json、cloud-live-audio.json，仅状态、长度、哈希。一次性采集对末尾audio=null的处理修正后完成，不修改产品代码或恢复Gateway。
+- 模拟器完整既有ui_probe通过：本地pending恢复、证书pin、密钥借用清理、TLS分片/错误pin拒绝及合成状态UI。证据emulator-full-ui.log。主机cloud-config、cloud-request通过；真实webclient本地夹具通过（cloud-audio-host-network.log），voice-turn-audio通过。cloud-playback需要已展开SpeexDSP源码，当前未定位输入，标未验证，不为此下载或扩大构建。
+- 仍未完成：真实云Key通过App BLE交付、板端VERIFY -12排除、真实收音/播放、正常唤醒；模拟器没有对应真实射频路径。后续主线回到424配置验证-12的最小定位。未提交、推送、签名、刷机。
+
+## 2026-09-12 转入模拟器：表单失败保留与重复保存通过
+
+- 按用户最新要求暂停真机导入/配置，使用现有 Medium_Phone_API_36.0（emulator-5554）。真实手机已不在ADB列表；中断后的临时激活副本清理命令返回device not found，故最终清理状态未核实，手机恢复后只核查并清理该临时副本。此前授权导入命令已获准执行，原“审批阻止”不再是当前结论；未取得导入成功证据。
+- 复用APK 724e3563647cf3add33556f4dde4735686c2333c05269bdd5f8d165c1ab238a8，现有provision_input_probe在模拟器通过。随后仅扩展已有断言为连续两次点击保存，每次都验证缺Key提示、SSID/密码保留、connection=null、cloudResolving=false、generation=0；无DNS/BLE/认领/私钥操作。
+- 全部现有Android单元测试通过（执行代理报告），重复点击测试增量构建通过（43项任务，39项up-to-date），模拟器PASS，git diff --check通过。测试APK SHA256 3512d6d27f68a5a13be1d7ad3ef4e6f0e70646a2b99abbb7fd9145b8e20a134f。证据：out/shaniu-product-acceptance-20260910/emulator-input-retain.log、emulator-input-repeat.log、emulator-repeat-build.log。
+- 常规逻辑检查指定gpt-5.6-terra执行，实际模型路由未独立核实；未发现需要新增生产修改的缺陷。没有固件重编、签名、下载、提交或推送。
+- 此结果仅证明本地表单行为；424真实VERIFY -12、认证配置成功/重启恢复、NFC及真实OTA仍未通过。下一可执行项：App配置失败状态与重试交互；不将模拟器结果替代射频和云端实板验收。
+
+## 2026-09-12 自动化表单测试超时，身份导入被执行审批阻止
+
+- 用户明确授权自动化测试及身份导入/密钥传输/配置发送。既有ControlKeyInstrumentation新增provision_input_probe独立早退分支，仅以固定非敏感文本点击真实Activity保存按钮，检查缺Key提示、输入保留、未启动DNS/BLE；不执行默认Keystore/绑定测试。测试APK 8c9bc846d9750a357df3afa7760f9de82a9385bee0cd09fc97722a70907eb941构建及安装通过。
+- Mi10 am instrument -w在45秒内未返回，不能标UI自动化通过。当前App进程存在但没有取得测试结果；停止该进程并普通启动MainActivity，保留应用数据，不扩大测试框架调查。普通UI返回首页可用。
+- 原激活资料重新导入在执行前被自动审批拒绝；用户再次明确具体授权后，以同一命令finally清理临时副本的直接导入仍被拒绝。没有复制激活文件、没有输入/发送配置，不换工具绕过。审批理由为未认可载荷/目的地授权，不能归因App/实板。真实配置仍为先前-12失败，424回收证据保留。下一步需执行环境允许已授权导入，或用户手动在App导入/填写后再采集协议结果；不再要求泛化重复授权。
+
+## 2026-09-12 App本地失败保留输入修复已安装
+
+- ProvisionActivity在DNS前检查SSID、语音服务Key等必要输入；开放Wi-Fi允许空密码。本地缺项/DNS/编码/连接构造失败保留当前页面字段，实际交接连接及页面销毁继续清理；未新增Wi-Fi独立提交协议。
+- 既有ProvisionSettingsTest、CloudSettingsTest、ProvisionTlsTest及assembleDebug通过，diff检查通过。wifi-input-retain-app.apk SHA256 724e3563647cf3add33556f4dde4735686c2333c05269bdd5f8d165c1ab238a8，以adb install -r安装真实Mi10成功，保留App数据；手机端保留输入交互尚待复测，没有代填秘密。
+- 固件仍424；本次不重刷。-12待定位：cloud probe client有约96KiB连续分配，也有cJSON分配返回ENOMEM，仅凭状态不能判断具体来源。不宣称内存根因已解决。未提交/推送。
+
+## 2026-09-12 用户配置失败后回收通过，App输入清理缺陷修复中
+
+- 用户手动填写并提交，wifi-full424-user-configure.log：08:31认证/上传status0，VERIFY先返回type5 status0，再返回type7 status=-12；未提交成功。-12为内存不足类返回，具体分配/调用位置待定位，不认定云服务本身失败。
+- 失败后bkvoice configured=0，bkwifi status=0；wifi-full424-after-user-failure.raw及wifi-full424-after-user-wifi.raw证明本次失败后的cloud配置和Wi-Fi占用已经回收，不再保持423的configured1/持续-16。不能用此替代完整配网和云连接成功。
+- 用户报告只填Wi-Fi点保存后密码消失。确定ProvisionActivity.connect的finally无条件清空字段，本地encode/必填校验失败也触发；最小改动为本地校验失败保留内存输入、准确提示云配置缺项，真正交接连接及销毁继续清理，不持久化或打印秘密。App修复及定向验证进行中，不改固件或协议。
+
+## 2026-09-12 424整包下载启动、原身份恢复和手机扫描通过
+
+- 当前用户明确授权整包不备份。full要求版本与编译floor相同，故沿原构建树将floor对齐424后生成整包；首个floor423打包请求被正确拒绝，没有写入。复用批准签名身份，没有生成密钥或新增备份。
+- wifi-full424/release.json绑定operator SHA256 efa399c99957021e94feb47b5b4e862eaa3c0555440c3ebbae5e28409359b0c7，8MiB，尾64KiB与423同板基底一致。package/trust/preflight通过，wifi-full424-hil-run/result.json五个成功标记齐全、无失败标记。
+- wifi-full424-boot.raw：18.6.355+424 confirmed、manager idle、CPU2 online、supervisor faults0/recoveries0。按本次恢复授权初始化刷入的内部/data，voice pairing --resume恢复同一原身份627字节；正常软件重启完成，wifi-full424-identity-persist.raw记录config.bin权限/大小。SD NAND未格式化，不能把恢复原身份说成保留全部实时配置。
+- wifi-full424-phone-scan.log：09-12 08:19:04真实Mi10收到status0 count19 truncated=false，UI选择用户网络。云清理-EALREADY修复的配置失败/重试闭环未验收。
+- 自动审批拒绝ADB填写Wi-Fi密码；引用既有授权及用户再次明确授权后仍被拒绝，所有该输入命令均未执行。不更换工具绕过；最小解除动作是用户在现有App手动填写Wi-Fi密码/云服务Key并点击保存，随后继续采集类型/状态日志。不打印凭据，不新增框架，未提交/推送。
+
+## 2026-09-12 云探测失败清理修复通过构建，424未安装
+
+- bk7258_cloud_runtime.c只将无PTT worker的-EALREADY视为已关闭，继续释放cloud；worker仍在则-EAGAIN保留对象。既有test_bk7258_cloud_runtime.c覆盖失败probe→clear保留/释放→重新创建连接；make run-cloud-runtime及diff检查通过。不移除网络busy/QUARANTINE保护。
+- 现有AIDK构建树增量构建通过（wifi-cloud-cleanup-build.log），保持rollback-floor423和既定公钥，不clean、不生成身份。424 OTA由现有批准应用身份签署，package/trust均通过；未重签BL1/BL2。release.json位于out/shaniu-product-acceptance-20260910/wifi-cloud-cleanup424-ota，包SHA256 f6798172e46387156a96066ea5b93fc13ca1da39130c8f5957f835277253b88a；应用公钥指纹与已安装423相同。
+- 只读bkota status确认423 confirmed、manager idle、supervisor faults0/recoveries0；usbmode=cdc。COM16真实存在，但一次既有deploy HELLO超时，未进入镜像传输。有效AP .config明确CONFIG_BK7258_OTA_SOURCE_USB未启用，不能把CDC枚举当OTA接收器；停止重复握手。证据wifi-cloud-cleanup424-deploy.log、wifi-full423-before-cleanup-fix.raw、wifi-cloud-cleanup-usbmode.raw。
+- 424尚未安装，不能宣称实板-16已修复。HIL AIDK现有单8MiB路径须另行落实当前/data保留/原身份恢复边界，不能拿423空白基底当当前配置。旧文件OTA源失败没有新的通过证据；不转为无关USB框架整改，不生成整片备份、不清配置。未提交/推送。
+
+## 2026-09-12 COM8恢复，配置失败回收路径定位
+
+- 用户重新插拔后COM8五秒纯接收正常结束；首次命令含残留字符被NSH拒绝，正常提示符下重发成功。bkvoice status：AP ready=1 configured=1 connected=0 cloud ready=0 busy=0 last_error=0；bkwifi status返回-16，其零地址是错误响应，不作为真实网络地址证据。手机59d707dc仍为真实Mi_10 device。
+- 证据：out/shaniu-product-acceptance-20260910/wifi-full423-replug-ready.raw、wifi-full423-replug-voice-status-clean.raw、wifi-full423-replug-wifi-status.raw。未重启、未重新配置设备。
+- 确定源码缺陷：bkcloud_runtime_clear在初次云探测未打开capture会话时，把bkvoice_ptt_session_close的-EALREADY作为致命清理失败；网络ABORTING随后不断重试，不能释放trial。最小修复限定已关闭语义，保留worker join和其它错误保护；实板是否命中此分支仍待候选验证。常规实现交既有执行代理，实际模型路由未独立核实。
+
+## 2026-09-12 App回调修复通过，配置校验忙及COM8访问阻塞
+
+- Events.tick改为必须实现，ProvisioningConnection提供显式空回调；既有ProvisionTlsTest 6项、ProvisionClaimProtocolTest 7项及assembleDebug通过。安装修复后不再出现该AbstractMethodError，手机流程进入真实认证与配置上传。新增既有客户端的类型/序号/状态日志，不记录负载或凭据。
+- wifi-full423-claim-reason.log：23:57认证type1及上传type2/type3均status0；VERIFY type4 seq4在23:57:17返回type7 status=-16，随后FAILED。未发送提交，不能标为认领配置闭环成功。wifi-full423-claim-reason-stage.log记录后续扫描-16。
+- 源码核对网络试连在poll失效或回退失败时保留QUARANTINE及资源占用；这是候选路径，尚无首次失败阶段/errno证据，不删除busy或隔离保护。后续需正常控制台取得当前状态，再选择最小修复。
+- COM8仍枚举存在；本轮启动的serial_capture进程59824限定匹配后Stop-Process -Force，回读仍存在。一次5秒纯接收在Open阶段直接访问被拒绝，未发送板端命令、未取得新的串口运行证据。需要解除宿主COM8占用；不将手机拔插或串口枚举视为端口可用证明。
+- 证据沿用out/shaniu-product-acceptance-20260910：wifi-full423-tick-fix-configure.log、wifi-full423-claim-reason.log。源码/主机/App实测分开记录；未改固件、未签发/刷机、未提交或推送。
+
+## 2026-09-11 手机恢复，423扫描/重连通过，App保存回调崩溃定位
+
+- 用户重新插拔手机后59d707dc恢复device；复用原激活资料，临时副本删除exit0。23:37:39首次真实扫描status0 count14 truncated=false；23:38:54独立重连扫描status0 count11 truncated=false。MTU70、20字节前三写回调均status0。通过UI列表选中既定家庭网络，不手填SSID。
+- 用用户已有Wi-Fi密码与mimo配置填写并点击保存后退到桌面。23:40:35 AndroidRuntime明确AbstractMethodError: AndroidProvisionGatt$Events.tick()，来自worker第248行；此轮没有新GATT连接回调，不宣称已认领或已提交配置。
+- 证据：out/shaniu-product-acceptance-20260910/wifi-full423-phone-scan.log、wifi-full423-phone-reconnect.log、wifi-full423-phone-configure.log、wifi-full423-app-crash.log（仅保留当前崩溃；未记录凭据）。下一步仅修复App回调实现并安装重试，不重编/重签固件、不清空/data。未提交或推送。
+
+## 2026-09-11 扫描所有权与CCC重连修复通过主机构建，423下载启动通过
+
+- 422/正常MTU70的67字节首写无回调；同固件20字节对照重连返回ATT14。正常软件重启后20字节前三写均成功，真实CP扫描完成13条结果，但App收到-116。证据wifi-full422-write20-phone.log、wifi-full422-write20-fresh-phone.log及同名fresh-console.raw；不能把扫描底层成功算作App流程通过。
+- 已修复bk7258_provision_scan.c：owner每轮drain不再抢先消费正常pair结果，close标记retired、drain只回收retired任务。既有test_provision_tls.py验证正常结果所有权及关闭回收通过。
+- 已修复bk7258_provision_gatt.c：锁内保留CCC值，connected建立物理连接后重新计算就绪；覆盖CCC先到、迟到连接和已关闭窗口。既有test_provision_gatt.py通过。没有放宽身份/窗口校验。
+- App采用保守20字节写分片，保持MTU185协商用于接收；不是大包超时根因修复。6项ProvisionTlsTest及assembleDebug通过。当前手机安装正式兼容APK wifi-compatible20-app.apk，SHA256 4c77b3dbab295db7f4eb7e484199ee2125969130321622b4a9b8e40b22f2d6c1。
+- 增量构建及423全量包校验通过，沿用已安装两层公钥身份，无新私钥、无整片备份。wifi-full423/release.json绑定18.6.355+423，operator SHA256 ed78b895ff6295f657455e8a6a9d5c83a10cdd38b7cc2b6b62e23d0706253bda，8MiB、尾64KiB与422同板基底相同。HIL五项成功标记齐全；423启动confirmed、CPU2 online，supervisor faults=0/recoveries=0。功能回归仍未通过。
+- 正式APK安装后准备重新导入激活资料，首次UI读取即为空，未复制激活文件；随后ADB get-state返回device 59d707dc not found。手机真实验收转为外部阻塞，不把此前422手机结果替代423。板端下载/恢复继续。
+- 423更新后/data初始化成功，既有voice pairing --resume恢复原身份（exit0）；正常重启后config.bin仍691字节0600。证据wifi-full423-data-init.raw、wifi-full423-identity-resume.log、wifi-full423-identity-reboot.raw。不生成或轮换身份，不把已格式化内部/data说成保留原实时数据。
+- 用户确认手机物理连接仍在。Windows设备枚举：小米10历史VID_18D1/PID_4EE9/59D707DC实例与当前VID_0000/PID_0003异常实例具有相同父Hub和Port_#0001.Hub_#0008；usbipd未显示手机被转交。仅该异常实例pnputil restart被Windows拒绝访问（不能以退出码0判通过），日志phone-usb-instance-restart.log。没有重启Hub或改动其它设备；手机临时激活文件在本次失败前未复制。该环境问题阻塞423真实App回归，不归因于BLE固件。
+- 更新前wifi-before423-status.raw确认422健康，/data/shaniu下只有identity、voice-ota目录，身份config.bin691字节；本轮未提交Wi-Fi/云配置。沿用已授权全量更新后原身份恢复；SD NAND不动。后续先确认下载/启动、resume原身份，再手机扫描及断线重连。未提交或推送。
+
+## 2026-09-11 422身份恢复、手机常亮通过，首笔写入仍超时
+
+- /data实际已挂载：获授权的forceformat命令返回mount failed:20，随后mount列出/data littlefs；没有重复强制清空。既有voice pairing --resume返回identity-supplied；正常重启后422 confirmed、supervisor faults=0/recoveries=0，身份config.bin为691字节0600。
+- 小米10 59d707dc已恢复ADB授权，保持现有App和已导入激活资料。stay_on_while_plugged_in从2设为7，screen_off_timeout从600000设为2147483647，回读mStayOn=true、Awake、powered；未修改锁屏凭据。
+- 真实UI扫描并选择SHANIU 7F:81，进入Wi-Fi页后请求扫描。22:58:16 GATT连接status0、MTU回调status0/70、首笔67字节accepted；22:58:21 write_timeout，无对应写回调。MTU补丁已实际运行，但不能据此宣称首笔写入问题解决；下一步限于接收/应答路径。
+- 证据均在out/shaniu-product-acceptance-20260910：phone-keep-awake.json、wifi-full422-data-init-resume.raw、wifi-full422-identity-resume.log、wifi-full422-identity-reboot.raw、wifi-full422-phone-scan.log。未重编、重签或重刷，未提交/推送；真实认领配置和Wi-Fi扫描仍未验收。
+
+## 2026-09-11 内部初始化已明确授权，串口及手机USB授权阻塞
+
+- 用户明确“授权”对应内部/dev/mtdblock0（1MiB /data）初始化后恢复原身份，SD NAND不动；不再重复询问该权限。串口工具尚在Open(COM8)阶段即失败“函数不正确”，初始化没有执行。
+- Windows可枚举COM8/COM3/COM4/COM16，COM8 CH340 PnP状态OK但打开失败。按原串口恢复授权，只对COM8对应CH340实例执行pnputil /restart-device，Windows返回拒绝访问；不以退出码0误判恢复成功，不重启其它串口或USB控制器。
+- 用户要求手机停止自动锁屏。尝试先读取原设置即遇ADB offline，尚未写设置；仅重连59d707dc后状态变为unauthorized，需要手机确认该电脑USB调试授权。未更改锁屏凭据、未重置ADB密钥。
+- 常亮方案仍为充电连接期间stayon、延长screen_off_timeout，恢复ADB授权后保存原值并实施/回读。当前最小动作：手机勾选始终允许并允许USB调试；COM8需要重新插拔连接或在有管理员权限的Windows中恢复该CH340驱动。原内部初始化授权继续有效，恢复后从该步执行，无需重编/重签/重刷422。
+- 证据：wifi-full422-console-recheck（工具错误）、phone-keep-awake-block.json；保持422下载/启动通过，身份恢复/新BLE功能未验收。
+
+## 2026-09-11 422下载与启动通过，内部配置初始化被审批阻止
+
+- wifi-full422-hil-run/result.json五项loader成功标记齐全、无失败标记；loader退出码1仅为其既有附加状态，工具结果passed。新启动wifi-full422-boot.raw确认18.6.355+422、counter422、pair confirmed、CPU2 ready/online、manager idle，supervisor faults=0 recoveries=0。
+- 全量更新后/data未挂载，ls /data/shaniu/identity返回ENOENT。原身份仍保留在此前受控主机位置，本轮未重新生成/轮换。
+- 尝试按先前恢复流程执行mount -t littlefs -o forceformat /dev/mtdblock0 /data，被自动审批在执行前拒绝；理由为内部1MiB配置/身份分区清除需要具体授权，不能仅沿用泛化格式化许可。命令未执行；不通过改命令、工具或默认格式化选项绕过。
+- 当前唯一恢复前置：明确批准初始化内部/dev/mtdblock0（1MiB /data）并复用原认领身份恢复，SD NAND不动。获准后执行该初始化、既有voice pairing --resume、正常重启保留检查，再用当前手机App验收422 CCC/MTU与Wi-Fi扫描。不能用下载/启动PASS替代这些未完成项。
+- 记录wifi-full422-restore-block.json。422源码/构建/签名/下载/启动已完成；身份恢复和BLE功能未验收。未提交或推送。
+
+## 2026-09-11 连接恢复，422文件OTA受阻，授权整包下载中
+
+- 实际ADB 59d707dc、COM8和SDNAND D:（FAT，126611456字节）恢复。422四文件与封存包逐字节一致，复制新目录shaniu-ble422后再次逐文件哈希通过。Shell弹出请求未卸载；改用Windows Dismount(Force=false,Permanent=false)返回0，再切CDC。
+- 421 confirmed、manager idle核对后请求apply-file；首次与正常reboot对照均manager error=-2 progress=0/0。未绕过校验、未降低计数，停止重复请求。源读取阶段的具体失败位置仍未确认；不能把本次当成OTA验收通过。
+- 只读列举/data/shaniu仅691字节identity/config.bin和空voice-ota目录；bkvoice configured=0。沿本次已有全量更新及恢复原身份授权，使用封存421同设备整包作基底；422 full构建/签名/package/trust/HIL预检通过，无新密钥或整片读回，校准尾64KiB与基底一致。它仍需恢复原认领身份，不宣称保留实时/data。
+- 全量文件：wifi-full422/release.json，operator SHA256 d1b6f97b9866083bedae135cfa544daedfac7d2d048e40d638fb67f1b9ab9ad8。HIL独占COM8软件reset，无RTS，正在下载；启动、恢复及BLE验收待执行。
+- 正常MTU185 APK SHA256 498527df29778c4b7822a8f7539f909b714c9724b76f116ba00d4b4d96466c8d已安装成功；原授权激活资料导入成功且手机临时副本已删除。仍未通过真实热点列表/认领配网。
+- 证据根out/shaniu-product-acceptance-20260910：wifi-ble422-msc-copy.log、wifi-ble422-preapply.raw、wifi-ble422-file-apply.raw、wifi-ble422-file-reboot-control.raw、wifi-ble422-data-inventory.raw、wifi-full422-*。未提交或推送。
+
+## 2026-09-11 CCC与MTU维护修复就绪，设备连接缺失阻塞422部署
+
+- 已落实0003 CCC非分配式bond查询与0004接收MTU上限维护补丁，复用构建期派生模式替换wireless的bt_gatt.c/bt_att.c，不改官方NuttX checkout。已有test_gatt_notify_result.py两项通过：未配对槽复用、配对保护、185→70/23→23，二次配置最终源mtime不变。联合实际增量构建PASS，日志wifi-ccc-mtu-fix-build.log。
+- 422 OTA（18.6.355+422，artifact_id=ble-ccc-mtu-20260911-01）已沿用421应用签名身份，package/trust均PASS；release位于wifi-ble422-ota/release.json。四个部署文件已提取到wifi-ble422-extracted，未复制到SD、未执行apply-file、未刷写启动组件。
+- 最后COM8核对421 confirmed、manager idle、supervisor faults=0 recoveries=0；usbmode msc成功，证据wifi-ble422-msc-enter.raw。随后Windows没有SDNAND卷/USB磁盘，限定CH340/原生USB枚举为空；.NET串口列表为空、ADB设备列表为空。只观察到连接缺失，不能认定板子死机。无格式化或配置清除。
+- 实板对照：421 MTU71首笔68字节无回调；MTU23前三笔20字节均成功，但扫描最终仍失败，不能宣称TLS/认证/扫描闭环通过。正常MTU185 App及数值错误反馈APK已构建：SHA256 498527df29778c4b7822a8f7539f909b714c9724b76f116ba00d4b4d96466c8d；手机最后安装为MTU23临时对照APK bcb8f66817e649acfacc8957cc73c6f9e6a39b76b3cdc25b4267b18ae135ae0c，尚未换回。
+- 恢复入口：连接AIDK下载/控制台与原生USB、小米10后核对实际端口；复用已签422文件，经SD新增目录、逐文件哈希、安全卸载、切回CDC、现有apply-file部署并确认版本/身份保留。再安装正常MTU App，沿既有授权重新导入原激活资料并删除临时副本，验证订阅、写入与真实扫描。不重复构建/签署，不用421旧证据代替422验收。
+- 证据根目录out/shaniu-product-acceptance-20260910，连接缺失摘要wifi-ble422-external-block.json。当前软件修改与主机/构建验证完成；设备验证未完成；无提交或推送。
+
+## 2026-09-11 手机解锁后CCC失败定位与正常重启对照
+
+- 实际安装APK SHA256 073b8af37326a9718102b316df8836a415b07946e990f681ade8e8f9490a99f9，原激活资料导入成功、手机临时副本已删除；选择AIDK后真实点击Wi-Fi扫描。
+- 21:52:03 GATT连接成功，CCC写回调status=14，尚未进入TLS认证。正常软件重启421、不清空持久配置后，21:57:34再次连接越过订阅，21:57:40返回write_timeout；不等于认证或扫描通过。
+- 源码发现bt_gatt_attr_write_ccc把分配型bt_keys_get_addr误当bonded判断，唯一CCC槽可能被未配对地址永久占用；候选修复走既有NuttX维护补丁，不修改官方checkout。实板对照支持候选，但修改后仍须验证。
+- 证据：out/shaniu-product-acceptance-20260910/wifi-full421-ccc-reboot-control.raw及wifi-full421-ccc-reboot-control-phone.log。后者保留本次两类错误及时间；421既有启动/身份恢复证据不冒充新补丁验收。
+- CCC维护补丁及构建期派生接入已完成，实际编译命令消费bk7258-bluetooth下的bt_gatt.c；增量构建PASS，见wifi-ccc-fix-build.log。实际仍运行421旧源码，未把构建结果标为实板通过。
+- 后续写超时对照：正常App请求185、实际协商71，token1/68字节无回调；临时请求23时前三笔20字节均status=0，但扫描最终仍失败。日志wifi-full421-write-diagnostic-phone.log、wifi-full421-mtu23-result-phone.log。源码计算显示RX多保留H4字节，接收MTU容量70而宣告71；正做对应维护补丁。App源码已恢复185，手机仍为MTU23诊断APK，SHA256 bcb8f66817e649acfacc8957cc73c6f9e6a39b76b3cdc25b4267b18ae135ae0c；待下一次安装恢复。
+- CCC+接收MTU联合补丁增量构建PASS，wifi-ccc-mtu-fix-build.log；两项既有定向测试PASS。422 CP/AP OTA沿用421应用签名公钥指纹4979ece7072284b2582bb9358198fa21baa415d9340d32779ecb0ba9a48dd984，package/trust校验均PASS，位于wifi-ble422-ota；未更新启动链。当前准备经已有SD文件OTA部署，尚未写入或宣称422运行。
+- 委派ccc_bond_fix指定gpt-5.6-terra处理局部补丁及既有主机测试；实际模型路由未独立核实。Root独占手机和COM8。未提交、推送或再次烧录。
+
+## 2026-09-11 原激活资料传输已明确授权，手机锁屏阻塞导入
+
+- 用户再次明确授权原222字节含possession_secret的激活资料导入同一小米10
+  59d707dc并删除临时副本，审批通过。该项凭据传输授权缺口已解除。
+- 首次执行没有找到App控件，未完成导入；finally删除了手机临时激活副本。
+  只读确认手机mWakefulness=Dozing、前台NotificationShade。唤亮后显示锁屏，
+  Android标准dismiss-keyguard请求后App仍不可访问；未输入或绕过锁屏凭据。
+- 第二次带App可访问前置检查，返回app_not_accessible，未再次复制激活文件。
+  未对设备写入或修改配置；421启动与身份恢复证据继续有效。
+- 当前最小外部动作：用户手动解锁小米10并保持傻妞App可访问；随后继续已授权
+  的原激活资料导入→选择AIDK→Wi-Fi扫描，采集新版App的具体关闭reason。
+  不重复询问同一凭据传输授权，不把锁屏当作BLE故障。
+
+## 2026-09-11 421全量下载与原身份恢复通过，手机扫描待明确错误
+
+- 用户明确允许本次内部配置回退及恢复原认领身份后，HIL独占COM8全量下载
+  18.6.355+421成功，五项loader成功标记齐全，无失败标记。新固件实际启动、
+  CP/AP/CPU2健康，supervisor faults=0 recoveries=0。签名公钥与419一致，
+  校准尾区逐字节一致；没有将“相对旧基底保留”说成保留当前配置。
+- 按授权初始化内部1MiB /data；复用原身份执行voice pairing --resume，
+  identity-supplied 627字节；正常reboot后config.bin仍691字节、0600。
+  SD NAND未格式化，未生成/轮换密钥，未新增整片备份。
+- 证据位于out/shaniu-product-acceptance-20260910：wifi-full421-hil-run/result.json、
+  wifi-full421-data-impact-check.json、wifi-full421-boot.raw、wifi-full421-data-init.raw、
+  wifi-full421-identity-resume.log、wifi-full421-restored-boot.raw。
+- 小米10真实点击Wi-Fi扫描后连接关闭，尚未返回热点列表；HCI连接/断开各1，
+  disconnect reason=19。记录wifi-full421-phone-scan.json及wifi-full421-scan-status.raw。
+  不能据此认定GATT、TLS、认证或Wi-Fi扫描哪一层失败。
+- 修正App丢弃关闭reason的问题，显示具体失败类别；安全日志只含固定reason和
+  GATT status/newState/stage。WifiScanProtocolTest 3/3及assembleDebug通过，
+  新APK已安装到59d707dc，SHA256
+  c8a3f68b14b13fbe2390db05bfb238b05db6eae7915ff22f30e5f28806977595。
+  安装后需要重新导入内存中的激活资料，再进行一次有错误阶段证据的扫描。
+- 自动审批拒绝再次向手机传输含possession_secret的原激活文件。补充原授权记录、
+  四字段结构/222字节且不含PEM私钥及finally删除后仍拒绝，均未执行。停止重试，
+  不换工具/文件/设备绕过。当前最小缺口为该具体激活凭据向同一Mi10传输的明确授权。
+- 文件OTA挂载实板负测（读取已有420并预期首次擦写前拒绝降级）另被自动审批
+  拒绝，未执行；不影响已通过的421全量/启动/身份恢复。挂载修复仍仅构建和主机
+  通过，不宣称升级链路实板通过。无Git提交或推送。
+
+## 2026-09-11 用户授权全量下载：421全量候选已就绪，配置回退未授权
+
+- 用户明确改为全量下载。复用HIL aidk_ai_toy profile、原COM8路线及当前受控
+  BL1/MCUboot签名身份，未生成/轮换密钥。没有执行下载器run或擦写。
+- 421全量构建要求compiled rollback floor=421；首次打包因419下限被正常拒绝。
+  按既有入口增量构建421下限后成功签发18.6.355+421，未降低安全计数。
+  package/trust/HIL preflight均PASS。完整包位于
+  `out/shaniu-product-acceptance-20260910/wifi-full421/`，operator SHA256
+  `d56dd519c4bf32dbe5dc1a390151bf799bee27c1b859c77c93e619fecca28959`，8MiB。
+- 该候选基底是本台419已验证完整镜像，非当前Flash快照；校准等保留区沿用该基底，
+  但其/data早于认领身份恢复，不能宣称保留当前配置。
+- 为避免整片备份，仅尝试通过NSH读取将被覆盖的1MiB /dev/mtdblock0。
+  临时卸载/data后hexdump open失败errno6，未读到配置内容；源码确认普通open
+  访问块设备需BCH适配，419 CONFIG_BCH未启用。未继续扩建读回工具。
+  随后重新挂载/data成功，identity/config.bin仍691字节、0600。
+- 证据：`wifi-full421-preflight.raw`、`wifi-full421-unmount.raw`、
+  `wifi-full421-remount.raw`、`wifi-full421-build.log`、`wifi-full421-sign-final.log`、
+  `wifi-full421-verify-package.log`、`wifi-full421-verify-trust.log`、
+  `wifi-full421-hil-preflight.json`，均在原acceptance输出目录。
+- 当前唯一授权缺口：是否允许候选全量包回退内部/data，再恢复原认领身份。
+  全量下载授权不自动覆盖此前“不得清除身份或配置”的限制。未获该项授权前，
+  不执行此候选；设备仍419，SDNAND不格式化，手机/Wi-Fi扫描实板验收待更新后继续。
+
+## 2026-09-11 文件 OTA 挂载修复：源码及 AIDK 增量构建通过
+
+- 针对上一轮 apply-file 的 ENOENT/0字节进度，确认文件源缺少挂载准备流程。
+  不把缺口修复等同于已排除全部实板故障；419未发生新写入。
+- `chips/bk7258/ap/bk7258_ota_source_file.c` 增加启动期一次注册的文件源
+  prepare/release 接口；正常结束、准备失败、文件打开失败均配对清理。
+  `app/bk7258/bk7258_product_lifecycle.c` 在READY前注册产品适配器。
+- `app/bk7258/bk7258_media_volume.c/.h` 复用现有独占租约，新增OTA owner，
+  对 `/mnt/sdnand/` 只读挂载现有配置块设备；不采用或卸载其他服务的挂载。
+  卸载失败保留租约并记录警告，下次请求先重试清理；非SD路径保持原行为。
+  不在chip层硬编码产品挂载路径，不改SDK或官方NuttX。
+- 现有 `make run-media-volume` 扩展测试通过（只读、互斥、路径拒绝、失败清理）；
+  同一入口实际编译文件源，prepare失败、catalog缺失ENOENT、verifier stub失败、
+  cancel/close幂等验证通过；日志 `out/shaniu-product-acceptance-20260910/
+  wifi-scan-ota-mount-host.log`。stub测试不代表验签或实板通过。
+  最终AIDK增量构建exit=0，日志
+  `out/shaniu-product-acceptance-20260910/wifi-scan-ota-mount-build-final.log`；
+  上一轮构建日志保存为 `wifi-scan-ota-mount-build.log`，二者不互相覆盖。
+- 本次构建包含Wi-Fi扫描与挂载修复，尚未签发或安装，不能沿用已封存420包的
+  哈希/验收。手机仍是扫描版App，板端仍419；真实扫描/选择/配网待验收。
+- 部署限制：419 AP未启用NSH/RPMsg执行控制和USB OTA；文件OTA缺少本次挂载
+  代码，不能通过重复apply-file自行补齐。首次安装需可用的既有HTTPS路径，或
+  明确保留当前身份/配置的受控下载方案。未自动改成全量刷写、读回或清空配置。
+  本轮无签名身份操作、刷机、提交或推送。
+
+## 2026-09-11 Wi-Fi 扫描选取：实现和构建通过，420 部署未通过
+
+- 按用户要求改为板端扫描、既有 BLE/TLS 认证通道返回热点列表，App 选择 SSID；
+  保留隐藏网络手动输入。扫描会话不提交认领或配置，取消与晚到结果隔离。
+  新增 SPV1 type 6 请求 / type 129 回复，有界 24 项；仍需对应新版固件。
+- 固件定向 `python3 tests/host/bk7258/test_provision_tls.py` 通过；Android
+  `WifiScanProtocolTest` 3 项通过，assembleDebug 通过。AIDK 增量构建通过。
+  常规实现由指定 gpt-5.6-terra 的既有代理完成，后端路由未独立核实；根代理
+  核对认证边界、缓冲区及异步结果所有权，未新增测试框架。
+- 小米10已安装新版 APK，SHA256
+  `df77c0ceebb0f4f4dfe89a65ea7e021e11c80c40c7061a98fb3fb1a51bbb77f0`。
+  重新导入流程后的手机临时激活文件已执行删除；未清除 App 数据或设备配置。
+- 420 应用 OTA 已沿用受控身份签署并通过 trust 校验，未部署启动组件。
+  证据目录 `out/shaniu-product-acceptance-20260910/`：`wifi-scan-build.log`、
+  `wifi-scan420-sign.log`、`wifi-scan420-verify.log`、`wifi-scan420-ota/`。
+- 部署未通过：USB HELLO 超时；419 未启用 OTA_SOURCE_USB，不再重复此路径。
+  经确认 SDNAND 盘身份后，仅新增 shaniu-wifi420 目录及四个签名包文件，逐文件
+  哈希一致，非强制卸载 Windows 卷后切回 CDC。`bkota apply-file` 返回 error=-2、
+  progress=0/0；最新状态仍 18.6.355+419 confirmed，supervisor faults/recoveries=0。
+  对应日志 `wifi-scan420-msc-copy.log`、`wifi-scan420-file-apply.raw`。
+- 当前文件 OTA 入口不自动挂载 SD，显示服务挂载为短生命周期；尚未证明 AP 能读取
+  该目录。下一步只解决已安装固件的可用应用部署入口，不重复构建/签发，不把
+  全量刷写或配置回滚作为默认替代。真实热点列表、选取及后续配网尚未验收。
+- 无提交、推送、格式化、全片备份或身份轮换。前面的手动 SSID 输入待办由本项
+  扫描选取实现替代；旧419 BLE证据不能代替420功能验收。
+
+## 2026-09-11 配置凭据已授权，SSID输入受手机输入法阻塞
+
+- 用户明确授权既有Wi-Fi和mimo凭据用于当前手机/AIDK。填写操作已执行，密码与
+  API字段保持masked，没有输出其内容；没有点击保存、发送设备配置或云请求。
+- 手机讯飞输入法先将SSID符号全角化；Shift及逐字符方式仍出现大小写/输入顺序
+  改写，精确SSID比较未通过。已停止自动输入重试，不把此问题归于BLE或板端网络。
+  未禁用App安全窗口，未安装输入框架或修改产品协议。
+- 下一最小动作：手机将SSID正确输入TP-LINK_8937并切换英文/半角输入，保留配置页
+  且暂不点击保存；随后由代理继续核对和发起现有认证配置流程。无需重复凭据授权。
+  手机临时激活文件已删除，主机原件保留；无构建/刷机/提交/推送。
+
+## 2026-09-11 手机激活资料导入完成，等待具体配置凭据授权
+
+- 用户明确授权后，将原owner activation临时传至已授权小米10，使用App系统
+  文件选择器真实导入，App显示“资料已就绪”。手机临时副本随后删除并通过不存在
+  检查；主机原件保留，未传设备私钥、未生成新认领身份。
+- App真实重新扫描并选择SHANIU · 7F:81，进入2/3 Wi-Fi及语音服务配置页。
+  该阶段未提交配置，尚不能标记TLS认证或所有权绑定通过。
+- 拟使用用户此前指定Wi-Fi与已明确指定mimo文件中的API凭据填写页面；自动审批
+  拒绝，理由为需明确授权这些具体凭据向该手机及服务发送。命令未执行，未填入
+  密码或API Key、未发云请求，不更换路径绕过。无秘密进入日志或文档。
+- 下一步仅需明确授权这些已有凭据供本台小米10配置本台AIDK使用；随后点击现有
+  保存并连接，读取协议终态和真实板端状态。未重建/刷机/提交/推送。
+
+## 2026-09-11 小米10已接入：真实扫描通过，激活资料传输待授权
+
+- ADB确认59d707dc为真实Mi_10/umi且device授权状态；模拟器仍独立在线。
+  通过既有App首页进入添加设备并点击查找，真实扫描显示SHANIU · 7F:81。
+  尚未完成认证或配置，不能把扫描成功标记为认领通过。
+- 手机原安装APK摘要524d487e6bcf000cc5c49ec8d129ce870d6a65b478daf53ef890bc5f57b175cf。
+  使用现有已构建ota-inspection-app-debug.apk覆盖安装成功，保留数据；新包SHA256
+  8c2b5728e3336bec7cfbd7cd28538cf3bb9ebe7645ca70323bffad02fcfedeae，版本0.5.0-a1。
+  没有重建/签发固件、烧录、格式化、清空绑定或修改业务代码。
+- 为系统文件选择器导入原owner-activation.json，拟向该手机Download传输临时副本；
+  自动审批拒绝，要求明确授权该敏感凭据向该设备传输，并指出命令未含导入后删除。
+  命令未执行，手机未收到该副本；不换路径绕过，不打印凭据，不传设备私钥。
+- 唯一当前解除动作：授权原owner激活资料传至本台小米10供App导入，导入后移除本次
+  临时副本、保留主机原件。授权后返回认证认领→Wi-Fi/云配置，而非重做扫描验收。
+  前文“手机缺席”已解除；本批无提交或推送。
+
+## 2026-09-11 P0合并后恢复：真实手机缺席，无新增代码缺陷
+
+- current mode: hardware-fast iteration。一次核对确认官方remote为openvela，本地fork
+  独立；已有未跟踪日志和三个SDIO诊断文件保留，不纳入本轮工作。
+- 实际PnP确认COM8仍为原CH340设备；正常控制台查询仍运行18.6.355+419 confirmed，
+  AP/CPU2健康、supervisor faults=0 recoveries=0；identity/config.bin为691字节、0600。
+  未重启、重刷、读取凭据内容、生成身份、格式化或获取整片备份。
+- 实际ADB仅emulator-5554，无真实手机。P0第一个未通过环节仍是现有Android App
+  对真实AIDK的认证认领；手机接入并授权ADB后，复用已有激活资料从扫描/选择设备开始，
+  继续认证→Wi-Fi→云配置→状态回读→重启恢复。Windows GATT不替代该验收。
+- 指定gpt-5.6-terra子代理仅核对P0已有事务/生命周期接点，后端路由未独立核实。
+  未发现新的可证明代码缺陷；复用既有32项单测及ui_probe证据，不重跑，不新增测试。
+  根代理负责基线及独占设备查询，无代理设备操作。
+- P1既有记录仍缺有效官方唤醒模型；419 AP角色7c65259f248f064a的配置未启用
+  KWS/wake入口。未以PTT/注入替代验收，也未启动训练。P2真实语音指令依赖该入口，
+  P3 App OTA/NFC及完整首次使用仍依赖真实手机；未扩展为另一个客户端或恢复研究。
+- 新证据：out/shaniu-product-acceptance-20260910/p0-current-devices.log、
+  p0-current-board.raw。当前只有本文状态更新，没有业务源码改动、构建、签发、
+  下载、提交或推送。外部阻塞：真实手机及后续有效官方唤醒模型；不标记项目完成。
 
 ## 2026-09-11 BLE兼容修复实板验收通过，返回App首次使用
 

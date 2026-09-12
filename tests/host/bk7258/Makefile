@@ -706,12 +706,16 @@ run-vision-record: vision-record
 
 $(MEDIA_VOLUME_TARGET): test_bk7258_media_volume.c \
 	$(VOICE_PACK_ROOT)/bk7258_media_volume.c \
-	$(VOICE_PACK_ROOT)/bk7258_media_volume.h | $(BUILD)
+	$(VOICE_PACK_ROOT)/bk7258_media_volume.h \
+	$(CHIP_ROOT)/ap/bk7258_ota_source_file.c | $(BUILD)
 	$(CC) $(VOICE_PACK_CFLAGS) -DCONFIG_BK7258_USBMODE -DCONFIG_BK7258_AP_CORE \
+		-DCONFIG_BK7258_OTA_SOURCE_FILE -DCONFIG_BK7258_OTA_MANAGER \
+		-DCONFIG_BK7258_USBMODE_BLOCKDEV=\"/dev/mmcsd0\" \
 		-I $(MOCKS) -I $(CHIP_ROOT)/include -I $(VOICE_PACK_ROOT) \
 		-include $(CHIP_ROOT)/include/bk7258_usbmode.h \
 		-include $(MOCKS)/bk7258_usbmode_lease.h \
-		test_bk7258_media_volume.c $(VOICE_PACK_ROOT)/bk7258_media_volume.c -o $@
+		test_bk7258_media_volume.c $(VOICE_PACK_ROOT)/bk7258_media_volume.c \
+		$(CHIP_ROOT)/ap/bk7258_ota_source_file.c -o $@
 
 media-volume: $(MEDIA_VOLUME_TARGET)
 

@@ -18,6 +18,51 @@ import java.util.UUID
  * mutation. Reflection keeps fixture injection out of the production APK API.
  */
 internal object DeviceUiAcceptance {
+    /** Local ProvisionActivity validation only: no bootstrap, binding, DNS, BLE or key material. */
+    fun runProvisionInputValidationProbe(instrumentation: Instrumentation) {
+        val activity = instrumentation.startActivitySync(
+            Intent(instrumentation.targetContext, ProvisionActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        ) as ProvisionActivity
+        fun field(name: String) = ProvisionActivity::class.java.getDeclaredField(name).apply {
+            isAccessible = true
+        }
+        val showPage = ProvisionActivity::class.java.getDeclaredMethod(
+            "showPage", Int::class.javaPrimitiveType!!,
+        ).apply { isAccessible = true }
+        try {
+            instrumentation.runOnMainSync {
+                showPage.invoke(activity, 1)
+                (field("ssid").get(activity) as TextView).text = "test-only-wifi"
+                (field("password").get(activity) as TextView).text = "test-only"
+                (field("cloudUrl").get(activity) as TextView).text = "https://cloud.example/v1"
+                (field("cloudKey").get(activity) as TextView).text = ""
+                (field("asrModel").get(activity) as TextView).text = "test-asr"
+                (field("chatModel").get(activity) as TextView).text = "test-chat"
+                (field("ttsModel").get(activity) as TextView).text = "test-tts"
+                fun views(root: View): List<View> = listOf(root) + if (root is ViewGroup)
+                    (0 until root.childCount).flatMap { views(root.getChildAt(it)) } else emptyList()
+                val save = views(activity.window.decorView).single {
+                    it is TextView && it.text.toString() == "保存并连接"
+                }
+                repeat(2) {
+                    save.performClick()
+                    check((field("status").get(activity) as TextView).text.toString() ==
+                        "请填写语音服务 Key 后再保存；当前事务会同时保存 Wi-Fi 和语音服务。")
+                    check((field("ssid").get(activity) as TextView).text.toString() == "test-only-wifi")
+                    check((field("password").get(activity) as TextView).text.toString() == "test-only")
+                    check((field("cloudKey").get(activity) as TextView).text.isEmpty())
+                    check(field("connection").get(activity) == null)
+                    check(field("cloudResolving").get(activity) == false)
+                    check(field("cloudLookupGeneration").get(activity) == 0L)
+                }
+            }
+        } finally {
+            instrumentation.runOnMainSync { activity.finish() }
+            instrumentation.waitForIdleSync()
+        }
+    }
+
     fun run(instrumentation: Instrumentation) {
         val activity = instrumentation.startActivitySync(Intent(instrumentation.targetContext, MainActivity::class.java)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) as MainActivity

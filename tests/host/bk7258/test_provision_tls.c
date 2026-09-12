@@ -5,6 +5,7 @@
 #include "bk7258_provision_pair.h"
 #include "bk7258_provision_store.h"
 #include "bk7258_control_pair.h"
+#include <arch/chip/bk7258_wifi.h>
 #include <assert.h>
 #include <errno.h>
 #include <stdio.h>
@@ -24,6 +25,25 @@ static struct bkprov_store_s pair_store;
 static bool network_verified;
 static int pair_commits;
 static uint8_t saved_transaction[16];
+static uint32_t scan_ticket;
+static bool scan_ready;
+static struct bk7258_wifi_scan_snapshot_s scan_snapshot;
+
+int bk7258_wifi_scan_async(uint32_t timeout_ms, uint32_t *ticket)
+{
+  assert(timeout_ms == BK7258_WIFI_SCAN_DEFAULT_MS);
+  *ticket = ++scan_ticket;
+  return 0;
+}
+int bk7258_wifi_scan_snapshot_poll(uint32_t ticket,
+                                    struct bk7258_wifi_scan_snapshot_s *out)
+{
+  if (ticket != scan_ticket) return -ESTALE;
+  if (!scan_ready) return -EAGAIN;
+  *out = scan_snapshot;
+  scan_ready = false;
+  return 0;
+}
 static int read_receipt(const uint8_t tx[16])
 { return memcmp(tx, saved_transaction, 16) == 0 ? 1 : -EINPROGRESS; }
 #define server pair.tls
@@ -114,6 +134,26 @@ static void request(mbedtls_ssl_context *client, unsigned int type,
   frame[30]=size>>8; frame[31]=size;
   if(size) memcpy(frame+32,data,size);
   assert(mbedtls_ssl_write(client,frame,32+size)==(int)(32+size));
+}
+
+static void receive_scan(struct bkprov_pair_s *pair, mbedtls_ssl_context *client)
+{
+  uint8_t response[904]; size_t size = 0;
+  for (int i = 0; i < 200 && size < 76; i++)
+    {
+      assert(bkprov_pair_step(pair) == 0);
+      int ret = mbedtls_ssl_read(client, response + size, sizeof(response) - size);
+      assert(ret > 0 || ret == MBEDTLS_ERR_SSL_WANT_READ);
+      if (ret > 0) size += ret;
+      now += 10;
+    }
+  assert(size == 76 && !memcmp(response, "SPV1", 4) && response[4] == 129);
+  assert(response[11] == 1 && response[28] == 0 && response[29] == 0 &&
+         response[30] == 0 && response[31] == 44);
+  assert(response[32] == 0 && response[33] == 0 && response[34] == 0 && response[35] == 0);
+  assert(response[36] == 1 && response[37] == 1 && response[40] == 4 &&
+         (int8_t)response[41] == -44 && response[42] == 6 && response[43] == 8 &&
+         !memcmp(response + 44, "test", 4));
 }
 
 static unsigned control_calls;
@@ -383,6 +423,58 @@ int main(int argc, char **argv)
   assert(bkprov_pair_confirm(&pair,generation)==0);
   receive_status(&pair,&client,BKPROV_READY);
   const uint8_t total[4]={0,0,0,6}, chunk[10]={0,0,0,0,1,2,3,4,5,6};
+  /* Authenticated, unclaimed READY can start one read-only scan. Empty SSIDs
+   * are suppressed, and result truncation records the source/sanitizer loss. */
+  memset(&scan_snapshot, 0, sizeof(scan_snapshot));
+  scan_snapshot.found = 26; scan_snapshot.returned = 2;
+  scan_snapshot.aps[0].rssi = -44; scan_snapshot.aps[0].channel = 6;
+  scan_snapshot.aps[0].security = 8; memcpy(scan_snapshot.aps[0].ssid, "test", 4);
+  scan_ready = true;
+  request(&client,6,1,NULL,0); receive_scan(&pair,&client);
+  request(&client,2,1,total,4);
+  for (int i = 0; i < 200; i++)
+    { ret = bkprov_pair_step(&pair); now += 10; if (ret < 0) break; }
+  assert(ret == -EPROTO && !pair.tls.initialized);
+  bkprov_pair_close(&pair);
+  struct bkprov_scan_result_s direct_scan;
+  memset(&scan_snapshot, 0, sizeof(scan_snapshot));
+  scan_snapshot.returned = 1;
+  memcpy(scan_snapshot.aps[0].ssid, "owned", 5);
+  scan_ready = true;
+  assert(bkprov_scan_start() == 0); bkprov_scan_drain();
+  assert(bkprov_scan_busy());
+  assert(bkprov_scan_poll(&direct_scan) == 0);
+  assert(direct_scan.status == 0 && direct_scan.count == 1);
+  assert(!bkprov_scan_busy());
+  assert(bkprov_scan_start() == 0); bkprov_scan_drain();
+  assert(bkprov_scan_busy());
+  assert(bkprov_scan_poll(&direct_scan) == -EAGAIN);
+  bkprov_scan_close(); assert(bkprov_scan_busy()); scan_ready = true; bkprov_scan_drain();
+  assert(!bkprov_scan_busy());
+  memset(&scan_snapshot, 0, sizeof(scan_snapshot));
+  scan_snapshot.status = -EIO; scan_snapshot.returned = 1;
+  memcpy(scan_snapshot.aps[0].ssid, "bad", 3);
+  scan_ready = true;
+  assert(bkprov_scan_start() == 0 && bkprov_scan_poll(&direct_scan) == 0);
+  assert(direct_scan.status == -EIO && direct_scan.count == 0 && !direct_scan.truncated);
+  generation++;
+  inbound.size = outbound.size = 0;
+  assert(mbedtls_ssl_session_reset(&client) == 0);
+  assert(bkprov_pair_start(&pair,generation,&cert,&key,proof,true,false,
+                           clock_ms,NULL,&pair_ops,NULL)==0);
+  client_ready = false;
+  for (int i = 0; i < 2500 && (!client_ready || !server.established); i++)
+    {
+      assert(bkprov_tls_step(&server) >= 0);
+      if (!client_ready) { ret = mbedtls_ssl_handshake(&client);
+        assert(ret == 0 || ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE);
+        client_ready = ret == 0; }
+      now += 10;
+    }
+  assert(client_ready && server.established);
+  request(&client,1,0,proof,32); receive_status(&pair,&client,BKPROV_LOCAL);
+  assert(bkprov_pair_confirm(&pair,generation)==0);
+  receive_status(&pair,&client,BKPROV_READY);
   request(&client,2,1,total,4); receive_status(&pair,&client,BKPROV_RECEIVING);
   request(&client,3,2,chunk,10); receive_status(&pair,&client,BKPROV_RECEIVING);
   request(&client,4,3,NULL,0); receive_status(&pair,&client,BKPROV_CHECKING);
@@ -422,7 +514,7 @@ int main(int argc, char **argv)
       receive_status(&pair,&client,BKPROV_READY);
       if (attempt == 0)
         {
-          request(&client,2,1,total,4);
+          request(&client,6,1,NULL,0);
           int failed = 0;
           for (int i = 0; i < 200 && !failed; i++)
             { failed = bkprov_pair_step(&pair); now += 10; }

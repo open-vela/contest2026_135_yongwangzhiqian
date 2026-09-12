@@ -124,7 +124,11 @@ int bkvoice_ptt_session_open(struct bkvoice_ptt_s *p,uint32_t id,
  const struct bkvoice_capture_sink_ops_s *s,void *c)
 {p->capture_ready=true;p->turn.last_session_id=id;p->turn.state=BKVOICE_TURN_IDLE;sink=s;sink_context=c;return 0;}
 int bkvoice_ptt_session_close(struct bkvoice_ptt_s *p,int why)
-{(void)why;p->capture_ready=false;p->worker_joinable=false;p->turn.state=BKVOICE_TURN_IDLE;return 0;}
+{
+ (void)why;
+ if(!p->capture_ready)return -EALREADY;
+ p->capture_ready=false;p->worker_joinable=false;p->turn.state=BKVOICE_TURN_IDLE;return 0;
+}
 int bkvoice_ptt_cancel(struct bkvoice_ptt_s *p,int why)
 {
  if (auto_cancel_leave_worker && p->worker_joinable) return -EAGAIN;
@@ -247,7 +251,15 @@ int main(void)
  assert(bkcloud_runtime_connect(r)==0);
  int ready=0;for(int i=0;i<1000 && !ready;i++){ready=bkcloud_runtime_ready(r);pause_ms();}
  assert(ready==-EAGAIN && !ptt.capture_ready && asr_calls==0);
+ /* Probe failure has no capture session to close, but clear still releases
+  * its cloud/configuration state once the probe worker has been reaped.
+  */
+ ptt.worker_joinable=true;
+ assert(bkcloud_runtime_clear(&r)==-EAGAIN && r!=NULL);
+ ptt.worker_joinable=false;
+ assert(bkcloud_runtime_clear(&r)==0 && r==NULL);
  dns_fail=false;
+ assert(bkcloud_runtime_create(&r,record,n,&trust,&ptt,NULL)==0);
  assert(bkcloud_runtime_connect(r)==0);
  ready=0;for(int i=0;i<1000 && !ready;i++){ready=bkcloud_runtime_ready(r);pause_ms();}
  assert(ready==1 && ptt.capture_ready);

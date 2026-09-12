@@ -35,7 +35,7 @@ class AndroidProvisionGatt(
         fun tlsEstablished()
         fun plaintext(bytes: ByteArray)
         fun closed(reason: String)
-        fun tick() { }
+        fun tick()
     }
 
     private class Event(val data: ByteArray?, val run: (ByteArray?) -> Unit) {
@@ -129,10 +129,10 @@ class AndroidProvisionGatt(
         }
 
         override fun onCharacteristicWrite(candidate: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
-            val pending = inFlight.get() ?: return
+            val pending = inFlight.get()
             post {
                 if (!current(candidate) || characteristic !== tx || stage != Stage.TLS) return@post
-                if (inFlight.get() !== pending) return@post
+                if (pending == null || inFlight.get() !== pending) return@post
                 session.writeCompleted(pending.generation, pending.token, status == BluetoothGatt.GATT_SUCCESS)
                 inFlight.compareAndSet(pending, null)
             }
@@ -164,12 +164,12 @@ class AndroidProvisionGatt(
         val characteristic = requireNotNull(rx)
         val descriptor = requireNotNull(characteristic.getDescriptor(CCC))
         if (!candidate.setCharacteristicNotification(characteristic, true)) {
-            stop("subscription_failed"); return
+            stop("notification_registration_failed"); return
         }
         val value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
         val accepted = if (Build.VERSION.SDK_INT >= 33) candidate.writeDescriptor(descriptor, value) == 0
         else { descriptor.value = value; candidate.writeDescriptor(descriptor) }
-        if (!accepted) stop("subscription_failed")
+        if (!accepted) stop("descriptor_write_start_failed")
     }
 
     @Suppress("DEPRECATION")

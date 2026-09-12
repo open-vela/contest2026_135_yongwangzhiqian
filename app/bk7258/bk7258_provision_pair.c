@@ -24,6 +24,7 @@ static const struct bkprov_claim_ops_s recovery_ops =
 void bkprov_pair_close(struct bkprov_pair_s *pair)
 {
   if (pair == NULL) return;
+  bkprov_scan_close();
   bkprov_claim_close(&pair->claim);
   bkprov_tls_close(&pair->tls);
   mbedtls_platform_zeroize(pair, sizeof(*pair));
@@ -80,6 +81,21 @@ static int packet(struct bkprov_pair_s *pair)
     {
       if (memcmp(pair->transaction,p+12,16) || pair->claim.state < BKPROV_READY ||
           pair->claim.state >= BKPROV_CHECKING) return -EPROTO;
+      if (pair->scan_pending || pair->scan_report || pair->scan_session)
+        return -EPROTO;
+      if (p[4] == 6)
+        {
+          if (pair->recovery || sequence != 1 || size != 0 ||
+              pair->claim.state != BKPROV_READY) return -EPROTO;
+          ret = bkprov_scan_start();
+          pair->scan.status = ret;
+          pair->scan_pending = ret == 0;
+          pair->scan_report = ret != 0;
+          pair->scan_session = true;
+          pair->request_sequence = sequence;
+          pair->report = ret != 0;
+          return 0;
+        }
       if (pair->recovery || (p[4] == 5 && pair->receipt != NULL))
         {
           if (p[4] != 5 || sequence != 1 || size != 0 ||
@@ -114,17 +130,43 @@ static int packet(struct bkprov_pair_s *pair)
 
 static int report(struct bkprov_pair_s *pair)
 {
-  uint8_t response[40] = {'S','P','V','1',128};
+  uint8_t *response = pair->output;
+  size_t size = 40;
   int ret;
+  memset(response, 0, 904);
+  memcpy(response, "SPV1", 4);
+  response[4] = pair->scan_report ? 129 : 128;
   put32(response+8,pair->request_sequence);
   memcpy(response+12,pair->transaction,16);
-  put32(response+28,8);
-  put32(response+32,pair->claim.state);
-  put32(response+36,(uint32_t)pair->claim.error);
-  ret = bkprov_tls_queue(&pair->tls,response,sizeof(response));
+  if (pair->scan_report)
+    {
+      put32(response + 28, 8 + pair->scan.count * 36u);
+      put32(response + 32, (uint32_t)pair->scan.status);
+      response[36] = pair->scan.count;
+      response[37] = pair->scan.truncated;
+      for (uint8_t i = 0; i < pair->scan.count; i++)
+        {
+          uint8_t *record = response + 40 + i * 36u;
+          const struct bkprov_scan_ap_s *ap = &pair->scan.aps[i];
+          record[0] = ap->ssid_len;
+          record[1] = (uint8_t)ap->rssi;
+          record[2] = ap->channel;
+          record[3] = ap->security;
+          memcpy(record + 4, ap->ssid, ap->ssid_len);
+        }
+      size = 40 + pair->scan.count * 36u;
+    }
+  else
+    {
+      put32(response+28,8);
+      put32(response+32,pair->claim.state);
+      put32(response+36,(uint32_t)pair->claim.error);
+    }
+  ret = bkprov_tls_queue(&pair->tls,response,size);
   if (ret == 0)
     {
       pair->report = false;
+      pair->scan_report = false;
       pair->reported_state = pair->claim.state;
     }
   return ret;
@@ -160,6 +202,17 @@ int bkprov_pair_step(struct bkprov_pair_s *pair)
                               ret == 0 ? BKPROV_NOT_COMMITTED : BKPROV_UNCERTAIN;
           pair->claim.error = ret == 0 || ret == 1 ? 0 :
                               ret < 0 ? ret : -EIO;
+          pair->report = true;
+        }
+    }
+  if (pair->scan_pending)
+    {
+      ret = bkprov_scan_poll(&pair->scan);
+      if (ret != -EAGAIN)
+        {
+          pair->scan.status = ret < 0 ? ret : pair->scan.status;
+          pair->scan_pending = false;
+          pair->scan_report = true;
           pair->report = true;
         }
     }

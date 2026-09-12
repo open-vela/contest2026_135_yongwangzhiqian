@@ -22,6 +22,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.ParcelUuid
 import android.text.InputType
+import android.util.Log
 import android.view.WindowManager
 import android.view.View
 import android.view.ViewGroup
@@ -59,6 +60,9 @@ class ProvisionActivity : Activity() {
     private lateinit var nextButton: Button
     private lateinit var activationButton: Button
     private lateinit var scanButton: Button
+    private lateinit var wifiScanButton: Button
+    private lateinit var wifiCancelButton: Button
+    private lateinit var wifiNetworks: LinearLayout
     private lateinit var nfcButton: Button
     private lateinit var nfcStatus: TextView
     private var nfcRequested = false
@@ -80,6 +84,8 @@ class ProvisionActivity : Activity() {
     private var ca: ByteArray? = null
     private var selected: BluetoothDevice? = null
     private var connection: ProvisioningConnection? = null
+    private var wifiScan: WifiScanConnection? = null
+    private var wifiScanGeneration = 0L
     private var recoveryControl: AutoCloseable? = null
     private var scanning = false
     private var outcomeUnknown = false
@@ -164,6 +170,11 @@ class ProvisionActivity : Activity() {
         text("输入傻妞要使用的 Wi-Fi 名称和密码。", 15, networkPage)
         ssid = field("Wi-Fi 名称", target = networkPage)
         password = field("Wi-Fi 密码", secret = true, target = networkPage)
+        wifiScanButton = button("扫描设备附近的 Wi-Fi", networkPage) { scanWifi() }
+        wifiCancelButton = button("取消 Wi-Fi 扫描", networkPage) { cancelWifiScan() }.apply {
+            visibility = View.GONE
+        }
+        wifiNetworks = section(networkPage)
         text("语音服务", 20, networkPage)
         val servicePreset = android.widget.Spinner(this).apply {
             adapter = android.widget.ArrayAdapter(this@ProvisionActivity,
@@ -263,6 +274,7 @@ class ProvisionActivity : Activity() {
     }
 
     private fun showPage(value: Int) {
+        if (value != 1) cancelWifiScan()
         page = value
         if (value != 0) stopNfc()
         discoveryPage.visibility = if (value == 0) View.VISIBLE else View.GONE
@@ -289,13 +301,16 @@ class ProvisionActivity : Activity() {
     }
     private fun goBack() {
         if (connection != null) { connection?.close(); return }
+        if (wifiScan != null) {
+            cancelWifiScan()
+            return
+        }
         if (recoveryControl != null) {
             cancelRecoveryToDiscovery()
             return
         }
         if (page > 0) {
             cloudLookupGeneration++; cloudResolving = false
-            password.text.clear(); cloudKey.text.clear()
             showPage(0); status.text = "请选择设备继续。"
         }
         else finish()
@@ -416,11 +431,40 @@ class ProvisionActivity : Activity() {
         if (::scanButton.isInitialized) { scanButton.isEnabled = true; scanButton.alpha = 1f }
         if (::stopButton.isInitialized) stopButton.visibility = View.GONE
     }
+
+    private fun localConnectInputError(recover: Boolean): String? {
+        if (recover) return null
+        if (ssid.text.isBlank()) return "请填写 Wi-Fi 名称后再保存。"
+        val passwordLength = password.length()
+        if (passwordLength != 0 && passwordLength !in 8..64)
+            return "Wi-Fi 密码可留空用于开放网络；否则应为 8 至 64 个字符。"
+        if (!developerMode) {
+            if (cloudUrl.text.toString().trim().isEmpty())
+                return "请填写语音服务 HTTPS 地址后再保存。"
+            if (cloudKey.length() == 0)
+                return "请填写语音服务 Key 后再保存；当前事务会同时保存 Wi-Fi 和语音服务。"
+            if (asrModel.text.isBlank() || chatModel.text.isBlank() || ttsModel.text.isBlank())
+                return "请填写语音识别、对话和语音合成模型后再保存。"
+        } else {
+            if (host.text.isBlank()) return "请填写 Gateway 主机名后再保存。"
+            if (ca == null) return "请先导入 Gateway CA 后再保存。"
+        }
+        return null
+    }
+
     private fun connect(recover: Boolean = false, endpoint: CloudEndpoint.Verified? = null,
                         controlFirst: Boolean = true) {
         if (!foreground || connection != null) return
+        if (wifiScan != null) {
+            status.text = "请先取消 Wi-Fi 扫描，再保存连接设置。"
+            return
+        }
         if (outcomeUnknown && !recover) {
             status.text = "上次提交结果未确认，需要先核对设备回执。"
+            return
+        }
+        localConnectInputError(recover)?.let {
+            status.text = it
             return
         }
         if (!developerMode && !recover && endpoint == null) {
@@ -444,6 +488,7 @@ class ProvisionActivity : Activity() {
             return
         }
         var bundle: ByteArray? = null
+        var handedOff = false
         val secret = CharArray(password.length()) { password.text[it] }
         val apiKey = CharArray(cloudKey.length()) { cloudKey.text[it] }
         try {
@@ -458,6 +503,7 @@ class ProvisionActivity : Activity() {
                 require(pending)
                 if (controlFirst) {
                     startControlRecovery(target, identity)
+                    handedOff = true
                     return
                 }
                 bundle = byteArrayOf(0) // No configuration is sent in recovery.
@@ -514,11 +560,16 @@ class ProvisionActivity : Activity() {
                     }
                 }
             }, recover = recover)
+            handedOff = true
         } catch (_: Exception) {
             if (page == 2) showPage(1)
-            status.text = if (developerMode) "请检查认领凭据、所选设备、Wi-Fi 和 Gateway 配置。" else "暂时无法连接，请检查 Wi-Fi 信息后重试。"
+            status.text = if (developerMode) "Gateway 或 Wi-Fi 配置无效；请检查后再保存。"
+                else "Wi-Fi 或语音服务配置无效；请检查后再保存。"
         }
-        finally { secret.fill('\u0000'); apiKey.fill('\u0000'); password.text.clear(); cloudKey.text.clear(); bundle?.fill(0) }
+        finally {
+            secret.fill('\u0000'); apiKey.fill('\u0000'); bundle?.fill(0)
+            if (handedOff) { password.text.clear(); cloudKey.text.clear() }
+        }
     }
 
     private fun startControlRecovery(target: BluetoothDevice, identity: ProvisionBootstrap) {
@@ -580,6 +631,108 @@ class ProvisionActivity : Activity() {
         bindingStateAvailable = false
         status.text = "本机保存状态未确认，已暂停认领。请关闭并重新启动 App 后核对结果，保留现有认领资料。"
         null
+    }
+
+    private fun scanWifi() {
+        if (!foreground || page != 1 || connection != null || wifiScan != null) return
+        val target = selected
+        val identity = bootstrap
+        if (target == null || identity == null) {
+            status.text = "请先导入激活资料并选择设备。"
+            return
+        }
+        val generation = ++wifiScanGeneration
+        wifiNetworks.removeAllViews()
+        wifiScanButton.isEnabled = false
+        wifiCancelButton.visibility = View.VISIBLE
+        status.text = "正在让傻妞扫描附近 Wi-Fi，最多约 15 秒。"
+        try {
+            wifiScan = WifiScanConnection(this, target, identity, { result ->
+                handler.post {
+                    if (!alive || generation != wifiScanGeneration || page != 1) return@post
+                    val active = wifiScan
+                    wifiScan = null
+                    active?.close()
+                    wifiScanButton.isEnabled = true
+                    wifiCancelButton.visibility = View.GONE
+                    if (result.status != 0) {
+                        Log.w(WIFI_SCAN_LOG_TAG, "wifi_scan_result status=${result.status}")
+                        status.text = "Wi-Fi 扫描未完成（设备状态 ${result.status}）；可以手动输入网络名称。"
+                        return@post
+                    }
+                    Log.i(WIFI_SCAN_LOG_TAG, "wifi_scan_result status=0 count=${result.networks.size} truncated=${result.truncated}")
+                    result.networks.forEach { network ->
+                        wifiNetworks.addView(Button(this@ProvisionActivity).apply {
+                            text = "${network.ssid} · ${wifiSignal(network.rssi)} · ${wifiSecurity(network.security)}"
+                            contentDescription = "选择 Wi-Fi ${network.ssid}"
+                            setOnClickListener {
+                                ssid.setText(network.ssid)
+                                status.text = "已选择 ${network.ssid}，请输入密码后保存。"
+                            }
+                        })
+                    }
+                    status.text = when {
+                        result.networks.isEmpty() -> "没有可选择的 Wi-Fi；可以手动输入网络名称。"
+                        result.truncated -> "已显示部分 Wi-Fi；也可以手动输入隐藏网络名称。"
+                        else -> "请选择 Wi-Fi，或手动输入隐藏网络名称。"
+                    }
+                }
+            }, { reason -> handler.post {
+                if (!alive || generation != wifiScanGeneration || page != 1) return@post
+                if (wifiScan != null) {
+                    wifiScan = null
+                    wifiScanButton.isEnabled = true
+                    wifiCancelButton.visibility = View.GONE
+                    Log.w(WIFI_SCAN_LOG_TAG, "wifi_scan_transport_closed reason=$reason")
+                    status.text = wifiScanClosedMessage(reason)
+                }
+            } })
+        } catch (_: Exception) {
+            wifiScan = null
+            wifiScanButton.isEnabled = true
+            wifiCancelButton.visibility = View.GONE
+            status.text = "无法开始 Wi-Fi 扫描；可以手动输入网络名称。"
+        }
+    }
+
+    private fun cancelWifiScan() {
+        wifiScanGeneration++
+        wifiScan?.close()
+        wifiScan = null
+        if (::wifiScanButton.isInitialized) wifiScanButton.isEnabled = true
+        if (::wifiCancelButton.isInitialized) wifiCancelButton.visibility = View.GONE
+    }
+
+    private fun wifiScanClosedMessage(reason: String) = when (reason) {
+        "bluetooth_permission_denied" -> "蓝牙权限不足，请允许附近设备权限后重新扫描。"
+        "disconnected" -> "设备连接已断开，请确认设备通电并靠近手机后重新扫描。"
+        "handshake_timeout" -> "设备安全连接超时，请保持设备靠近手机后重新扫描。"
+        "session_timeout", "write_timeout" -> "Wi-Fi 扫描响应超时，请保持设备靠近手机后重新扫描。"
+        "transport_error" -> "设备安全连接或身份认证失败，请确认激活资料与目标设备匹配后重新扫描。"
+        "service_discovery_failed", "provision_service_missing" ->
+            "未找到设备 Wi-Fi 扫描服务，请确认设备已完成启动后重新扫描。"
+        "notification_registration_failed" -> "设备未能开启 Wi-Fi 扫描通知，请重新连接设备后再试。"
+        "descriptor_write_start_failed" -> "设备未能开始订阅 Wi-Fi 扫描通知，请重新连接设备后再试。"
+        "subscription_failed" -> "设备未确认 Wi-Fi 扫描通知订阅，请重新连接设备后再试。"
+        else -> "Wi-Fi 扫描连接异常，请检查蓝牙和设备状态后重新扫描。"
+    }
+
+    private fun wifiSignal(rssi: Int) = when {
+        rssi >= -55 -> "信号强"
+        rssi >= -70 -> "信号中"
+        else -> "信号弱"
+    }
+
+    private fun wifiSecurity(value: Int) = when (value) {
+        0 -> "开放网络"
+        1 -> "WEP"
+        in 2..4 -> "WPA"
+        in 5..7 -> "WPA2"
+        8 -> "WPA3 SAE"
+        9 -> "WPA2/WPA3"
+        10 -> "EAP"
+        11 -> "OWE"
+        else -> "安全类型未知"
     }
     private fun beginNfc() {
         if (!foreground || page != 0 || connection != null) return
@@ -671,11 +824,10 @@ class ProvisionActivity : Activity() {
     override fun onStop() {
         foreground = false
         cloudLookupGeneration++; cloudResolving = false
-        cloudKey.text.clear()
+        cancelWifiScan()
         val wasScanning = scanning
         stopDiscovery()
         if (wasScanning) status.text = "扫描已暂停，返回后可重新扫描。"
-        password.text.clear()
         // Closing drives the protocol's UNCONFIRMED state after APPLY; its
         // durable receipt locator survives. Never treat backgrounding as a
         // failed commit or silently continue an owner confirmation offscreen.
@@ -689,13 +841,14 @@ class ProvisionActivity : Activity() {
     }
     override fun onDestroy() {
         alive = false; epoch++; stopNfc(); stopDiscovery(); connection?.close(); recoveryControl?.close()
-        bootstrap?.close(); ca?.fill(0); password.text.clear()
+        bootstrap?.close(); ca?.fill(0); password.text.clear(); cloudKey.text.clear()
         handler.removeCallbacksAndMessages(null)
         super.onDestroy()
     }
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
     companion object {
         const val EXTRA_PROVISIONED_DEVICE_ID = "com.shaniu.companion.provisioned_device_id"
+        private const val WIFI_SCAN_LOG_TAG = "ShaniuWifiScan"
         private const val ACTIVATION = 104
         private const val NFC_PERMISSIONS = 105
         private const val BOOTSTRAP = 101; private const val CERTIFICATE = 102; private const val PERMISSIONS = 103
