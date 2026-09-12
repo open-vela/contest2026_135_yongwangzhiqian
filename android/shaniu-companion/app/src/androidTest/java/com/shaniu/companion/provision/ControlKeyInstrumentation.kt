@@ -18,12 +18,18 @@ class ControlKeyInstrumentation : Instrumentation() {
     private var cloudProbe = false
     private var uiProbe = false
     private var provisionInputProbe = false
+    private var emulatorFlowProbe = false
+    private var emulatorFlowCase: String? = null
+    private var emulatorProcessFixture: String? = null
     private var otaSourcePackage: String? = null
     override fun onCreate(arguments: Bundle?) {
         super.onCreate(arguments)
         cloudProbe = arguments?.getString("cloud_probe") == "1"
         uiProbe = arguments?.getString("ui_probe") == "1"
         provisionInputProbe = arguments?.getString("provision_input_probe") == "1"
+        emulatorFlowProbe = arguments?.getString("emulator_flow_probe") == "1"
+        emulatorFlowCase = arguments?.getString("emulator_flow_case")
+        emulatorProcessFixture = arguments?.getString("emulator_process_fixture")
         otaSourcePackage = arguments?.getString("ota_source_package")
         start()
     }
@@ -35,6 +41,31 @@ class ControlKeyInstrumentation : Instrumentation() {
             } catch (error: Throwable) {
                 "FAIL: " + generateSequence(error) { it.cause }.take(5)
                     .joinToString(" <- ") { "${it.javaClass.simpleName} at ${it.stackTrace.firstOrNull()}: ${it.message}" }
+            }
+            finish(if (report.startsWith("PASS:")) Activity.RESULT_OK else Activity.RESULT_CANCELED,
+                Bundle().apply { putString("stream", report) })
+            return
+        }
+        if (emulatorFlowProbe) {
+            val report = try {
+                val evidence = DeviceUiAcceptance.runProvisionEmulatorFlowProbe(this, emulatorFlowCase)
+                "PASS: emulator fixture exercised synthetic identities/responses for local rejection, DNS failure, protocol authentication and VERIFY failures, timeout close, cancel and late callback; no physical-device acceptance; $evidence"
+            } catch (error: Throwable) {
+                "FAIL: " + generateSequence(error) { it.cause }.take(5)
+                    .joinToString(" <- ") { "${it.javaClass.simpleName}: ${it.message}" }
+            }
+            finish(if (report.startsWith("PASS:")) Activity.RESULT_OK else Activity.RESULT_CANCELED,
+                Bundle().apply { putString("stream", report) })
+            return
+        }
+        emulatorProcessFixture?.let { stage ->
+            val report = try {
+                require(stage == "create" || stage == "resume") { "emulator_process_fixture must be create or resume" }
+                val evidence = DeviceUiAcceptance.runProvisionProcessRestartFixture(this, stage == "resume")
+                "PASS: $evidence; test-only preferences and Android Keystore alias only"
+            } catch (error: Throwable) {
+                "FAIL: " + generateSequence(error) { it.cause }.take(5)
+                    .joinToString(" <- ") { "${it.javaClass.simpleName}: ${it.message}" }
             }
             finish(if (report.startsWith("PASS:")) Activity.RESULT_OK else Activity.RESULT_CANCELED,
                 Bundle().apply { putString("stream", report) })

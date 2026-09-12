@@ -12,6 +12,8 @@ internal class DeviceControlProtocol(
     private val result: (Command, Snapshot) -> Unit,
     private val nowMs: () -> Long = { System.nanoTime() / 1_000_000 },
 ) : AutoCloseable {
+    class ControlTimeout : IllegalStateException()
+
     enum class Command(val wire: Int) {
         AUTH(1), STATUS(2), CANCEL(3), VOLUME(4), PERSONA(5), CLEAR_HISTORY(6),
         MEMORY_SET(7), MEMORY_DELETE(8), INFO(9), OTA_BEGIN(10), OTA_APPEND(11),
@@ -94,7 +96,7 @@ internal class DeviceControlProtocol(
         if (closed) return
         val now = nowMs()
         if (now < lastNow || (pending != null && now >= deadline)) {
-            close(); throw IllegalStateException("Control response timed out")
+            close(); throw ControlTimeout()
         }
         lastNow = now
     }
@@ -161,6 +163,8 @@ internal class DeviceControlProtocol(
                     complete(command, snapshot)
                 }
             }
+        } catch (error: ControlTimeout) {
+            throw error
         } catch (_: Exception) {
             close(); throw IllegalStateException("Invalid control response")
         }

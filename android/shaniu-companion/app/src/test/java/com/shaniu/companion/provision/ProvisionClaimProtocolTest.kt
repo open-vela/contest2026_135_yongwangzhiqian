@@ -148,6 +148,57 @@ class ProvisionClaimProtocolTest {
         }
     }
 
+    @Test fun validatedRemoteAuthenticationFailureRetainsOnlyStageAndCode() {
+        val sent = mutableListOf<ByteArray>()
+        bootstrap().use { qr ->
+            val protocol = ProvisionClaimProtocol(qr, byteArrayOf(42), { sent += it.copyOf() }, {})
+            protocol.start()
+            protocol.receive(response(sent.last(), 7, -9))
+
+            assertEquals(ProvisionClaimProtocol.State.FAILED, protocol.state)
+            assertEquals(ProvisionClaimProtocol.State.AUTHENTICATING, protocol.failureStage)
+            assertEquals(-9, protocol.failureCode)
+            protocol.close()
+        }
+    }
+
+    @Test fun verifiedApplyFailureDoesNotClaimCommitAndRetainsVerificationCode() {
+        val sent = mutableListOf<ByteArray>()
+        bootstrap().use { qr ->
+            val protocol = ProvisionClaimProtocol(qr, byteArrayOf(42), { sent += it.copyOf() }, {})
+            protocol.start()
+            protocol.receive(response(sent.last(), 3))
+            protocol.receive(response(sent.last(), 4))
+            protocol.receive(response(sent.last(), 4))
+            assertEquals(ProvisionClaimProtocol.State.VERIFYING, protocol.state)
+
+            protocol.receive(response(sent.last(), 7, -12))
+            assertEquals(ProvisionClaimProtocol.State.FAILED, protocol.state)
+            assertEquals(ProvisionClaimProtocol.State.VERIFYING, protocol.failureStage)
+            assertEquals(-12, protocol.failureCode)
+            protocol.close()
+        }
+    }
+
+    @Test fun malformedApplyResponseLeavesOutcomeUnconfirmedWithoutFailureCode() {
+        val sent = mutableListOf<ByteArray>()
+        bootstrap().use { qr ->
+            val protocol = ProvisionClaimProtocol(qr, byteArrayOf(42), { sent += it.copyOf() }, {})
+            protocol.start()
+            protocol.receive(response(sent.last(), 3))
+            protocol.receive(response(sent.last(), 4))
+            protocol.receive(response(sent.last(), 4))
+
+            assertThrows(IllegalStateException::class.java) {
+                protocol.receive(response(sent.last(), 7, 0))
+            }
+            assertEquals(ProvisionClaimProtocol.State.UNCONFIRMED, protocol.state)
+            assertEquals(ProvisionClaimProtocol.State.VERIFYING, protocol.failureStage)
+            assertNull(protocol.failureCode)
+            protocol.close()
+        }
+    }
+
     @Test fun failedReceiptPersistencePreventsApply() {
         val sent = mutableListOf<ByteArray>()
         bootstrap().use { qr ->

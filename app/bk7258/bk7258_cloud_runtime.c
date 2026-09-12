@@ -178,6 +178,11 @@ static bool cancelled(struct bkcloud_runtime_s *r)
 {
   return __atomic_load_n(&r->cancelled,__ATOMIC_ACQUIRE);
 }
+static void bkcloud_probe_failure(bool probe, const char *stage, int ret)
+{
+  if (probe && ret < 0)
+    syslog(LOG_WARNING, "BKVOICE CLOUD probe stage=%s ret=%d\n", stage, ret);
+}
 #ifdef CONFIG_BK7258_VISION_SERVICE
 static bool camera_consent(const char *input)
 {
@@ -256,13 +261,16 @@ static void *work(void *context)
   size_t jpeg_size=0;
 #endif
   int ret=-ENOMEM;
+  const char *stage="client_alloc";
   if(!client) goto out;
   uint64_t deadline=bkvoice_config_now_ms(NULL)+90000;
-  if(cancelled(r)) {ret=-ECANCELED;goto out;}
+  if(cancelled(r)) {stage="cancel";ret=-ECANCELED;goto out;}
+  stage="resolve";
   ret=resolve_endpoint(r);
   if(ret) goto out;
   if(r->probe)
     {
+      stage="chat";
       ret=bkcloud_chat(client,&r->config,bkvoice_tls_ops(),&r->tls,deadline,
                        "Reply with OK.",&r->history,"Connection check.",
                        r->reply,sizeof(r->reply));
@@ -330,6 +338,7 @@ out:
 #ifdef CONFIG_BK7258_VISION_SERVICE
   if(jpeg) {mbedtls_platform_zeroize(jpeg,BKCLOUD_JPEG_MAX);free(jpeg);}
 #endif
+  bkcloud_probe_failure(r->probe, stage, ret);
   if(client) {mbedtls_platform_zeroize(client,sizeof(*client));free(client);}
   if(decoder) {bkcloud_tts_clear(decoder);free(decoder);}
   if(play) {mbedtls_platform_zeroize(play,sizeof(*play));free(play);}
@@ -346,17 +355,18 @@ static int launch(struct bkcloud_runtime_s *r,bool probe)
     .trusted_time=bkvoice_config_trusted_time,.now_ms=bkvoice_config_now_ms,
     .clock_context=r->trust,.server_auth_only=true};
   int ret=bkvoice_tls_initialize(&r->tls,&config);
-  if(ret) return ret;
+  if(ret) {bkcloud_probe_failure(probe,"tls_initialize",ret);return ret;}
   pthread_attr_t attr;
   ret=pthread_attr_init(&attr);
-  if(ret) {bkvoice_tls_uninitialize(&r->tls);return -ret;}
+  if(ret) {bkcloud_probe_failure(probe,"pthread_attr_init",-ret);bkvoice_tls_uninitialize(&r->tls);return -ret;}
+  const char *stage="pthread_stack";
   ret=pthread_attr_setstacksize(&attr,16384);
   r->memory_job=false;
   r->probe=probe;__atomic_store_n(&r->cancelled,false,__ATOMIC_RELEASE);r->result=0;
   __atomic_store_n(&r->done,false,__ATOMIC_RELEASE);
-  if(!ret) ret=pthread_create(&r->worker,&attr,work,r);
+  if(!ret) {stage="pthread_create";ret=pthread_create(&r->worker,&attr,work,r);}
   pthread_attr_destroy(&attr);
-  if(ret) {bkvoice_tls_uninitialize(&r->tls);return -ret;}
+  if(ret) {bkcloud_probe_failure(probe,stage,-ret);bkvoice_tls_uninitialize(&r->tls);return -ret;}
   r->joinable=true;return 0;
 }
 #ifdef BKCLOUD_MEMORY_RUNTIME
@@ -436,7 +446,7 @@ int bkcloud_runtime_create(struct bkcloud_runtime_s **output,
 {
   if(!output || *output || !trust || !trust->initialized || !ptt) return -EINVAL;
   struct bkcloud_runtime_s *r=calloc(1,sizeof(*r));
-  if(!r) return -ENOMEM;
+  if(!r) {syslog(LOG_WARNING,"BKVOICE CLOUD create stage=alloc ret=%d\n",-ENOMEM);return -ENOMEM;}
   int ret=bkcloud_config_decode(&r->config,record,size);
   if(!ret && (strcmp(r->config.host,trust->host) || r->config.port!=trust->port)) ret=-EINVAL;
   if(ret) {mbedtls_platform_zeroize(r,sizeof(*r));free(r);return ret;}

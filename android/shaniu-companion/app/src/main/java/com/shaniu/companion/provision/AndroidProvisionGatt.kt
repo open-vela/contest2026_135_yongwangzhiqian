@@ -11,6 +11,7 @@ import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothProfile
 import android.content.Context
 import android.os.Build
+import android.util.Log
 import java.io.IOException
 import java.util.UUID
 import java.util.concurrent.ArrayBlockingQueue
@@ -55,6 +56,7 @@ class AndroidProvisionGatt(
     private var rx: BluetoothGattCharacteristic? = null
     private var stage = Stage.CONNECTING
     private var reportedReady = false
+    private val transportStartedAtMs = System.nanoTime() / 1_000_000
     private val session = ProvisionGattSession(tls, ::deliverPlaintext)
 
     private fun deliverPlaintext(bytes: ByteArray) {
@@ -84,7 +86,7 @@ class AndroidProvisionGatt(
             post {
                 if (!current(candidate)) return@post
                 if (status != BluetoothGatt.GATT_SUCCESS || newState == BluetoothProfile.STATE_DISCONNECTED) {
-                    stop("disconnected")
+                    stopGatt("disconnected", status)
                 } else if (newState == BluetoothProfile.STATE_CONNECTED && stage == Stage.CONNECTING) {
                     stage = Stage.DISCOVERING
                     if (!candidate.discoverServices()) stop("service_discovery_failed")
@@ -95,7 +97,7 @@ class AndroidProvisionGatt(
         override fun onServicesDiscovered(candidate: BluetoothGatt, status: Int) {
             post {
                 if (!current(candidate) || stage != Stage.DISCOVERING) return@post
-                if (status != BluetoothGatt.GATT_SUCCESS) { stop("service_discovery_failed"); return@post }
+                if (status != BluetoothGatt.GATT_SUCCESS) { stopGatt("service_discovery_failed", status); return@post }
                 val service = candidate.getService(SERVICE)
                 tx = service?.getCharacteristic(TX)
                 rx = service?.getCharacteristic(RX)
@@ -122,7 +124,7 @@ class AndroidProvisionGatt(
             post {
                 if (!current(candidate) || stage != Stage.SUBSCRIBING ||
                     descriptor.uuid != CCC || descriptor.characteristic !== rx) return@post
-                if (status != BluetoothGatt.GATT_SUCCESS) { stop("subscription_failed"); return@post }
+                if (status != BluetoothGatt.GATT_SUCCESS) { stopGatt("subscription_failed", status); return@post }
                 stage = Stage.TLS
                 session.start()
             }
@@ -133,6 +135,10 @@ class AndroidProvisionGatt(
             post {
                 if (!current(candidate) || characteristic !== tx || stage != Stage.TLS) return@post
                 if (pending == null || inFlight.get() !== pending) return@post
+                if (status != BluetoothGatt.GATT_SUCCESS) {
+                    stopGatt("gatt_write_failed", status)
+                    return@post
+                }
                 session.writeCompleted(pending.generation, pending.token, status == BluetoothGatt.GATT_SUCCESS)
                 inFlight.compareAndSet(pending, null)
             }
@@ -197,14 +203,22 @@ class AndroidProvisionGatt(
     /** Serialize product control requests with TLS receive and timeout events. */
     internal fun execute(action: () -> Unit) = post { action() }
 
-    private fun stop(reason: String) {
+    private fun stop(reason: String, gattStatus: Int? = null) {
         synchronized(eventLock) {
             if (!stopping.get()) {
                 stopReason.set(reason)
                 stopping.set(true)
+                if (reason != "cancelled") {
+                    val status = gattStatus?.let { " gatt_status=$it" } ?: ""
+                    Log.w(LOG_TAG, "transport_close reason=$reason stage=${stage.name.lowercase()} elapsed_ms=${elapsedMs()}$status")
+                }
             }
         }
     }
+
+    private fun stopGatt(reason: String, status: Int) = stop(reason, status)
+
+    private fun elapsedMs(): Long = System.nanoTime() / 1_000_000 - transportStartedAtMs
 
     override fun close() = stop("cancelled")
 
@@ -232,7 +246,8 @@ class AndroidProvisionGatt(
                 }
             }
         } catch (_: SecurityException) { stop("bluetooth_permission_denied") }
-        catch (_: Exception) { stop("bluetooth_transport_failed") }
+        catch (_: DeviceControlProtocol.ControlTimeout) { stop("control_timeout") }
+        catch (_: Exception) { stop(session.failure ?: "bluetooth_transport_failed") }
         finally {
             synchronized(eventLock) {
                 stopping.set(true)
@@ -248,6 +263,7 @@ class AndroidProvisionGatt(
     }, "shaniu-provision-gatt")
 
     companion object {
+        private const val LOG_TAG = "ShaniuProvisionGatt"
         val SERVICE: UUID = UUID.fromString("81e70001-9b31-4c48-9c62-e6da4b392531")
         val TX: UUID = UUID.fromString("81e70002-9b31-4c48-9c62-e6da4b392531")
         val RX: UUID = UUID.fromString("81e70003-9b31-4c48-9c62-e6da4b392531")

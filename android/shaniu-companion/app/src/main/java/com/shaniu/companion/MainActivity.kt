@@ -772,9 +772,20 @@ class MainActivity : Activity() {
                         render()
                     }
                 } },
-                { _ -> mainHandler.post {
+                { reason -> mainHandler.post {
                     if (epoch == directEpoch && !destroyed) {
-                        closeDirect(); directMessage = "连接已断开，请靠近设备后重试。"; render()
+                        closeDirect()
+                        directMessage = when (reason) {
+                            "control_timeout" -> "设备控制响应超时，请重新连接后重试。"
+                            "session_timeout", "handshake_timeout", "write_timeout" ->
+                                "设备连接超时，请重新连接后重试。"
+                            "bluetooth_permission_denied" -> "蓝牙连接权限被拒绝，请允许附近设备权限后重试。"
+                            "service_discovery_failed", "provision_service_missing" ->
+                                "未发现设备控制服务，请重新选择设备后重试。"
+                            "disconnected" -> "连接已断开，请重新连接后重试。"
+                            else -> "设备连接异常，请重新连接后重试。"
+                        }
+                        render()
                     }
                 } }) }
             mainHandler.post {

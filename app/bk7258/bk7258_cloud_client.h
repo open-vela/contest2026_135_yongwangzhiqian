@@ -14,7 +14,6 @@ struct bkcloud_client_s
   struct bkcloud_http_s http;
   struct bkcloud_asr_source_s source;
   char response[32768];
-  char request[65536];
 };
 int bkcloud_recognize(struct bkcloud_client_s *client,
                      const struct bkcloud_config_s *config,

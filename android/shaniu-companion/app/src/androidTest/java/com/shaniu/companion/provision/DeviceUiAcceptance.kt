@@ -2,17 +2,31 @@
 package com.shaniu.companion.provision
 
 import android.app.Instrumentation
+import android.app.Instrumentation.ActivityMonitor
+import android.app.ActivityManager
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Rect
+import android.view.WindowInsets
 import android.view.View
 import android.view.ViewGroup
+import android.widget.EditText
+import android.view.inputmethod.InputMethodManager
+import android.widget.ScrollView
 import android.widget.TextView
 import com.shaniu.companion.MainActivity
 import com.shaniu.companion.ota.BkpackInspector
 import java.io.File
+import java.io.IOException
+import java.nio.ByteBuffer
+import java.security.KeyStore
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 /** Synthetic in-memory snapshots only. No binding, credential, BLE or device
  * mutation. Reflection keeps fixture injection out of the production APK API.
@@ -61,6 +75,737 @@ internal object DeviceUiAcceptance {
             instrumentation.runOnMainSync { activity.finish() }
             instrumentation.waitForIdleSync()
         }
+    }
+
+    /**
+     * Emulator-only fixture: network resolution and BLE are replaced at their
+     * narrow owners, but every claim transition below is decoded by the real
+     * ProvisionClaimProtocol and consumed by ProvisionActivity's callback.
+     */
+    fun runProvisionEmulatorFlowProbe(instrumentation: Instrumentation, only: String? = null): String {
+        val failures = mutableListOf<String>()
+        val results = mutableListOf<String>()
+        var selected = 0
+        fun scenario(name: String, block: () -> Unit) {
+            if (only != null && only != name) return
+            selected++
+            try {
+                block()
+                results += "$name=PASS"
+            } catch (error: Throwable) {
+                val detail = "$name=FAIL ${error.javaClass.simpleName}: ${error.message}"
+                failures += detail; results += detail
+            }
+        }
+        scenario("local_utf8_and_nonhex_password_rejection") {
+            val activity = startProvision(instrumentation)
+            val binding = TestBinding(instrumentation.targetContext)
+            try {
+                val resolverCalls = intArrayOf(0)
+                onUi(instrumentation) {
+                    installProvisionFixture(instrumentation, activity, resolver = {
+                        resolverCalls[0]++; throw IOException("fixture DNS must not run")
+                    }, store = binding.store)
+                    enterNetworkPage(activity)
+                    fillCloudFields(activity)
+                    /* Every rejection uses the actual Save button.  Keep the
+                     * invalid value visible so a correction/retry is possible. */
+                    field(activity, "ssid", TextView::class.java).text = "测".repeat(17)
+                    saveButton(activity).performClick()
+                    check(status(activity).contains("Wi-Fi"))
+                    check(resolverCalls[0] == 0)
+                    check(field(activity, "ssid", TextView::class.java).text.toString() == "测".repeat(17))
+                    field(activity, "ssid", TextView::class.java).text = "test-wifi"
+                    field(activity, "password", TextView::class.java).text = "g".repeat(64)
+                    saveButton(activity).performClick()
+                    check(status(activity).contains("Wi-Fi"))
+                    check(resolverCalls[0] == 0)
+                    check(field(activity, "password", TextView::class.java).text.toString() == "g".repeat(64))
+                    field(activity, "password", TextView::class.java).text = ""
+                    field(activity, "cloudUrl", TextView::class.java).text = ""
+                    saveButton(activity).performClick()
+                    check(status(activity).contains("HTTPS")); check(resolverCalls[0] == 0)
+                    field(activity, "cloudUrl", TextView::class.java).text = "https://cloud.example/v1"
+                    field(activity, "cloudKey", TextView::class.java).text = ""
+                    saveButton(activity).performClick()
+                    check(status(activity).contains("Key")); check(resolverCalls[0] == 0)
+                    field(activity, "cloudKey", TextView::class.java).text = "test-only-key"
+                    field(activity, "asrModel", TextView::class.java).text = ""
+                    saveButton(activity).performClick()
+                    check(status(activity).contains("模型")); check(resolverCalls[0] == 0)
+                    field(activity, "asrModel", TextView::class.java).text = "test-asr"
+                    field(activity, "chatModel", TextView::class.java).text = ""
+                    saveButton(activity).performClick()
+                    check(status(activity).contains("模型")); check(resolverCalls[0] == 0)
+                    field(activity, "chatModel", TextView::class.java).text = "test-chat"
+                    field(activity, "ttsModel", TextView::class.java).text = ""
+                    saveButton(activity).performClick()
+                    check(status(activity).contains("模型")); check(resolverCalls[0] == 0)
+                    /* An open network has an empty password. Its actual Save
+                     * passes local validation and reaches the injected resolver. */
+                    fillCloudFields(activity)
+                    field(activity, "password", TextView::class.java).text = ""
+                    saveButton(activity).performClick()
+                }
+                awaitUi(instrumentation, activity) { rawField(activity, "cloudResolving").get(activity) == false }
+                onUi(instrumentation) {
+                    check(resolverCalls[0] == 1)
+                    check(rawField(activity, "connection").get(activity) == null)
+                    check(field(activity, "password", TextView::class.java).text.isEmpty())
+                    saveButton(activity).performClick()
+                }
+                awaitUi(instrumentation, activity) { rawField(activity, "cloudResolving").get(activity) == false }
+                onUi(instrumentation) { check(resolverCalls[0] == 2) }
+            } finally { finishProvision(instrumentation, activity); binding.close() }
+        }
+        scenario("dns_failure_does_not_create_session") {
+            val activity = startProvision(instrumentation)
+            val binding = TestBinding(instrumentation.targetContext)
+            try {
+                val resolved = CountDownLatch(1)
+                onUi(instrumentation) {
+                    installProvisionFixture(instrumentation, activity, resolver = {
+                        resolved.countDown(); throw IOException("fixture DNS failure")
+                    }, store = binding.store)
+                    enterNetworkPage(activity); fillCloudFields(activity); saveButton(activity).performClick()
+                }
+                check(resolved.await(3, TimeUnit.SECONDS))
+                awaitUi(instrumentation, activity) { rawField(activity, "cloudResolving").get(activity) == false }
+                onUi(instrumentation) {
+                    check(status(activity) == "无法验证语音服务，请检查 HTTPS 地址及网络。")
+                    check(rawField(activity, "connection").get(activity) == null)
+                }
+            } finally { finishProvision(instrumentation, activity); binding.close() }
+        }
+        scenario("verify_ack_then_negative12_is_failure") {
+            val activity = startProvision(instrumentation)
+            val fixture = ClaimTransportFixture()
+            val retryFixture = ClaimTransportFixture()
+            val binding = TestBinding(instrumentation.targetContext)
+            try {
+                onUi(instrumentation) {
+                    installProvisionFixture(instrumentation, activity, resolver = { verifiedEndpoint() }, fixture, binding.store)
+                    enterNetworkPage(activity); fillCloudFields(activity); saveButton(activity).performClick()
+                }
+                awaitStarted(instrumentation, fixture)
+                fixture.tls(); fixture.respond(3); fixture.respond(4)
+                while (fixture.lastType() == 3) fixture.respond(4)
+                check(fixture.lastType() == 4)
+                fixture.respond(5)
+                instrumentation.waitForIdleSync()
+                onUi(instrumentation) {
+                    check(status(activity) == "认领进行中，请保持设备连接。")
+                    check(rawField(activity, "connection").get(activity) != null)
+                }
+                fixture.respond(7, -12)
+                instrumentation.waitForIdleSync()
+                onUi(instrumentation) {
+                    check(status(activity).contains("设备验证") && status(activity).contains("-12"))
+                    check(rawField(activity, "connection").get(activity) == null)
+                    check(notSuccessfulUi(activity))
+                    check(field(activity, "password", TextView::class.java).text.isEmpty())
+                    check(field(activity, "cloudKey", TextView::class.java).text.isEmpty())
+                }
+                captureSyntheticView(instrumentation, activity, "emulator-flow-verify-failure.png")
+                onUi(instrumentation) {
+                    /* The returned button is the real failure path.  Re-enter
+                     * with fresh synthetic inputs and a new transport; no
+                     * terminal state is injected into the activity. */
+                    (rawField(activity, "resultButton").get(activity) as android.widget.Button).performClick()
+                    check(rawField(activity, "page").get(activity) == 0)
+                    installProvisionFixture(instrumentation, activity, resolver = { verifiedEndpoint() },
+                        retryFixture, binding.store)
+                    (rawField(activity, "nextButton").get(activity) as android.widget.Button).performClick()
+                    check(rawField(activity, "page").get(activity) == 1)
+                    fillCloudFields(activity); saveButton(activity).performClick()
+                }
+                awaitStarted(instrumentation, retryFixture)
+                retryFixture.tls(); retryFixture.respond(3); retryFixture.respond(4)
+                while (retryFixture.lastType() == 3) retryFixture.respond(4)
+                check(retryFixture.lastType() == 4)
+                retryFixture.respond(5)
+                instrumentation.waitForIdleSync()
+                onUi(instrumentation) {
+                    check(status(activity) == "认领进行中，请保持设备连接。")
+                    check(rawField(activity, "connection").get(activity) != null)
+                }
+                retryFixture.respond(6)
+                instrumentation.waitForIdleSync()
+                onUi(instrumentation) {
+                    check(status(activity) == "设备已确认保存连接设置。")
+                    check((rawField(activity, "resultButton").get(activity) as TextView).text.toString() == "返回首页")
+                    check(binding.store.pending("emulator-claim") == null)
+                    check(binding.store.boundDeviceId() == "emulator-claim")
+                    check(field(activity, "password", TextView::class.java).text.isEmpty())
+                    check(field(activity, "cloudKey", TextView::class.java).text.isEmpty())
+                }
+                captureSyntheticView(instrumentation, activity, "emulator-flow-committed.png")
+            } finally {
+                fixture.clear(); retryFixture.clear(); finishProvision(instrumentation, activity); binding.close()
+            }
+        }
+        scenario("authentication_failure") {
+            val activity = startProvision(instrumentation)
+            val fixture = ClaimTransportFixture()
+            val binding = TestBinding(instrumentation.targetContext)
+            try {
+                onUi(instrumentation) {
+                    installProvisionFixture(instrumentation, activity, resolver = { verifiedEndpoint() }, fixture, binding.store)
+                    enterNetworkPage(activity); fillCloudFields(activity); saveButton(activity).performClick()
+                }
+                awaitStarted(instrumentation, fixture)
+                fixture.tls(); fixture.respond(7, -9)
+                instrumentation.waitForIdleSync()
+                onUi(instrumentation) {
+                    check(status(activity).contains("设备认证") && status(activity).contains("-9"))
+                    check(notSuccessfulUi(activity))
+                }
+            } finally { fixture.clear(); finishProvision(instrumentation, activity); binding.close() }
+        }
+        scenario("transport_timeout_close") {
+            val activity = startProvision(instrumentation)
+            val fixture = ClaimTransportFixture()
+            val binding = TestBinding(instrumentation.targetContext)
+            try {
+                onUi(instrumentation) {
+                    installProvisionFixture(instrumentation, activity, resolver = { verifiedEndpoint() }, fixture, binding.store)
+                    enterNetworkPage(activity); fillCloudFields(activity); saveButton(activity).performClick()
+                }
+                awaitStarted(instrumentation, fixture)
+                fixture.timeoutClose()
+                instrumentation.waitForIdleSync()
+                onUi(instrumentation) {
+                    check(status(activity).contains("连接超时") && status(activity).contains("重试"))
+                    check(notSuccessfulUi(activity))
+                }
+            } finally { fixture.clear(); finishProvision(instrumentation, activity); binding.close() }
+        }
+        scenario("cancelled_late_callback") {
+            val activity = startProvision(instrumentation)
+            val fixture = ClaimTransportFixture()
+            val binding = TestBinding(instrumentation.targetContext)
+            try {
+                onUi(instrumentation) {
+                    installProvisionFixture(instrumentation, activity, resolver = { verifiedEndpoint() }, fixture, binding.store)
+                    enterNetworkPage(activity); fillCloudFields(activity); saveButton(activity).performClick()
+                }
+                awaitStarted(instrumentation, fixture)
+                fixture.tls(); fixture.respond(3); fixture.respond(4)
+                while (fixture.lastType() == 3) fixture.respond(4)
+                check(fixture.lastType() == 4)
+                onUi(instrumentation) {
+                    val cancel = rawField(activity, "resultButton").get(activity) as android.widget.Button
+                    cancel.performClick()
+                }
+                instrumentation.waitForIdleSync()
+                fixture.lateCommitted()
+                instrumentation.waitForIdleSync()
+                onUi(instrumentation) {
+                    check(notSuccessfulUi(activity))
+                    check(status(activity) != "设备已确认保存连接设置。")
+                    check(rawField(activity, "connection").get(activity) == null)
+                    check(binding.store.pending("emulator-claim") != null)
+                }
+                val restarted = ProvisionBindingStore(ProvisionBindingStore.SharedPreferencesBackend(binding.preferences),
+                    ControlKeyCipher.android(binding.alias))
+                check(restarted.pending("emulator-claim") != null)
+            } finally {
+                fixture.clear(); finishProvision(instrumentation, activity)
+                binding.close()
+            }
+        }
+        scenario("delayed_resolver_double_click_then_back_ignores_late_failure") {
+            val activity = startProvision(instrumentation)
+            val binding = TestBinding(instrumentation.targetContext)
+            try {
+                val entered = CountDownLatch(1)
+                val release = CountDownLatch(1)
+                val calls = intArrayOf(0)
+                onUi(instrumentation) {
+                    installProvisionFixture(instrumentation, activity, resolver = {
+                        calls[0]++; entered.countDown()
+                        check(release.await(3, TimeUnit.SECONDS))
+                        throw IOException("late fixture DNS failure")
+                    }, store = binding.store)
+                    enterNetworkPage(activity); fillCloudFields(activity)
+                    saveButton(activity).performClick(); saveButton(activity).performClick()
+                }
+                check(entered.await(3, TimeUnit.SECONDS))
+                onUi(instrumentation) { activity.onBackPressed() }
+                release.countDown()
+                awaitUi(instrumentation, activity) { rawField(activity, "cloudResolving").get(activity) == false }
+                onUi(instrumentation) {
+                    check(calls[0] == 1)
+                    check(rawField(activity, "page").get(activity) == 0)
+                    check(status(activity) == "请选择设备继续。")
+                    check(rawField(activity, "connection").get(activity) == null)
+                }
+            } finally { finishProvision(instrumentation, activity); binding.close() }
+        }
+        scenario("ime_input_scroll_bounds_and_secure_view_draw") {
+            val activity = startProvision(instrumentation)
+            val binding = TestBinding(instrumentation.targetContext)
+            try {
+                onUi(instrumentation) {
+                    installProvisionFixture(instrumentation, activity, resolver = { verifiedEndpoint() }, store = binding.store)
+                    enterNetworkPage(activity)
+                    field(activity, "ssid", EditText::class.java).requestFocus()
+                    instrumentation.targetContext.getSystemService(InputMethodManager::class.java)
+                        .showSoftInput(field(activity, "ssid", EditText::class.java), InputMethodManager.SHOW_IMPLICIT)
+                }
+                awaitUi(instrumentation, activity) {
+                    activity.window.decorView.rootWindowInsets?.isVisible(WindowInsets.Type.ime()) == true
+                }
+                instrumentation.sendStringSync("ime-wifi")
+                onUi(instrumentation) {
+                    val scroll = findView(activity.window.decorView) { it is ScrollView } as ScrollView
+                    scroll.smoothScrollTo(0, scroll.getChildAt(0).height)
+                }
+                awaitUi(instrumentation, activity) {
+                    val save = saveButton(activity)
+                    val bounds = Rect(); val visible = Rect()
+                    activity.window.decorView.getWindowVisibleDisplayFrame(visible)
+                    val completelyVisible = save.getGlobalVisibleRect(bounds) && bounds.width() > 0 &&
+                        bounds.height() > 0 && bounds.top >= visible.top && bounds.bottom <= visible.bottom
+                    if (!completelyVisible) return@awaitUi false
+                    check((activity.window.attributes.flags and android.view.WindowManager.LayoutParams.FLAG_SECURE) != 0)
+                    save.performClick()
+                    val root = activity.window.decorView
+                    val image = Bitmap.createBitmap(root.width.coerceAtLeast(1), root.height.coerceAtLeast(1), Bitmap.Config.ARGB_8888)
+                    /* View.draw deliberately records app content only; secure
+                     * system IME pixels are not part of this synthetic capture. */
+                    root.draw(Canvas(image))
+                    val output = File(instrumentation.targetContext.cacheDir,
+                        "emulator-flow-layout-${UUID.randomUUID()}.png")
+                    output.outputStream().use { check(image.compress(Bitmap.CompressFormat.PNG, 100, it)) }
+                    image.recycle()
+                    check(output.length() > 0)
+                    check(field(activity, "ssid", TextView::class.java).text.toString().contains("ime-wifi"))
+                    true
+                }
+                awaitUi(instrumentation, activity) {
+                    val message = status(activity)
+                    if (message != "请填写语音服务 Key 后再保存；当前事务会同时保存 Wi-Fi 和语音服务。") {
+                        return@awaitUi false
+                    }
+                    val bounds = Rect(); val visible = Rect()
+                    activity.window.decorView.getWindowVisibleDisplayFrame(visible)
+                    check(field(activity, "status", TextView::class.java).getGlobalVisibleRect(bounds) &&
+                        bounds.top >= visible.top && bounds.bottom <= visible.bottom) {
+                        "input error is not fully visible after Save: $bounds in $visible"
+                    }
+                    val root = activity.window.decorView
+                    val image = Bitmap.createBitmap(root.width.coerceAtLeast(1), root.height.coerceAtLeast(1), Bitmap.Config.ARGB_8888)
+                    root.draw(Canvas(image))
+                    val output = File(instrumentation.targetContext.cacheDir, "emulator-flow-error.png")
+                    output.outputStream().use { check(image.compress(Bitmap.CompressFormat.PNG, 100, it)) }
+                    image.recycle()
+                    check(output.length() > 0)
+                    true
+                }
+            } finally { finishProvision(instrumentation, activity); binding.close() }
+        }
+        scenario("recreate_keeps_only_isolated_pending_binding") {
+            var activity = startProvision(instrumentation)
+            val fixture = ClaimTransportFixture()
+            val binding = TestBinding(instrumentation.targetContext)
+            val monitor = ActivityMonitor(ProvisionActivity::class.java.name, null, false)
+            instrumentation.addMonitor(monitor)
+            try {
+                onUi(instrumentation) {
+                    installProvisionFixture(instrumentation, activity, resolver = { verifiedEndpoint() }, fixture, binding.store)
+                    enterNetworkPage(activity); fillCloudFields(activity)
+                    check(field(activity, "password", TextView::class.java).text.isNotEmpty())
+                    check(field(activity, "cloudKey", TextView::class.java).text.isNotEmpty())
+                }
+                val unsaved = activity
+                onUi(instrumentation) { activity.recreate() }
+                activity = checkNotNull(monitor.waitForActivityWithTimeout(3_000) as? ProvisionActivity)
+                onUi(instrumentation) {
+                    /* No Save happened before this recreation.  onDestroy must
+                     * still clear the old in-memory secret fields. */
+                    check(field(unsaved, "password", TextView::class.java).text.isEmpty())
+                    check(field(unsaved, "cloudKey", TextView::class.java).text.isEmpty())
+                    check(field(activity, "password", TextView::class.java).text.isEmpty())
+                    check(field(activity, "cloudKey", TextView::class.java).text.isEmpty())
+                    installProvisionFixture(instrumentation, activity, resolver = { verifiedEndpoint() }, fixture, binding.store)
+                    enterNetworkPage(activity); fillCloudFields(activity); saveButton(activity).performClick()
+                }
+                awaitStarted(instrumentation, fixture)
+                fixture.tls(); fixture.respond(3); fixture.respond(4)
+                while (fixture.lastType() == 3) fixture.respond(4)
+                check(fixture.lastType() == 4); fixture.respond(5)
+                instrumentation.waitForIdleSync()
+                check(binding.store.pending("emulator-claim") != null)
+                onUi(instrumentation) { activity.recreate() }
+                activity = checkNotNull(monitor.waitForActivityWithTimeout(3_000) as? ProvisionActivity)
+                onUi(instrumentation) {
+                    check(field(activity, "password", TextView::class.java).text.isEmpty())
+                    check(field(activity, "cloudKey", TextView::class.java).text.isEmpty())
+                    rawField(activity, "bindingStore").set(activity, binding.store)
+                    check(binding.store.pending("emulator-claim") != null)
+                    installProvisionFixture(instrumentation, activity, resolver = { verifiedEndpoint() },
+                        ClaimTransportFixture(), binding.store)
+                    (rawField(activity, "nextButton").get(activity) as android.widget.Button).performClick()
+                }
+                check(binding.store.pending("emulator-claim") != null)
+            } finally {
+                instrumentation.removeMonitor(monitor); fixture.clear()
+                finishProvision(instrumentation, activity); binding.close()
+            }
+        }
+        scenario("backgrounded_resolver_clears_progress_before_late_callback") {
+            val activity = startProvision(instrumentation)
+            val binding = TestBinding(instrumentation.targetContext)
+            try {
+                val entered = CountDownLatch(1)
+                val release = CountDownLatch(1)
+                val resolverReturned = CountDownLatch(1)
+                var resolverCalls = 0
+                onUi(instrumentation) {
+                    installProvisionFixture(instrumentation, activity, resolver = {
+                        resolverCalls++
+                        if (resolverCalls == 1) {
+                            entered.countDown(); check(release.await(3, TimeUnit.SECONDS))
+                            resolverReturned.countDown()
+                            throw IOException("background late DNS failure")
+                        }
+                        throw IOException("retry resolver failure")
+                    }, store = binding.store)
+                    enterNetworkPage(activity); fillCloudFields(activity); saveButton(activity).performClick()
+                }
+                check(entered.await(3, TimeUnit.SECONDS)) { "resolver did not start" }
+                onUi(instrumentation) { check(activity.moveTaskToBack(true)) }
+                val stoppedDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
+                var stopped = false
+                while (System.nanoTime() < stoppedDeadline && !stopped) {
+                    onUi(instrumentation) {
+                        stopped = rawField(activity, "foreground").get(activity) == false
+                    }
+                    if (!stopped) Thread.sleep(10)
+                }
+                check(stopped) { "onStop did not set foreground=false after moveTaskToBack" }
+                onUi(instrumentation) {
+                    check(rawField(activity, "cloudResolving").get(activity) == false) {
+                        "cloud resolver remained active after onStop"
+                    }
+                    check(status(activity) != "正在验证语音服务连接…") {
+                        "onStop left resolver progress text: ${status(activity)}"
+                    }
+                }
+                release.countDown()
+                check(resolverReturned.await(3, TimeUnit.SECONDS)) { "late resolver did not return" }
+                /* The worker has returned; wait until its handler.post is no
+                 * longer queued before bringing the original task forward. */
+                instrumentation.waitForIdleSync()
+                val manager = instrumentation.targetContext.getSystemService(ActivityManager::class.java)
+                // Instrumentation plays the system Recents action. The app
+                // itself does not need permission to reorder other tasks.
+                instrumentation.uiAutomation.adoptShellPermissionIdentity(android.Manifest.permission.REORDER_TASKS)
+                try { manager.moveTaskToFront(activity.taskId, 0) }
+                finally { instrumentation.uiAutomation.dropShellPermissionIdentity() }
+                awaitUi(instrumentation, activity) { rawField(activity, "foreground").get(activity) == true }
+                onUi(instrumentation) {
+                    check(rawField(activity, "page").get(activity) == 1) { "same activity did not resume on Wi-Fi page" }
+                    check(status(activity) != "无法验证语音服务，请检查 HTTPS 地址及网络。") {
+                        "late failure overwrote resumed page"
+                    }
+                    field(activity, "ssid", TextView::class.java).text = ""
+                    saveButton(activity).performClick()
+                    check(status(activity).contains("Wi-Fi 名称")) { "resumed page did not accept corrected input" }
+                    field(activity, "ssid", TextView::class.java).text = "retry-wifi"
+                    saveButton(activity).performClick()
+                }
+                awaitUi(instrumentation, activity) { rawField(activity, "cloudResolving").get(activity) == false }
+                onUi(instrumentation) {
+                    check(resolverCalls == 2) { "corrected Save did not retry resolver" }
+                    check(status(activity) == "无法验证语音服务，请检查 HTTPS 地址及网络。")
+                    check(rawField(activity, "connection").get(activity) == null)
+                }
+            } finally { finishProvision(instrumentation, activity); binding.close() }
+        }
+        if (only != null) check(selected == 1) { "Unknown emulator flow scenario: $only" }
+        check(failures.isEmpty()) { results.joinToString("\n") }
+        return results.joinToString("; ")
+    }
+
+    /** Two invocation fixture for a root-controlled force-stop between calls.
+     * It records only random test preference/key aliases, never the app's
+     * provision_receipts identity. */
+    fun runProvisionProcessRestartFixture(instrumentation: Instrumentation, resume: Boolean): String {
+        val binding = if (resume) checkNotNull(TestBinding.openPersistent(instrumentation.targetContext)) {
+            "No isolated emulator process fixture is pending"
+        } else TestBinding.createPersistent(instrumentation.targetContext)
+        val activity = startProvision(instrumentation)
+        val transport = ClaimTransportFixture()
+        var keepFixture = false
+        try {
+            if (!resume) {
+                onUi(instrumentation) {
+                    installProvisionFixture(instrumentation, activity, resolver = { verifiedEndpoint() }, transport, binding.store)
+                    enterNetworkPage(activity); fillCloudFields(activity); saveButton(activity).performClick()
+                }
+                awaitStarted(instrumentation, transport)
+                transport.tls(); transport.respond(3); transport.respond(4)
+                while (transport.lastType() == 3) transport.respond(4)
+                check(transport.lastType() == 4); transport.respond(5)
+                instrumentation.waitForIdleSync()
+                check(binding.store.pending("emulator-claim") != null)
+                onUi(instrumentation) { activity.onBackPressed() }
+                check(binding.store.pending("emulator-claim") != null)
+                keepFixture = true
+                return "PROCESS_FIXTURE_READY isolated pending receipt"
+            }
+            check(binding.store.pending("emulator-claim") != null)
+            onUi(instrumentation) {
+                installProvisionFixture(instrumentation, activity, resolver = { verifiedEndpoint() }, store = binding.store)
+                (rawField(activity, "nextButton").get(activity) as android.widget.Button).performClick()
+            }
+            onUi(instrumentation) {
+                /* This is the production pending path: it starts the real
+                 * control-reconciliation page, rather than injecting a final
+                 * protocol state into the recreated store. */
+                check(rawField(activity, "page").get(activity) == 2)
+                check(rawField(activity, "recoveryControl").get(activity) != null)
+                check((rawField(activity, "resultButton").get(activity) as TextView).text.toString() == "取消连接")
+                check(binding.store.pending("emulator-claim") != null)
+            }
+            return "PROCESS_FIXTURE_RESUMED pending page opened from isolated receipt"
+        } finally {
+            transport.clear(); finishProvision(instrumentation, activity)
+            if (!keepFixture) {
+                binding.close(); TestBinding.clearPersistentReference(instrumentation.targetContext)
+            }
+        }
+    }
+
+    private fun startProvision(instrumentation: Instrumentation) = instrumentation.startActivitySync(
+        Intent(instrumentation.targetContext, ProvisionActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+    ) as ProvisionActivity
+
+    private fun rawField(activity: ProvisionActivity, name: String) =
+        ProvisionActivity::class.java.getDeclaredField(name).apply { isAccessible = true }
+
+    private fun <T> field(activity: ProvisionActivity, name: String, type: Class<T>): T =
+        requireNotNull(type.cast(rawField(activity, name).get(activity)))
+
+    private fun status(activity: ProvisionActivity) = field(activity, "status", TextView::class.java).text.toString()
+
+    private fun captureSyntheticView(instrumentation: Instrumentation, activity: ProvisionActivity,
+                                     filename: String) {
+        awaitUi(instrumentation, activity) {
+            val root = activity.window.decorView
+            val scroll = findView(root) { it is ScrollView } as? ScrollView ?: return@awaitUi false
+            val title = field(activity, "titleLabel", TextView::class.java)
+            val currentStatus = field(activity, "status", TextView::class.java)
+            val result = field(activity, "resultButton", TextView::class.java)
+            val visible = Rect().also { root.getWindowVisibleDisplayFrame(it) }
+            fun fullyVisible(view: View): Boolean {
+                val bounds = Rect()
+                return view.getGlobalVisibleRect(bounds) && bounds.top >= visible.top && bounds.bottom <= visible.bottom
+            }
+            // Hidden pages intentionally retain pending layout requests until
+            // shown again; they are not part of the frame being captured.
+            fun layoutRequested(view: View): Boolean = view.visibility == View.VISIBLE && (view.isLayoutRequested ||
+                (view as? ViewGroup)?.let { group ->
+                    (0 until group.childCount).any { layoutRequested(group.getChildAt(it)) }
+                } == true)
+            if (layoutRequested(root) || scroll.scrollY != 0 || !fullyVisible(title) ||
+                !fullyVisible(currentStatus) || !fullyVisible(result)) return@awaitUi false
+            true
+        }
+        val drawn = CountDownLatch(2)
+        lateinit var root: View
+        val listener = object : android.view.ViewTreeObserver.OnPreDrawListener {
+            override fun onPreDraw(): Boolean {
+                drawn.countDown()
+                if (drawn.count > 0) root.postInvalidateOnAnimation()
+                return true
+            }
+        }
+        onUi(instrumentation) {
+            root = activity.window.decorView
+            root.viewTreeObserver.addOnPreDrawListener(listener)
+            root.postInvalidateOnAnimation()
+        }
+        try {
+            check(drawn.await(3, TimeUnit.SECONDS)) { "two stable pre-draw frames did not arrive" }
+        } finally {
+            onUi(instrumentation) {
+                if (root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnPreDrawListener(listener)
+            }
+        }
+        onUi(instrumentation) {
+            val image = Bitmap.createBitmap(root.width.coerceAtLeast(1), root.height.coerceAtLeast(1), Bitmap.Config.ARGB_8888)
+            root.draw(Canvas(image))
+            val output = File(instrumentation.targetContext.cacheDir, filename)
+            output.outputStream().use { check(image.compress(Bitmap.CompressFormat.PNG, 100, it)) }
+            image.recycle()
+            check(output.length() > 0)
+        }
+    }
+
+    private fun notSuccessfulUi(activity: ProvisionActivity): Boolean =
+        status(activity) != "设备已确认保存连接设置。" &&
+            (rawField(activity, "resultButton").get(activity) as TextView).text.toString() != "返回首页"
+
+    private fun saveButton(activity: ProvisionActivity): View {
+        fun views(root: View): List<View> = listOf(root) + if (root is ViewGroup)
+            (0 until root.childCount).flatMap { views(root.getChildAt(it)) } else emptyList()
+        return views(activity.window.decorView).single { it is TextView && it.text.toString() == "保存并连接" }
+    }
+
+    private fun findView(root: View, predicate: (View) -> Boolean): View? {
+        if (predicate(root)) return root
+        if (root is ViewGroup) for (index in 0 until root.childCount) {
+            findView(root.getChildAt(index), predicate)?.let { return it }
+        }
+        return null
+    }
+
+    private fun enterNetworkPage(activity: ProvisionActivity) {
+        (rawField(activity, "nextButton").get(activity) as android.widget.Button).performClick()
+        check(rawField(activity, "page").get(activity) == 1)
+    }
+
+    private fun fillCloudFields(activity: ProvisionActivity) {
+        field(activity, "ssid", TextView::class.java).text = "test-wifi"
+        field(activity, "password", TextView::class.java).text = "pass1234"
+        field(activity, "cloudUrl", TextView::class.java).text = "https://cloud.example/v1"
+        field(activity, "cloudKey", TextView::class.java).text = "test-only-key"
+        field(activity, "asrModel", TextView::class.java).text = "test-asr"
+        field(activity, "chatModel", TextView::class.java).text = "test-chat"
+        field(activity, "ttsModel", TextView::class.java).text = "test-tts"
+    }
+
+    private fun verifiedEndpoint() = CloudEndpoint.Verified(byteArrayOf(1, 1, 1, 1), byteArrayOf(1))
+
+    private fun installProvisionFixture(instrumentation: Instrumentation, activity: ProvisionActivity,
+                                        resolver: (String) -> CloudEndpoint.Verified,
+                                        transport: ClaimTransportFixture? = null,
+                                        store: ProvisionBindingStore? = null) {
+        val binding = requireNotNull(store) { "Test fixture requires isolated binding storage" }
+        val bootstrap = ProvisionBootstrap.parse(
+            """{"protocol":"provision-bootstrap-v1","device_id":"emulator-claim","certificate_sha256":"${"ab".repeat(32)}","possession_secret":"${java.util.Base64.getEncoder().encodeToString(ByteArray(32) { 42 })}"}""".toCharArray())
+        val adapter = checkNotNull(instrumentation.targetContext
+            .getSystemService(android.bluetooth.BluetoothManager::class.java)?.adapter)
+        rawField(activity, "bindingStore").set(activity, binding)
+        rawField(activity, "bootstrap").set(activity, bootstrap)
+        rawField(activity, "selected").set(activity, adapter.getRemoteDevice("02:00:00:00:00:01"))
+        /* BLE discovery itself is outside this fixture. Mirror only the
+         * selection UI's post-scan enabled/visible state; nextPage remains the
+         * actual click path and rechecks selected/bootstrap/pending state. */
+        (rawField(activity, "nextButton").get(activity) as android.widget.Button).apply {
+            isEnabled = true
+            visibility = View.VISIBLE
+        }
+        rawField(activity, "cloudResolver").set(activity, resolver)
+        if (transport != null) rawField(activity, "connectionFactory").set(activity,
+            connectionFactory(instrumentation, activity, transport, binding))
+    }
+
+    private fun connectionFactory(instrumentation: Instrumentation, activity: ProvisionActivity,
+                                  transport: ClaimTransportFixture,
+                                  store: ProvisionBindingStore? = null):
+        (android.bluetooth.BluetoothDevice, ProvisionBootstrap, ByteArray,
+            (ProvisionClaimProtocol.State) -> Unit, Boolean) -> ProvisioningConnection {
+        val binding = store ?: rawField(activity, "bindingStore").get(activity) as ProvisionBindingStore
+        return { device, identity, candidate, changed, recover ->
+            ProvisioningConnection(instrumentation.targetContext, device, identity, candidate, changed,
+                recover, binding, { events -> transport.install(events) })
+        }
+    }
+
+    private fun awaitStarted(instrumentation: Instrumentation, transport: ClaimTransportFixture) {
+        check(transport.started.await(3, TimeUnit.SECONDS))
+        instrumentation.waitForIdleSync()
+    }
+
+    /** Propagate UI-thread assertions to the instrumentation thread so a
+     * scenario can fail without terminating the process before later cases. */
+    private fun onUi(instrumentation: Instrumentation, action: () -> Unit) {
+        val failure = AtomicReference<Throwable?>()
+        instrumentation.runOnMainSync {
+            try { action() } catch (error: Throwable) { failure.set(error) }
+        }
+        failure.get()?.let { throw it }
+    }
+
+    private fun awaitUi(instrumentation: Instrumentation, activity: ProvisionActivity,
+                        condition: () -> Boolean) {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
+        while (System.nanoTime() < deadline) {
+            instrumentation.waitForIdleSync()
+            var matched = false
+            onUi(instrumentation) { matched = condition() }
+            if (matched) return
+            Thread.sleep(10)
+        }
+        throw AssertionError("UI condition did not become true")
+    }
+
+    private fun finishProvision(instrumentation: Instrumentation, activity: ProvisionActivity) {
+        onUi(instrumentation) { activity.finish() }
+        instrumentation.waitForIdleSync()
+    }
+
+    /** Owns only a unique test preferences file and Android Keystore alias. */
+    private class TestBinding(private val context: Context, private val name: String = "emulator-claim-${UUID.randomUUID()}",
+                              val alias: String = "emulator-claim-${UUID.randomUUID()}") {
+        val preferences = context.getSharedPreferences(name, Context.MODE_PRIVATE)
+        val store = ProvisionBindingStore(ProvisionBindingStore.SharedPreferencesBackend(preferences),
+            ControlKeyCipher.android(alias))
+        fun close() {
+            preferences.edit().clear().commit()
+            context.deleteSharedPreferences(name)
+            runCatching { KeyStore.getInstance("AndroidKeyStore").apply { load(null) }.deleteEntry(alias) }
+        }
+        companion object {
+            private const val INDEX = "emulator-process-fixture-index"
+            private const val NAME = "preferences_name"
+            private const val ALIAS = "keystore_alias"
+            fun createPersistent(context: Context): TestBinding = TestBinding(context).also { fixture ->
+                check(context.getSharedPreferences(INDEX, Context.MODE_PRIVATE).edit()
+                    .putString(NAME, fixture.name).putString(ALIAS, fixture.alias).commit())
+            }
+            fun openPersistent(context: Context): TestBinding? {
+                val index = context.getSharedPreferences(INDEX, Context.MODE_PRIVATE)
+                val name = index.getString(NAME, null) ?: return null
+                val alias = index.getString(ALIAS, null) ?: return null
+                return TestBinding(context, name, alias)
+            }
+            fun clearPersistentReference(context: Context) {
+                context.getSharedPreferences(INDEX, Context.MODE_PRIVATE).edit().clear().commit()
+                context.deleteSharedPreferences(INDEX)
+            }
+        }
+    }
+
+    private class ClaimTransportFixture : ProvisioningConnection.Transport {
+        lateinit var events: ProvisioningConnection.Transport.Events
+        val started = CountDownLatch(1)
+        private val packets = mutableListOf<ByteArray>()
+        private var closed = false
+        fun install(value: ProvisioningConnection.Transport.Events): ProvisioningConnection.Transport {
+            events = value
+            return this
+        }
+        override fun start() { started.countDown() }
+        override fun send(bytes: ByteArray) { packets += bytes.copyOf() }
+        override fun close() {
+            if (!closed) { closed = true; events.closed("cancelled") }
+        }
+        fun tls() = events.tlsEstablished()
+        fun lastType() = packets.last()[4].toInt()
+        fun respond(remote: Int, result: Int = 0) {
+            val request = packets.last()
+            events.plaintext(ByteBuffer.allocate(40).putInt(0x53505631).putInt(0x80000000.toInt())
+                .put(request, 8, 20).putInt(8).putInt(remote).putInt(result).array())
+        }
+        fun lateCommitted() = runCatching { respond(6) }
+        fun timeoutClose() = events.closed("handshake_timeout")
+        fun clear() { packets.forEach { it.fill(0) }; packets.clear() }
     }
 
     fun run(instrumentation: Instrumentation) {

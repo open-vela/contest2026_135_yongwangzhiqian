@@ -162,7 +162,6 @@ static void understand(void)
          "persona", &history, "describe image", jpeg, sizeof(jpeg), text,
          sizeof(text)) == -EINVAL);
   assert(text[0] == 0 && p.opens == 1);
-  for (size_t i = 0; i < sizeof(client->request); i++) assert(!client->request[i]);
   free(client);
 }
 static int pcm_output(void *context, const void *data, size_t size)
