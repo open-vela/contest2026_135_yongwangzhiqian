@@ -531,6 +531,7 @@ def main():
         "test_control_serial",
         "test_pc_grants",
         "test_pc_tasks",
+        "test_pc_camera",
         "test_agent_final_stream",
         "test_pc_reset",
         "test_pc_storage",
@@ -547,6 +548,9 @@ def main():
         "test_shaniu_power_prepare",
         "test_shaniu_motion_quiesce",
         "test_shaniu_motion_actions",
+        "test_shaniu_motion_poll",
+        "test_shaniu_companion_display",
+        "test_shaniu_haptic_product",
         "test_shaniu_power_pixels",
         "test_shaniu_msc_stop",
         "test_shaniu_usb_cleanup",
@@ -557,6 +561,8 @@ def main():
         "test_shaniu_focus",
         "test_shaniu_focus_shared",
         "test_shaniu_focus_intent",
+        "test_nfc_scene_actions",
+        "test_local_content",
         "test_shaniu_nfc_bindings",
         "test_shaniu_nfc_jobs",
         "test_shaniu_nfc_worker_scene",
@@ -977,6 +983,15 @@ def main():
             [HERE / "build/test_bk7258_nfc_rpc", "card-" + variant],
             binaries["test_bk7258_nfc_rpc"],
         )
+    add(suite, "NFC-02.explicit-actions", "NFC-02", "L2",
+        [HERE / "build/test_nfc_scene_actions"],
+        binaries["test_nfc_scene_actions"], marker=False)
+    add(suite, "NFC-02.local-content", "NFC-02", "L2",
+        [sys.executable, HERE / "test_local_content.py"],
+        binaries["test_local_content"], marker=False)
+    add(suite, "NFC-02.focus-actions", "NFC-02", "L2",
+        [HERE / "build/test_shaniu_nfc_scene", "pause-resume-cancel"],
+        binaries["test_shaniu_nfc_scene"])
     for variant in (
         "persist",
         "revision",
@@ -1012,6 +1027,21 @@ def main():
         add(suite, "MOT-02.candidate-" + variant, "MOT-02", "L1",
             [HERE / "build/test_shaniu_motion_actions", variant],
             binaries["test_shaniu_motion_actions"])
+    for target, variants in (
+        ("motion_poll", ("sample", "late", "read-error", "quiesce")),
+        ("companion_display", ("gate", "expire", "cancel", "preempt",
+                               "new-default", "rollback", "failure", "activity")),
+        ("haptic_product", ("limit", "pulse", "cancel-pending", "cancel-active",
+                            "capture-quiet", "stop-error")),
+    ):
+        for variant in variants:
+            binary = "test_shaniu_" + target
+            add(suite, "MOT-02." + target + "." + variant, "MOT-02", "L2",
+                [HERE / ("build/" + binary), variant], binaries[binary])
+    add(suite, "MOT-02.product-feedback", "MOT-02", "L2",
+        [sys.executable, HERE / "test_shaniu_companion.py"], marker=False)
+    add(suite, "MOT-02.task-feedback", "MOT-02", "L2",
+        [HERE / "build/test_pc_tasks", "feedback"], binaries["test_pc_tasks"])
     for variant in (
         "prestart", "queued", "active", "idle", "close-error", "open-cleanup",
         "late", "queued-cycle", "waiter-cycle", "publication-cycle",
@@ -1048,7 +1078,7 @@ def main():
     for variant in ("success", "failure"):
         add(suite, "CFG-02.local-load-" + variant, "CFG-02", "L1",
             [sys.executable, HERE / "test_shaniu_config_local_apply.py", variant])
-    for variant in ("online", "offline", "network-pending", "offline-event",
+    for variant in ("content-busy", "online", "offline", "network-pending", "offline-event",
                     "core-unavailable", "identity-unavailable", "threshold-busy",
                     "model-failure", "cloud-retry", "offline-admission", "online-admission"):
         add(suite, "BOOT-01.local-" + variant, "BOOT-01", "L1",
@@ -1063,7 +1093,7 @@ def main():
         add(suite, "LIFE-01." + variant, "LIFE-01", "L1",
             [HERE / "build/test_shaniu_power_contract", variant],
             binaries["test_shaniu_power_contract"])
-    for variant in ("usb-failed", "usb-close", "pack-busy", "pack-failed",
+    for variant in ("content-busy", "usb-failed", "usb-close", "pack-busy", "pack-failed",
                     "cp-pending-deadline", "cp-unknown-deadline",
                     "cp-new-pending", "cp-retry-unknown",
                     "cp-retry-pending", "cp-retry-declined", "cp-query"):
@@ -1114,6 +1144,13 @@ def main():
             binaries["test_pc_owner_binding"])
         add(suite, "NET-03.pc-product-" + variant, "NET-03", "L2",
             [sys.executable, HERE / "test_pc_product_route.py", variant])
+    add(suite, "USB-02.camera-service-cancel", "USB-02", "L2",
+        [sys.executable, HERE / "test_pc_camera_service.py"], marker=False)
+    add(suite, "USB-02.camera-production", "USB-02", "L2",
+        [HERE / "build/test_pc_camera"], binaries["test_pc_camera"], marker=False)
+    for variant in ("status_golden_and_invalid", "request_requires_identity", "no_capture_without_auth_or_invalid_input"):
+        add(suite, "USB-02.camera-client-" + variant, "USB-02", "L1",
+            [sys.executable, HERE / "test_workbench_camera.py", "CameraTest.test_" + variant], marker=False)
     for variant in ("terminal", "duplicate", "ordering", "expiry", "binding", "readonly", "invalid", "quiesce", "rate", "visual"):
         add(suite, "PC-01.task-" + variant, "PC-01", "L1",
             [HERE / "build/test_pc_tasks", variant], binaries["test_pc_tasks"])
@@ -1140,7 +1177,7 @@ def main():
         add(suite, "RST-01.pc-" + variant, "RST-01", "L2",
             [sys.executable, HERE / "test_pc_reset.py", variant],
             binaries["test_pc_reset"])
-    for variant in ("persist", "owner", "revision", "invalid", "writefail",
+    for variant in ("camera", "persist", "owner", "revision", "invalid", "writefail",
                     "uncertain", "corrupt", "golden", "aliased-key"):
         add(suite, "NET-03.pc-grant-" + variant, "NET-03", "L2",
             [HERE / "build/test_pc_grants", variant],
@@ -1168,7 +1205,7 @@ def main():
         add(suite, "USB-01.pc-client-" + variant, "USB-01", "L2",
             [sys.executable, HERE / "test_workbench_client.py",
              "WorkbenchClientTest.test_" + variant], marker=False)
-    for variant in ('http_authority_rejects_before_operation', 'polling_is_local_and_duplicate_is_not_replayed', 'cancel_is_intent_not_remote_completion', 'page_headers_and_no_credential_paths', 'invalid_upload_does_not_open_device', 'http_upload_reaches_tls_and_native_installer', 'large_counters_preserve_exact_value', 'upload_exact_128k_boundary', 'upload_128k_plus_one_rejected_before_spool_or_worker'):
+    for variant in ('camera_preview_stays_in_latest_memory_result', 'camera_cancel_uses_existing_cooperative_owner', 'http_authority_rejects_before_operation', 'polling_is_local_and_duplicate_is_not_replayed', 'cancel_is_intent_not_remote_completion', 'page_headers_and_no_credential_paths', 'invalid_upload_does_not_open_device', 'http_upload_reaches_tls_and_native_installer', 'large_counters_preserve_exact_value', 'upload_exact_128k_boundary', 'upload_128k_plus_one_rejected_before_spool_or_worker'):
         add(suite, "USB-02.browser-" + variant, "USB-02", "L2",
             [sys.executable, HERE / "test_workbench_web.py", "WebTest.test_" + variant], marker=False)
     for variant in ('trial_expiry', 'trial_cancel', 'missing_pack', 'default_supersedes_trial', 'release_recovery_stays_unknown'):
@@ -1955,6 +1992,14 @@ def main():
         ROOT / "tools/bk7258/bk7258.py",
         HERE / "test_workbench_client.py",
         HERE / "test_workbench_tasks.py",
+        HERE / "test_pc_camera.c",
+        HERE / "test_pc_camera_service.py",
+        HERE / "fixtures/camera-synthetic-jpeg.h",
+        HERE / "test_workbench_camera.py",
+        HERE / "test_workbench_camera_peer.py",
+        ROOT / "app/bk7258/bk7258_pc_camera.c",
+        ROOT / "app/bk7258/bk7258_pc_camera.h",
+        ROOT / "tools/bk7258/_lib/workbench_camera.py",
         HERE / "test_workbench_web.py",
         HERE / "test_workbench_web_display.py",
         ROOT / "tools/bk7258/_lib/workbench_web.py",
