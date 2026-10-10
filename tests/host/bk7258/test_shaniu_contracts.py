@@ -547,6 +547,9 @@ def main():
         "test_shaniu_power_prepare",
         "test_shaniu_motion_quiesce",
         "test_shaniu_motion_actions",
+        "test_shaniu_motion_poll",
+        "test_shaniu_companion_display",
+        "test_shaniu_haptic_product",
         "test_shaniu_power_pixels",
         "test_shaniu_msc_stop",
         "test_shaniu_usb_cleanup",
@@ -1012,6 +1015,22 @@ def main():
         add(suite, "MOT-02.candidate-" + variant, "MOT-02", "L1",
             [HERE / "build/test_shaniu_motion_actions", variant],
             binaries["test_shaniu_motion_actions"])
+    for target, variants in (
+        ("motion_poll", ("sample", "late", "read-error", "quiesce",
+                         "reuse", "reuse-quiesce", "reuse-close-error")),
+        ("companion_display", ("gate", "expire", "cancel", "preempt",
+                               "new-default", "rollback", "failure", "activity")),
+        ("haptic_product", ("limit", "pulse", "cancel-pending", "cancel-active",
+                            "capture-quiet", "stop-error")),
+    ):
+        for variant in variants:
+            binary = "test_shaniu_" + target
+            add(suite, "MOT-02." + target + "." + variant, "MOT-02", "L2",
+                [HERE / ("build/" + binary), variant], binaries[binary])
+    add(suite, "MOT-02.product-feedback", "MOT-02", "L2",
+        [sys.executable, HERE / "test_shaniu_companion.py"], marker=False)
+    add(suite, "MOT-02.task-feedback", "MOT-02", "L2",
+        [HERE / "build/test_pc_tasks", "feedback"], binaries["test_pc_tasks"])
     for variant in (
         "prestart", "queued", "active", "idle", "close-error", "open-cleanup",
         "late", "queued-cycle", "waiter-cycle", "publication-cycle",
@@ -1145,6 +1164,8 @@ def main():
         add(suite, "NET-03.pc-grant-" + variant, "NET-03", "L2",
             [HERE / "build/test_pc_grants", variant],
             binaries["test_pc_grants"])
+    add(suite, "USB-01.ota-write-classification", "USB-01", "L2",
+        [sys.executable, HERE / "test_deploy_usb_errors.py"], marker=False)
     for variant in ("binary", "backpressure", "disconnect", "invalid", "failed-open",
                     "cleanup-get", "cleanup-set", "close-get", "close-set", "close-hangup", "close-lost"):
         add(suite, "USB-02.serial-" + variant, "USB-02", "L2",
@@ -1954,6 +1975,7 @@ def main():
         ROOT / "tools/bk7258/_lib/deploy_usb.py",
         ROOT / "tools/bk7258/bk7258.py",
         HERE / "test_workbench_client.py",
+        HERE / "test_deploy_usb_errors.py",
         HERE / "test_workbench_tasks.py",
         HERE / "test_workbench_web.py",
         HERE / "test_workbench_web_display.py",

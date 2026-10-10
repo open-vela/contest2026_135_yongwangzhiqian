@@ -23,6 +23,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <syslog.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <nuttx/irq.h>
@@ -38,6 +39,8 @@
 #include "bk7258_agent_power.h"
 
 #define BKHEALTH_REFRESH_MS 60000u
+
+#include "bk7258_health_resources.inc"
 
 struct bkhealth_source_context_s
 {
@@ -239,6 +242,10 @@ static void bkhealth_publish_snapshot(
   irqstate_t flags;
 
   memset(&snapshot, 0, sizeof(snapshot));
+  struct timespec now;
+  if (clock_gettime(CLOCK_MONOTONIC, &now) < 0) return;
+  snapshot.sampled_ms = (uint64_t)now.tv_sec * 1000 +
+                        now.tv_nsec / 1000000;
   if (response->battery_state_status == 0 &&
       (response->flags & BKHEALTH_FLAG_BATTERY_STATE_VALID) != 0)
     {
@@ -326,6 +333,9 @@ static int bkhealth_worker(int argc, char **argv)
                                         &server->source);
       if (request.command == BKHEALTH_RPC_STATUS)
         bkhealth_publish_snapshot(server, &response);
+      else if (request.command == BKHEALTH_RPC_RESOURCES &&
+               response.rpc_status == 0 && response.operation_status == 0)
+        bkhealth_resources(&response);
 
       flags = spin_lock_irqsave(&server->request_lock);
       memcpy(&server->last_request, &request, sizeof(request));

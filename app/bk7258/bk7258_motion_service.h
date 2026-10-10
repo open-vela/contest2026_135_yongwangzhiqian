@@ -22,4 +22,23 @@ int bk7258_motion_service_prepare(void);
 int bk7258_motion_service_start(void);
 int bk7258_motion_service_sample(struct bkmotion_rpc_response_s *sample);
 
+/* Metadata only. The existing worker collects at 10 Hz while admitted.
+ * Closing admission invalidates the cache and all in-flight publication.
+ * snapshot never starts a read; timestamps use the AP monotonic uORB clock.
+ */
+
+int bk7258_motion_service_poll(bool active);
+struct bkmotion_metrics_s
+{
+  uint32_t collections;
+  uint32_t open_us;
+  uint32_t read_us;
+  uint32_t close_us;
+  uint32_t total_us;
+};
+
+/* Last collection timing; this query never starts sensor I/O. */
+int bk7258_motion_service_metrics(struct bkmotion_metrics_s *metrics);
+int bk7258_motion_service_snapshot(struct bkmotion_rpc_response_s *sample);
+
 #endif /* __APP_BK7258_BK7258_MOTION_SERVICE_H */

@@ -18,11 +18,13 @@
 #include <fcntl.h>
 #include <stdbool.h>
 #include <string.h>
+#include <time.h>
 #include <sys/ioctl.h>
 #include <syslog.h>
 #include <unistd.h>
 
 #include <nuttx/irq.h>
+#include <nuttx/clock.h>
 #include <nuttx/mutex.h>
 #include <nuttx/rpmsg/rpmsg.h>
 #include <nuttx/semaphore.h>
@@ -38,6 +40,8 @@ struct bkmotion_source_s
 {
   int fd;
   int release_error;
+  bool keep_open;
+  struct bkmotion_metrics_s timing;
 };
 
 struct bkmotion_server_s
@@ -54,6 +58,7 @@ struct bkmotion_server_s
   bool pending;
   bool quiescing;
   bool io_active;
+  bool retained;
   uint32_t epoch;
   uint32_t request_epoch;
   uint32_t admission_epoch;
@@ -63,6 +68,12 @@ struct bkmotion_server_s
   struct bkmotion_rpc_request_s last_request;
   struct bkmotion_rpc_response_s last_response;
   struct bkmotion_source_s source;
+  bool polling;
+  bool snapshot_valid;
+  uint32_t poll_epoch;
+  clock_t poll_at;
+  struct bkmotion_rpc_response_s snapshot;
+  struct bkmotion_metrics_s metrics;
 };
 
 static struct bkmotion_server_s g_bkmotion_server =
@@ -90,7 +101,8 @@ static int bkmotion_open(void *context)
 
   if (source->fd >= 0)
     {
-      return -EBUSY;
+      /* The sample mutex owns this descriptor across periodic collections. */
+      return 0;
     }
 
   source->fd = open(CONFIG_BK7258_MOTION_DEVPATH, O_RDONLY | O_NONBLOCK);
@@ -150,6 +162,7 @@ static int bkmotion_close(void *context)
   struct bkmotion_source_s *source = context;
   int fd = source->fd;
 
+  if (source->keep_open) return 0;
   source->fd = -1;
   if (fd < 0)
     {
@@ -162,11 +175,45 @@ static int bkmotion_close(void *context)
   return ret;
 }
 
+static uint64_t bkmotion_now_us(void)
+{
+  struct timespec now;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  return (uint64_t)now.tv_sec * 1000000 + now.tv_nsec / 1000;
+}
+
+static int bkmotion_timed_open(void *context)
+{
+  struct bkmotion_source_s *source = context;
+  uint64_t start = bkmotion_now_us();
+  int ret = bkmotion_open(context);
+  source->timing.open_us = bkmotion_now_us() - start;
+  return ret;
+}
+
+static int bkmotion_timed_read(void *context, struct bkmotion_sample_s *sample)
+{
+  struct bkmotion_source_s *source = context;
+  uint64_t start = bkmotion_now_us();
+  int ret = bkmotion_read(context, sample);
+  source->timing.read_us = bkmotion_now_us() - start;
+  return ret;
+}
+
+static int bkmotion_timed_close(void *context)
+{
+  struct bkmotion_source_s *source = context;
+  uint64_t start = bkmotion_now_us();
+  int ret = bkmotion_close(context);
+  source->timing.close_us = bkmotion_now_us() - start;
+  return ret;
+}
+
 static const struct bkmotion_source_ops_s g_bkmotion_ops =
 {
-  .open = bkmotion_open,
-  .read = bkmotion_read,
-  .close = bkmotion_close,
+  .open = bkmotion_timed_open,
+  .read = bkmotion_timed_read,
+  .close = bkmotion_timed_close,
 };
 
 int bk7258_motion_service_quiesce(bool stop)
@@ -188,19 +235,25 @@ int bk7258_motion_service_quiesce(bool stop)
 
       server->quiescing = true;
       server->replay_valid = false;
+      server->polling = false;
+      server->snapshot_valid = false;
     }
 
-  ret = server->io_active ? -EBUSY :
+  ret = server->io_active || server->retained ? -EBUSY :
     server->admission_epoch == UINT32_MAX ? -EOVERFLOW :
     __atomic_load_n(&server->source.release_error, __ATOMIC_ACQUIRE);
   if (!stop && ret == 0) server->quiescing = false;
+  bool release = stop && server->initialized &&
+    (server->retained || server->io_active);
   spin_unlock_irqrestore(&server->request_lock, flags);
+  if (release) (void)nxsem_post(&server->request_sem);
   return ret;
 }
 
 static int bkmotion_collect(const struct bkmotion_rpc_request_s *request,
                             struct bkmotion_rpc_response_s *response,
-                            uint32_t admission_epoch)
+                            uint32_t admission_epoch, bool periodic,
+                            uint32_t poll_epoch)
 {
   struct bkmotion_server_s *server = &g_bkmotion_server;
   irqstate_t flags = spin_lock_irqsave(&server->request_lock);
@@ -229,9 +282,33 @@ static int bkmotion_collect(const struct bkmotion_rpc_request_s *request,
   spin_unlock_irqrestore(&server->request_lock, flags);
   if (ret == 0)
     {
+      uint64_t start = bkmotion_now_us();
+      memset(&server->source.timing, 0, sizeof(server->source.timing));
+      server->source.keep_open = periodic;
       ret = bkmotion_rpc_handle_request(request, response, &g_bkmotion_ops,
                                        &server->source);
       flags = spin_lock_irqsave(&server->request_lock);
+      bool keep = ret == 0 && periodic && server->polling &&
+        !server->quiescing && server->admission_epoch == admission_epoch &&
+        server->poll_epoch == poll_epoch;
+      spin_unlock_irqrestore(&server->request_lock, flags);
+      server->source.keep_open = false;
+      if (!keep && server->source.fd >= 0)
+        {
+          int cleanup = bkmotion_timed_close(&server->source);
+          if (ret == 0 && cleanup < 0)
+            {
+              ret = cleanup;
+              bkmotion_rpc_make_response(response, request, ret);
+            }
+        }
+      server->source.timing.total_us = bkmotion_now_us() - start;
+      flags = spin_lock_irqsave(&server->request_lock);
+      server->retained = server->source.fd >= 0;
+      uint32_t collections = server->metrics.collections;
+      server->metrics = server->source.timing;
+      server->metrics.collections = collections == UINT32_MAX ?
+        UINT32_MAX : collections + 1;
       server->io_active = false;
       /* Stop revokes publication, not the descriptor's cleanup obligation. */
       if (server->quiescing && ret == 0)
@@ -269,7 +346,7 @@ int bk7258_motion_service_sample(struct bkmotion_rpc_response_s *sample)
   irqstate_t flags = spin_lock_irqsave(&g_bkmotion_server.request_lock);
   uint32_t admission_epoch = g_bkmotion_server.admission_epoch;
   spin_unlock_irqrestore(&g_bkmotion_server.request_lock, flags);
-  return bkmotion_collect(&request, sample, admission_epoch);
+  return bkmotion_collect(&request, sample, admission_epoch, false, 0);
 }
 
 static int bkmotion_send(struct bkmotion_server_s *server,
@@ -304,6 +381,32 @@ static int bkmotion_send(struct bkmotion_server_s *server,
   return ret;
 }
 
+/* Only the existing worker closes an idle periodic lease. Product/voice
+ * admission callbacks just invalidate the cache and wake this worker.
+ */
+static void bkmotion_release_idle(struct bkmotion_server_s *server)
+{
+  irqstate_t flags = spin_lock_irqsave(&server->request_lock);
+  bool retained = server->retained;
+  spin_unlock_irqrestore(&server->request_lock, flags);
+  if (!retained || nxmutex_lock(&server->sample_lock) < 0) return;
+  flags = spin_lock_irqsave(&server->request_lock);
+  bool release = server->retained &&
+    (!server->polling || server->quiescing);
+  if (release) server->io_active = true;
+  spin_unlock_irqrestore(&server->request_lock, flags);
+  if (release)
+    {
+      server->source.keep_open = false;
+      (void)bkmotion_timed_close(&server->source);
+      flags = spin_lock_irqsave(&server->request_lock);
+      server->retained = false;
+      server->io_active = false;
+      spin_unlock_irqrestore(&server->request_lock, flags);
+    }
+  nxmutex_unlock(&server->sample_lock);
+}
+
 static int bkmotion_worker(int argc, char **argv)
 {
   struct bkmotion_server_s *server = &g_bkmotion_server;
@@ -318,12 +421,47 @@ static int bkmotion_worker(int argc, char **argv)
       uint32_t epoch;
       uint32_t admission_epoch;
 
-      if (nxsem_wait_uninterruptible(&server->request_sem) < 0)
+      flags = spin_lock_irqsave(&server->request_lock);
+      bool polling = server->polling && !server->quiescing;
+      spin_unlock_irqrestore(&server->request_lock, flags);
+      int waited = polling ? nxsem_tickwait_uninterruptible(
+        &server->request_sem, MSEC2TICK(100)) :
+        nxsem_wait_uninterruptible(&server->request_sem);
+      if (waited < 0 && waited != -ETIMEDOUT)
         {
           continue;
         }
 
+      bkmotion_release_idle(server);
       flags = spin_lock_irqsave(&server->request_lock);
+      if (server->polling && !server->quiescing &&
+          clock_systime_ticks() - server->poll_at >= MSEC2TICK(100))
+        {
+          uint32_t poll_epoch = server->poll_epoch;
+          admission_epoch = server->admission_epoch;
+          server->poll_at = clock_systime_ticks();
+          spin_unlock_irqrestore(&server->request_lock, flags);
+          const struct bkmotion_rpc_request_s poll =
+          {
+            .magic = BKMOTION_RPC_MAGIC,
+            .version = BKMOTION_RPC_VERSION,
+            .command = BKMOTION_RPC_SAMPLE,
+            .session = 1,
+            .sequence = 1
+          };
+
+          (void)bkmotion_collect(&poll, &response, admission_epoch, true,
+                                 poll_epoch);
+          flags = spin_lock_irqsave(&server->request_lock);
+          if (server->polling && !server->quiescing &&
+              server->poll_epoch == poll_epoch &&
+              server->admission_epoch == admission_epoch)
+            {
+              server->snapshot = response;
+              server->snapshot_valid = true;
+            }
+        }
+
       /* A disconnect may leave a semaphore token behind.  Only the pending
        * slot owns work; consuming another token must never execute it twice.
        */
@@ -342,7 +480,7 @@ static int bkmotion_worker(int argc, char **argv)
       memcpy(&request, &server->active_request, sizeof(request));
       spin_unlock_irqrestore(&server->request_lock, flags);
 
-      (void)bkmotion_collect(&request, &response, admission_epoch);
+      (void)bkmotion_collect(&request, &response, admission_epoch, false, 0);
 
       flags = spin_lock_irqsave(&server->request_lock);
       /* Old I/O still closes its own fd, but must not publish a result or
@@ -373,6 +511,50 @@ static int bkmotion_worker(int argc, char **argv)
   return 0;
 }
 
+int bk7258_motion_service_poll(bool active)
+{
+  struct bkmotion_server_s *server = &g_bkmotion_server;
+  irqstate_t flags = spin_lock_irqsave(&server->request_lock);
+  int ret = !server->initialized ? -ENODEV :
+    server->quiescing ? -ESHUTDOWN :
+    server->poll_epoch == UINT32_MAX ? -EOVERFLOW : 0;
+  bool changed = server->polling != (active && ret == 0);
+
+  if (changed)
+    {
+      if (server->poll_epoch < UINT32_MAX) server->poll_epoch++;
+      server->polling = active && ret == 0 &&
+                        server->poll_epoch != UINT32_MAX;
+      server->snapshot_valid = false;
+    }
+
+  spin_unlock_irqrestore(&server->request_lock, flags);
+  if (changed) (void)nxsem_post(&server->request_sem);
+  return ret;
+}
+
+int bk7258_motion_service_metrics(struct bkmotion_metrics_s *metrics)
+{
+  struct bkmotion_server_s *server = &g_bkmotion_server;
+  if (metrics == NULL) return -EINVAL;
+  irqstate_t flags = spin_lock_irqsave(&server->request_lock);
+  *metrics = server->metrics;
+  spin_unlock_irqrestore(&server->request_lock, flags);
+  return 0;
+}
+
+int bk7258_motion_service_snapshot(struct bkmotion_rpc_response_s *sample)
+{
+  struct bkmotion_server_s *server = &g_bkmotion_server;
+  if (sample == NULL) return -EINVAL;
+  irqstate_t flags = spin_lock_irqsave(&server->request_lock);
+  int ret = server->snapshot_valid ? 0 : -ENODATA;
+  if (ret == 0) *sample = server->snapshot;
+  else memset(sample, 0, sizeof(*sample));
+  spin_unlock_irqrestore(&server->request_lock, flags);
+  return ret;
+}
+
 static int bkmotion_server_cb(struct rpmsg_endpoint *endpoint, void *data,
                               size_t len, uint32_t src, void *priv)
 {
@@ -401,6 +583,15 @@ static int bkmotion_server_cb(struct rpmsg_endpoint *endpoint, void *data,
   if (!bkmotion_rpc_request_valid(request))
     {
       bkmotion_rpc_make_response(&response, request, -EINVAL);
+      return bkmotion_send(server, &response, epoch);
+    }
+
+  if (request->command == BKMOTION_RPC_STATUS)
+    {
+      ret = bk7258_motion_service_snapshot(&response);
+      if (ret < 0) bkmotion_rpc_make_response(&response, request, ret);
+      response.session = request->session;
+      response.sequence = request->sequence;
       return bkmotion_send(server, &response, epoch);
     }
 
