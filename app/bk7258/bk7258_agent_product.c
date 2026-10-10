@@ -55,6 +55,10 @@
 #include "voice/voice_tts.h"
 #ifdef CONFIG_BK7258_VISION_SERVICE
 #include "bk7258_agent_vision.h"
+#ifdef CONFIG_BK7258_PROVISION_NATIVE
+#include "bk7258_pc_camera.h"
+#define BKPRODUCT_PC_CAMERA 1
+#endif
 #endif
 #ifdef CONFIG_BK7258_VOICE_TLS
 #include "cJSON.h"
@@ -92,6 +96,7 @@
 #endif
 #include "bk7258_pc_grants.h"
 #include "bk7258_focus_intent.h"
+#include "bk7258_local_content.h"
 #ifdef CONFIG_BK7258_NFC_SERVICE
 #include "bk7258_nfc_service.h"
 #ifdef CONFIG_BK7258_PROVISION_GATT
@@ -248,15 +253,29 @@ static void bk7258_agent_voice_event(int event, int result)
     }
 #endif
 #ifdef CONFIG_BK7258_DISPLAY_SERVICE
+  if (event == VOICE_CHANNEL_EVENT_CAPTURE_QUIESCENT && result == 0)
+    {
+      bk7258_display_activity(2);
+    }
+
+  if (event == VOICE_CHANNEL_EVENT_TURN_COMPLETE)
+    {
+      bk7258_display_activity(0);
+    }
+
   if (event == VOICE_CHANNEL_EVENT_OUTPUT_STARTED ||
       event == VOICE_CHANNEL_EVENT_OUTPUT_FINISHED)
     {
+      bk7258_display_activity(0);
       bk7258_display_speaking(event == VOICE_CHANNEL_EVENT_OUTPUT_STARTED);
       return;
     }
 #endif
   if (event == VOICE_CHANNEL_EVENT_WAKE_ACK_REQUEST)
     {
+#ifdef CONFIG_BK7258_DISPLAY_SERVICE
+      bk7258_display_activity(1);
+#endif
       /* The Agent reader is paused; its producer still drains and erases
        * microphone PCM until this synchronous playback has drained. */
       voice_channel_wake_ack_result(bk7258_agent_trigger_reply());
@@ -1770,6 +1789,20 @@ static int product_pc_config(void *context, enum bkcontrol_command_e command,
   uint32_t kind, uint32_t offset, const uint8_t *record, size_t size,
   struct bkcontrol_status_s *status)
 {
+#ifdef BKPRODUCT_PC_CAMERA
+  if (kind == BKCONTROL_CONFIG_CAMERA || kind == BKCONTROL_CONFIG_CAMERA_FRAME)
+    {
+      const struct bkpc_control_s *lease = &g_pc_usb_owner.usb.lease;
+      if (!lease->open || !(lease->capabilities & BKPC_CAP_CAMERA))
+        return -EACCES;
+      return bkcamera_control(command, kind, offset, record, size, status);
+    }
+  if (kind == BKCONTROL_CONFIG_RESOURCE_JOB && command != BKCONTROL_CONFIG_READ)
+    {
+      bkcamera_close();
+      if (bkcamera_busy()) return -EBUSY;
+    }
+#endif
 #ifdef CONFIG_BK7258_ENGINEERING_TEST
   if (kind == BKCONTROL_CONFIG_ENGINEERING_TEST)
     {
@@ -1861,15 +1894,23 @@ static int product_pc_config(void *context, enum bkcontrol_command_e command,
 
 static int product_pc_usb_stop(void)
 {
+#ifdef BKPRODUCT_PC_CAMERA
+  bkcamera_close();
+#endif
   return bkpc_usb_owner_stop(&g_pc_usb_owner);
 }
 
-#ifdef CONFIG_BK7258_ENGINEERING_TEST
+#if defined(CONFIG_BK7258_ENGINEERING_TEST) || defined(BKPRODUCT_PC_CAMERA)
 static void product_pc_engineering_closed(void *context)
 {
   (void)context;
+#ifdef BKPRODUCT_PC_CAMERA
+  bkcamera_close();
+#endif
+#ifdef CONFIG_BK7258_ENGINEERING_TEST
   (void)bkengtest_disconnect(&g_engineering_test, &g_engineering_test_ops,
                              NULL);
+#endif
 }
 #endif
 
@@ -1945,7 +1986,7 @@ static void product_pc_usb_step(void)
 #endif
     (g_identity_bound && g_control_bound && !bkagent_ota_busy()),
     !atomic_load(&g_voice_initialized) || voice_channel_is_idle());
-#ifdef CONFIG_BK7258_ENGINEERING_TEST
+#if defined(CONFIG_BK7258_ENGINEERING_TEST) || defined(BKPRODUCT_PC_CAMERA)
   if (g_pc_usb_owner.usb.lease.open)
     {
       (void)bkpc_control_set_close_handler(&g_pc_usb_owner.usb.lease,
@@ -2506,6 +2547,7 @@ static int product_reset_step(void)
   if (g_reset_phase != PRODUCT_RESET_FINISHING)
     {
       g_reset_phase = PRODUCT_RESET_QUIESCING;
+      int content = bkcontent_quiesce();
 #ifdef CONFIG_BK7258_DISPLAY_SERVICE
       int pack = bk7258_display_job_quiesce(true);
 #endif
@@ -2521,6 +2563,7 @@ static int product_reset_step(void)
 #endif
       ret = bkprov_owner_quiesce(true);
       if (ret < 0) return ret;
+      if (content < 0) return content;
 #ifdef CONFIG_BK7258_MOTION_SERVICE
       if (motion < 0) return motion;
 #endif
@@ -2863,6 +2906,9 @@ out:
   return ret;
 }
 
+#include "bk7258_agent_companion.inc"
+#include "bk7258_agent_local_content.inc"
+
 static int bk7258_agent_config_task(int argc, FAR char *argv[])
 {
   enum voice_action_e
@@ -2921,6 +2967,9 @@ static int bk7258_agent_config_task(int argc, FAR char *argv[])
       if (waited < 0 && errno != ETIMEDOUT)
         {
           int error = errno;
+          product_companion_step(bkvoice_config_now_ms(NULL), false,
+                                  false, false);
+          (void)bkcontent_quiesce();
 #ifdef CONFIG_BK7258_DISPLAY_SERVICE
           (void)bk7258_display_job_quiesce(true);
 #endif
@@ -2940,6 +2989,8 @@ static int bk7258_agent_config_task(int argc, FAR char *argv[])
 #endif
       if (reset)
         {
+          product_companion_step(now, false, false, false);
+          bkcontent_step(false);
 #ifdef CONFIG_BK7258_DISPLAY_SERVICE
           (void)bk7258_display_job_quiesce(true);
 #endif
@@ -2984,6 +3035,8 @@ static int bk7258_agent_config_task(int argc, FAR char *argv[])
 #endif
       if (product_keys_step(now))
         {
+          product_companion_step(now, false, false, false);
+          bkcontent_step(false);
           product_nfc_scene_gate(false);
           product_pc_task_step(now, false);
           bkfocus_cancel();
@@ -3001,7 +3054,13 @@ static int bk7258_agent_config_task(int argc, FAR char *argv[])
 
 #endif
       product_pc_task_step(now, g_control_bound && !bkagent_ota_busy());
-      (void)bkfocus_step(now);
+      bool focus_completed = bkfocus_step(now) > 0;
+      bool content_completed;
+      bool content_busy = product_content_step(now, g_control_bound &&
+        !voice_interaction_active &&
+        !bkagent_ota_busy() && atomic_load(&g_agent_core_ready) &&
+        (!atomic_load(&g_voice_initialized) || voice_channel_is_idle()),
+        &content_completed);
       product_nfc_scene_gate(g_control_bound && !bkagent_ota_busy() &&
         (!atomic_load(&g_voice_initialized) || voice_channel_is_idle()));
       bkfocus_intent_step(now, g_control_bound && !bkagent_ota_busy());
@@ -3010,6 +3069,25 @@ static int bk7258_agent_config_task(int argc, FAR char *argv[])
         !atomic_load(&g_voice_initialized) || voice_channel_is_idle(),
         bkfocus_visual(now)));
 #endif
+#ifdef BKPRODUCT_PC_CAMERA
+      bool camera_storage_idle = true;
+#ifdef CONFIG_BK7258_DISPLAY_SERVICE
+      struct bkdisplay_job_status_s camera_install;
+      camera_storage_idle = bk7258_display_job_status(&camera_install) == 0 &&
+        !camera_install.resources_held && (camera_install.state == BKDISPLAY_JOB_IDLE ||
+        camera_install.state == BKDISPLAY_JOB_DONE || camera_install.state == BKDISPLAY_JOB_CANCELED ||
+        camera_install.state == BKDISPLAY_JOB_FAILED);
+#endif
+      bkcamera_step(now, g_control_bound && !content_busy && !voice_interaction_active &&
+        !bkagent_ota_busy() && camera_storage_idle &&
+        (!atomic_load(&g_voice_initialized) || voice_channel_is_idle()) &&
+        g_pc_usb_owner.usb.lease.open &&
+        (g_pc_usb_owner.usb.lease.capabilities & BKPC_CAP_CAMERA));
+#endif
+      bool task_completed = bkpc_tasks_take_completion(&g_pc_tasks, now);
+      product_companion_step(now, !bkagent_ota_busy() && !content_busy,
+        !atomic_load(&g_voice_initialized) || voice_channel_is_idle(),
+        focus_completed || task_completed || content_completed);
       if (now >= voice_cleanup_at)
         {
           int cleanup = voice_channel_recover();
@@ -3039,7 +3117,8 @@ static int bk7258_agent_config_task(int argc, FAR char *argv[])
           voice_action_at = now;
         }
 
-      if (voice_action != VOICE_ACTION_NONE && now >= voice_action_at)
+      if (!content_busy && voice_action != VOICE_ACTION_NONE &&
+          now >= voice_action_at)
         {
           enum voice_action_e attempted = voice_action;
           int action;
@@ -3272,7 +3351,7 @@ static int bk7258_agent_config_task(int argc, FAR char *argv[])
 #ifdef CONFIG_BK7258_USBCDC
       product_pc_usb_step();
 #endif
-      if (!atomic_load(&g_agent_core_ready) ||
+      if (content_busy || !atomic_load(&g_agent_core_ready) ||
           !atomic_load(&g_voice_initialized) || !g_identity_bound ||
           bkagent_ota_busy())
         {
@@ -3668,6 +3747,7 @@ int ai_agent_main(int argc, FAR char *argv[])
   while (!agent_shutdown_requested())
     {
       agent_msg_t message;
+      bkcontent_work();
       ret = message_bus_pop_outbound(&message, 1000);
       if (ret != OK)
         {
@@ -3709,6 +3789,7 @@ int ai_agent_main(int argc, FAR char *argv[])
       message_bus_msg_free(&message);
     }
 
+  (void)bkcontent_quiesce();
   message_bus_wakeup();
   return OK;
 }
