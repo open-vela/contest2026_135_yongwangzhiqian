@@ -547,6 +547,9 @@ def main():
         "test_shaniu_power_prepare",
         "test_shaniu_motion_quiesce",
         "test_shaniu_motion_actions",
+        "test_shaniu_motion_poll",
+        "test_shaniu_companion_display",
+        "test_shaniu_haptic_product",
         "test_shaniu_power_pixels",
         "test_shaniu_msc_stop",
         "test_shaniu_usb_cleanup",
@@ -557,6 +560,8 @@ def main():
         "test_shaniu_focus",
         "test_shaniu_focus_shared",
         "test_shaniu_focus_intent",
+        "test_nfc_scene_actions",
+        "test_local_content",
         "test_shaniu_nfc_bindings",
         "test_shaniu_nfc_jobs",
         "test_shaniu_nfc_worker_scene",
@@ -977,6 +982,15 @@ def main():
             [HERE / "build/test_bk7258_nfc_rpc", "card-" + variant],
             binaries["test_bk7258_nfc_rpc"],
         )
+    add(suite, "NFC-02.explicit-actions", "NFC-02", "L2",
+        [HERE / "build/test_nfc_scene_actions"],
+        binaries["test_nfc_scene_actions"], marker=False)
+    add(suite, "NFC-02.local-content", "NFC-02", "L2",
+        [sys.executable, HERE / "test_local_content.py"],
+        binaries["test_local_content"], marker=False)
+    add(suite, "NFC-02.focus-actions", "NFC-02", "L2",
+        [HERE / "build/test_shaniu_nfc_scene", "pause-resume-cancel"],
+        binaries["test_shaniu_nfc_scene"])
     for variant in (
         "persist",
         "revision",
@@ -1012,6 +1026,21 @@ def main():
         add(suite, "MOT-02.candidate-" + variant, "MOT-02", "L1",
             [HERE / "build/test_shaniu_motion_actions", variant],
             binaries["test_shaniu_motion_actions"])
+    for target, variants in (
+        ("motion_poll", ("sample", "late", "read-error", "quiesce")),
+        ("companion_display", ("gate", "expire", "cancel", "preempt",
+                               "new-default", "rollback", "failure", "activity")),
+        ("haptic_product", ("limit", "pulse", "cancel-pending", "cancel-active",
+                            "capture-quiet", "stop-error")),
+    ):
+        for variant in variants:
+            binary = "test_shaniu_" + target
+            add(suite, "MOT-02." + target + "." + variant, "MOT-02", "L2",
+                [HERE / ("build/" + binary), variant], binaries[binary])
+    add(suite, "MOT-02.product-feedback", "MOT-02", "L2",
+        [sys.executable, HERE / "test_shaniu_companion.py"], marker=False)
+    add(suite, "MOT-02.task-feedback", "MOT-02", "L2",
+        [HERE / "build/test_pc_tasks", "feedback"], binaries["test_pc_tasks"])
     for variant in (
         "prestart", "queued", "active", "idle", "close-error", "open-cleanup",
         "late", "queued-cycle", "waiter-cycle", "publication-cycle",
@@ -1048,7 +1077,7 @@ def main():
     for variant in ("success", "failure"):
         add(suite, "CFG-02.local-load-" + variant, "CFG-02", "L1",
             [sys.executable, HERE / "test_shaniu_config_local_apply.py", variant])
-    for variant in ("online", "offline", "network-pending", "offline-event",
+    for variant in ("content-busy", "online", "offline", "network-pending", "offline-event",
                     "core-unavailable", "identity-unavailable", "threshold-busy",
                     "model-failure", "cloud-retry", "offline-admission", "online-admission"):
         add(suite, "BOOT-01.local-" + variant, "BOOT-01", "L1",
@@ -1063,7 +1092,7 @@ def main():
         add(suite, "LIFE-01." + variant, "LIFE-01", "L1",
             [HERE / "build/test_shaniu_power_contract", variant],
             binaries["test_shaniu_power_contract"])
-    for variant in ("usb-failed", "usb-close", "pack-busy", "pack-failed",
+    for variant in ("content-busy", "usb-failed", "usb-close", "pack-busy", "pack-failed",
                     "cp-pending-deadline", "cp-unknown-deadline",
                     "cp-new-pending", "cp-retry-unknown",
                     "cp-retry-pending", "cp-retry-declined", "cp-query"):
