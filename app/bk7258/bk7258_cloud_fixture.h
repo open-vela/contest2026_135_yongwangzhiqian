@@ -11,7 +11,10 @@
 enum bkcloud_fixture_role_e { BKCLOUD_FIXTURE_ASR, BKCLOUD_FIXTURE_LLM,
   BKCLOUD_FIXTURE_TTS };
 enum bkcloud_fixture_mode_e { BKCLOUD_FIXTURE_NORMAL,
-  BKCLOUD_FIXTURE_CANCEL_TAIL };
+  BKCLOUD_FIXTURE_CANCEL_TAIL, BKCLOUD_FIXTURE_FOCUS_START,
+  BKCLOUD_FIXTURE_FOCUS_STATUS, BKCLOUD_FIXTURE_FOCUS_PAUSE,
+  BKCLOUD_FIXTURE_FOCUS_RESUME, BKCLOUD_FIXTURE_FOCUS_CANCEL,
+  BKCLOUD_FIXTURE_FOCUS_FINISH };
 
 struct bkcloud_fixture_ctx_s
 {
@@ -20,6 +23,7 @@ struct bkcloud_fixture_ctx_s
   bool opened;
   atomic_bool canceled;
   bool stream;
+  bool decision_only;
   bool reply_ready;
   size_t sent;
   size_t offset;
@@ -34,6 +38,7 @@ struct bkcloud_fixture_ctx_s
 struct bkcloud_fixture_report_s
 {
   unsigned int asr_requests, plan_requests, final_requests, tts_requests;
+  unsigned int decision_requests;
   bool tail_released_after_media;
   size_t source_bytes;
   uint32_t source_hash;

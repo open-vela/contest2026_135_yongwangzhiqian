@@ -680,8 +680,116 @@ int main(int argc, char** argv)
 /* 同一播放器验收入口，使用真实 Agent 队列及受控 Media 消费端。 */
 #include <assert.h>
 #include <stddef.h>
+#include <pthread.h>
+#include <sched.h>
+#include <semaphore.h>
+#include <stdarg.h>
+#include <stdatomic.h>
+#include <stdio.h>
+#include <string.h>
+#include <syslog.h>
+#include <time.h>
+
+/* Observe production phase logs; the fixture owns only service/Media peers. */
+static pthread_mutex_t test_stage_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t test_stage_changed = PTHREAD_COND_INITIALIZER;
+static struct {
+    unsigned long long request, ms, value;
+    char name[40];
+    int result;
+} test_stages[256];
+static size_t test_stage_count;
+
+static void test_stage_syslog(int priority, const char *format, ...)
+{
+    (void)priority;
+    char line[512];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(line, sizeof(line), format, args);
+    va_end(args);
+    unsigned long long request, ms, value;
+    char name[40];
+    int result;
+    if (sscanf(line, "[voice-stage] request=%llu mono_ms=%llu stage=%39s value=%llu result=%d",
+               &request, &ms, name, &value, &result) != 5) return;
+    pthread_mutex_lock(&test_stage_lock);
+    assert(test_stage_count < sizeof(test_stages) / sizeof(test_stages[0]));
+    size_t n = test_stage_count++;
+    test_stages[n].request = request;
+    test_stages[n].ms = ms;
+    test_stages[n].value = value;
+    test_stages[n].result = result;
+    strcpy(test_stages[n].name, name);
+    pthread_cond_broadcast(&test_stage_changed);
+    pthread_mutex_unlock(&test_stage_lock);
+}
+
+static int test_stage_index(unsigned long long id, const char *name)
+{
+    for (size_t n = 0; n < test_stage_count; n++)
+        if (test_stages[n].request == id && !strcmp(test_stages[n].name, name))
+            return (int)n;
+    return -1;
+}
+
+static int test_wait_stage(unsigned long long id, const char *name)
+{
+    struct timespec until;
+    clock_gettime(CLOCK_REALTIME, &until);
+    until.tv_sec += 2;
+    pthread_mutex_lock(&test_stage_lock);
+    int index;
+    while ((index = test_stage_index(id, name)) < 0) {
+        int ret = pthread_cond_timedwait(&test_stage_changed, &test_stage_lock, &until);
+        if (ret) {
+            fprintf(stderr, "Missing production stage: %s request=%llu\n", name, id);
+            assert(!ret);
+        }
+    }
+    pthread_mutex_unlock(&test_stage_lock);
+    return index;
+}
+
+#define syslog test_stage_syslog
 size_t strlcpy(char *, const char *, size_t);
 #include "voice/voice_channel.c"
+#undef syslog
+
+#include "bk7258_focus_intent.h"
+#include "bk7258_focus_pixels.h"
+#include "tools/tool_guard.h"
+
+uint64_t bkvoice_config_now_ms(void *unused);
+
+static sem_t g_product_wake;
+static atomic_int test_focus_guard_deny;
+static atomic_int test_focus_guard_calls;
+static atomic_int test_focus_record_calls;
+
+tool_guard_result_t tool_guard_check(const char *name, const char *input,
+    size_t input_len)
+{
+    assert(!strcmp(name, "focus_timer"));
+    assert(input && input_len == strlen(input));
+    assert(!strcmp(input, "{\"action\":\"start\",\"seconds\":1}") ||
+           !strcmp(input, "{\"action\":\"status\"}") ||
+           !strcmp(input, "{\"action\":\"pause\"}") ||
+           !strcmp(input, "{\"action\":\"resume\"}") ||
+           !strcmp(input, "{\"action\":\"cancel\"}"));
+    atomic_fetch_add(&test_focus_guard_calls, 1);
+    return atomic_load(&test_focus_guard_deny) ? GUARD_DENY_DISABLED : GUARD_ALLOW;
+}
+
+void tool_guard_record_call(const char *name)
+{
+    assert(!strcmp(name, "focus_timer"));
+    atomic_fetch_add(&test_focus_record_calls, 1);
+}
+
+int nxsig_usleep(uint32_t usec) { return usleep(usec); }
+
+#include "bk7258_agent_focus.inc"
 
 static atomic_int test_canceled;
 static int test_mode;
@@ -1018,6 +1126,9 @@ int voice_tts_speak_stream_checked(const char* text, voice_tts_chunk_cb cb,
 
 static uint64_t test_reply_prepare(int mode)
 {
+    pthread_mutex_lock(&test_stage_lock);
+    test_stage_count = 0;
+    pthread_mutex_unlock(&test_stage_lock);
     test_mode = mode;
     atomic_store(&test_next_sentence_started, 0);
     test_written = test_opens = 0;
@@ -1079,6 +1190,328 @@ static void test_history(const agent_msg_t *msg, const char *text)
     assert(s_voice.reply_committed);
     test_history_count++;
     if (test_cancel_at_history) assert(voice_channel_cancel() == 0);
+}
+
+enum {
+    LOCAL_TEXT_MISS,
+    LOCAL_TEXT_CONSUME,
+    LOCAL_TEXT_REJECT,
+    LOCAL_TEXT_CANCEL,
+    LOCAL_TEXT_CANCEL_MISS,
+};
+static int test_local_text_mode;
+static int test_local_text_calls;
+
+static int test_local_text_handler(uint64_t id, const char *text,
+    int (*request_status)(uint64_t))
+{
+    assert(text && !strcmp(text, "local text"));
+    assert(request_status(id) == 0);
+    test_local_text_calls++;
+    if (test_local_text_mode == LOCAL_TEXT_CONSUME) return 1;
+    if (test_local_text_mode == LOCAL_TEXT_REJECT) return -EACCES;
+    if (test_local_text_mode == LOCAL_TEXT_CANCEL) {
+        assert(voice_channel_cancel() == 0);
+        return request_status(id);
+    }
+    if (test_local_text_mode == LOCAL_TEXT_CANCEL_MISS) {
+        assert(voice_channel_cancel() == 0);
+        return 0;
+    }
+    return 0;
+}
+
+static void test_local_text_dispatch(void)
+{
+    agent_msg_t delivered = {0};
+    assert(message_bus_init() == 0);
+    assert(voice_channel_set_local_text_handler(test_local_text_handler) == 0);
+
+    test_local_text_mode = LOCAL_TEXT_CONSUME;
+    test_local_text_calls = 0;
+    uint64_t id = test_reply_prepare(5);
+    assert(voice_channel_set_local_text_handler(NULL) == -EBUSY);
+    assert(voice_dispatch_text(id, "local text") == 1);
+    assert(test_local_text_calls == 1);
+    voice_request_complete(id, 0);
+    assert(voice_channel_is_idle());
+    assert(message_bus_pop_inbound(&delivered, 0) == ERROR);
+
+    test_local_text_mode = LOCAL_TEXT_MISS;
+    id = test_reply_prepare(5);
+    assert(voice_dispatch_text(id, "local text") == 0);
+    assert(test_local_text_calls == 2);
+    assert(message_bus_pop_inbound(&delivered, 0) == 0);
+    assert(delivered.request_id == id && !strcmp(delivered.content, "local text"));
+    message_bus_msg_free(&delivered);
+    assert(message_bus_pop_inbound(&delivered, 0) == ERROR);
+    voice_request_complete(id, 0);
+    assert(voice_channel_is_idle());
+
+    test_local_text_mode = LOCAL_TEXT_REJECT;
+    id = test_reply_prepare(5);
+    assert(voice_dispatch_text(id, "local text") == -EACCES);
+    assert(test_local_text_calls == 3);
+    assert(message_bus_pop_inbound(&delivered, 0) == ERROR);
+    voice_request_complete(id, -EACCES);
+    assert(voice_channel_is_idle());
+
+    test_local_text_mode = LOCAL_TEXT_CANCEL;
+    id = test_reply_prepare(5);
+    assert(voice_dispatch_text(id, "local text") == -ECANCELED);
+    assert(test_local_text_calls == 4);
+    assert(message_bus_pop_inbound(&delivered, 0) == ERROR);
+    voice_request_complete(id, -ECANCELED);
+    assert(voice_channel_is_idle());
+
+    /* A callback can cancel after the dispatch precheck then decline text.
+     * The owner must recheck before transferring it to the Agent queue. */
+    test_local_text_mode = LOCAL_TEXT_CANCEL_MISS;
+    id = test_reply_prepare(5);
+    assert(voice_dispatch_text(id, "local text") == -ECANCELED);
+    assert(test_local_text_calls == 5);
+    assert(message_bus_pop_inbound(&delivered, 0) == ERROR);
+    voice_request_complete(id, -ECANCELED);
+    assert(voice_channel_is_idle());
+
+    assert(voice_dispatch_text(id, "local text") == -ESTALE);
+    assert(test_local_text_calls == 5);
+    assert(message_bus_pop_inbound(&delivered, 0) == ERROR);
+
+    test_local_text_mode = LOCAL_TEXT_CONSUME;
+    uint64_t next = test_reply_prepare(5);
+    assert(next != id && voice_dispatch_text(next, "local text") == 1);
+    assert(test_local_text_calls == 6);
+    voice_request_complete(next, 0);
+    assert(voice_channel_is_idle());
+    assert(voice_channel_set_local_text_handler(NULL) == 0);
+    message_bus_destroy();
+    puts("LOCAL_TEXT_DISPATCH_PASS consume-miss-reject-cancel-stale-next-turn");
+}
+
+static atomic_int test_focus_owner_live;
+static atomic_int test_focus_owner_hold;
+static atomic_int test_focus_owner_entered;
+static atomic_int test_focus_owner_applied;
+static atomic_int test_focus_timeout_race;
+static atomic_int test_focus_timeout_cancel;
+static atomic_ullong test_focus_clock_offset;
+static _Thread_local int test_focus_dispatching;
+
+uint64_t bkvoice_config_now_ms(void *unused)
+{
+    (void)unused;
+    if (test_focus_dispatching && atomic_load(&test_focus_timeout_race) &&
+        atomic_load(&test_focus_owner_entered) &&
+        !atomic_load(&test_focus_owner_applied)) {
+        atomic_store(&test_focus_clock_offset, 501);
+        atomic_store(&test_focus_owner_hold, 0);
+        while (!atomic_load(&test_focus_owner_applied)) sched_yield();
+    }
+    if (test_focus_dispatching && atomic_load(&test_focus_timeout_cancel))
+        atomic_store(&test_focus_clock_offset, 501);
+    return voice_now_ms() + atomic_load(&test_focus_clock_offset);
+}
+
+static void *test_focus_owner(void *unused)
+{
+    (void)unused;
+    while (atomic_load(&test_focus_owner_live)) {
+        assert(sem_wait(&g_product_wake) == 0);
+        if (!atomic_load(&test_focus_owner_live)) break;
+        atomic_store(&test_focus_owner_entered, 1);
+        while (atomic_load(&test_focus_owner_hold)) usleep(100);
+        uint64_t now = bkvoice_config_now_ms(NULL);
+        bkfocus_intent_step(now, true);
+        (void)bkfocus_step(now);
+        atomic_store(&test_focus_owner_applied, 1);
+    }
+    return NULL;
+}
+
+struct test_focus_dispatch_s { uint64_t id; int result; };
+static void *test_focus_dispatch_thread(void *arg)
+{
+    struct test_focus_dispatch_s *call = arg;
+    test_focus_dispatching = 1;
+    call->result = voice_dispatch_text(call->id, "开始专注1秒");
+    test_focus_dispatching = 0;
+    return NULL;
+}
+
+static void test_focus_text_dispatch(void)
+{
+    agent_msg_t delivered = {0};
+    struct bkfocus_snapshot_s before, after;
+    pthread_t owner;
+    /* TIMER-01.voice-text includes the generic callback ownership contract. */
+    test_local_text_dispatch();
+    assert(message_bus_init() == 0);
+    assert(sem_init(&g_product_wake, 0, 0) == 0);
+    atomic_store(&test_focus_owner_live, 1);
+    atomic_store(&test_focus_guard_deny, 0);
+    atomic_store(&test_focus_guard_calls, 0);
+    atomic_store(&test_focus_record_calls, 0);
+    atomic_store(&test_focus_owner_hold, 0);
+    atomic_store(&test_focus_owner_entered, 0);
+    atomic_store(&test_focus_owner_applied, 0);
+    atomic_store(&test_focus_timeout_race, 0);
+    atomic_store(&test_focus_timeout_cancel, 0);
+    atomic_store(&test_focus_clock_offset, 0);
+    assert(pthread_create(&owner, NULL, test_focus_owner, NULL) == 0);
+    bkfocus_intent_step(bkvoice_config_now_ms(NULL), true);
+    assert(voice_channel_set_local_text_handler(product_focus_text) == 0);
+
+    /* An unbound product owner rejects local text without creating a timer or
+     * forwarding it to Agent; restoring admission permits the next turn. */
+    bkfocus_snapshot(&before, bkvoice_config_now_ms(NULL));
+    bkfocus_intent_step(bkvoice_config_now_ms(NULL), false);
+    uint64_t id = test_reply_prepare(5);
+    assert(voice_dispatch_text(id, "开始专注1秒") == -ESHUTDOWN);
+    assert(message_bus_pop_inbound(&delivered, 0) == ERROR);
+    bkfocus_snapshot(&after, bkvoice_config_now_ms(NULL));
+    assert(after.state == before.state && after.revision == before.revision &&
+           after.remaining_ms == before.remaining_ms &&
+           after.duration_ms == before.duration_ms);
+    voice_request_complete(id, -ESHUTDOWN);
+    assert(voice_channel_is_idle());
+    bkfocus_intent_step(bkvoice_config_now_ms(NULL), true);
+
+    id = test_reply_prepare(5);
+    assert(voice_dispatch_text(id, "开始专注1秒") == 1);
+    assert(message_bus_pop_inbound(&delivered, 0) == ERROR);
+    bkfocus_snapshot(&before, bkvoice_config_now_ms(NULL));
+    assert(before.state == 1 && before.remaining_ms <= 1000);
+    /* Same request replay reads the recorded result and cannot create a timer. */
+    assert(voice_dispatch_text(id, "开始专注1秒") == 1);
+    bkfocus_snapshot(&after, bkvoice_config_now_ms(NULL));
+    assert(after.revision == before.revision && after.state == before.state);
+    voice_request_complete(id, 0);
+    assert(voice_channel_is_idle());
+
+    id = test_reply_prepare(5);
+    assert(voice_dispatch_text(id, "专注还剩多久") == 1);
+    assert(message_bus_pop_inbound(&delivered, 0) == ERROR);
+    assert(product_focus_visual(bkvoice_config_now_ms(NULL), true, 3) & BKFOCUS_STATUS_VISUAL);
+    voice_request_complete(id, 0);
+
+    id = test_reply_prepare(5);
+    assert(voice_dispatch_text(id, "暂停专注") == 1);
+    voice_request_complete(id, 0);
+    bkfocus_snapshot(&after, bkvoice_config_now_ms(NULL));
+    assert(after.state == 2);
+    id = test_reply_prepare(5);
+    assert(voice_dispatch_text(id, "继续专注") == 1);
+    voice_request_complete(id, 0);
+    id = test_reply_prepare(5);
+    assert(voice_dispatch_text(id, "取消专注") == 1);
+    voice_request_complete(id, 0);
+    bkfocus_snapshot(&after, bkvoice_config_now_ms(NULL));
+    assert(after.state == 4);
+
+    atomic_store(&test_focus_guard_deny, 1);
+    id = test_reply_prepare(5);
+    assert(voice_dispatch_text(id, "开始专注1秒") == -EACCES);
+    assert(message_bus_pop_inbound(&delivered, 0) == ERROR);
+    assert(atomic_load(&test_focus_record_calls) == 6);
+    voice_request_complete(id, -EACCES);
+    atomic_store(&test_focus_guard_deny, 0);
+
+    id = test_reply_prepare(5);
+    assert(voice_dispatch_text(id, "ordinary request") == 0);
+    assert(message_bus_pop_inbound(&delivered, 0) == 0);
+    assert(delivered.request_id == id && !strcmp(delivered.content, "ordinary request"));
+    message_bus_msg_free(&delivered);
+    voice_request_complete(id, 0);
+
+    /* A stale owner observation and a queued owner operation are reported,
+     * and neither path transfers text to the Agent queue. */
+    bkfocus_intent_step(bkvoice_config_now_ms(NULL) - 1000, true);
+    id = test_reply_prepare(5);
+    assert(voice_dispatch_text(id, "专注还剩多久") == -ESTALE);
+    assert(message_bus_pop_inbound(&delivered, 0) == ERROR);
+    voice_request_complete(id, -ESTALE);
+    bkfocus_intent_step(bkvoice_config_now_ms(NULL), true);
+    uint32_t pending;
+    assert(bkfocus_intent_submit(1, 1000, &pending) == 0);
+    id = test_reply_prepare(5);
+    assert(voice_dispatch_text(id, "开始专注1秒") == -EBUSY);
+    assert(message_bus_pop_inbound(&delivered, 0) == ERROR);
+    voice_request_complete(id, -EBUSY);
+    assert(bkfocus_intent_cancel(pending) == 0);
+    bkfocus_intent_step(bkvoice_config_now_ms(NULL), true);
+
+    /* The owner applies between timeout observation and cancel.  A completed
+     * same-id operation is success, not an unobserved timeout. */
+    atomic_store(&test_focus_owner_hold, 1);
+    atomic_store(&test_focus_owner_entered, 0);
+    atomic_store(&test_focus_owner_applied, 0);
+    atomic_store(&test_focus_timeout_race, 1);
+    atomic_store(&test_focus_clock_offset, 0);
+    struct test_focus_dispatch_s race = { .id = test_reply_prepare(5) };
+    pthread_t caller;
+    assert(pthread_create(&caller, NULL, test_focus_dispatch_thread, &race) == 0);
+    assert(pthread_join(caller, NULL) == 0);
+    assert(race.result == 1);
+    assert(message_bus_pop_inbound(&delivered, 0) == ERROR);
+    struct bkfocus_intent_status_s result;
+    bkfocus_intent_status(&result);
+    assert(result.phase == 2 && result.ready &&
+           bkvoice_config_now_ms(NULL) >= result.observed_ms &&
+           bkvoice_config_now_ms(NULL) - result.observed_ms <= 250);
+    voice_request_complete(race.id, 0);
+    atomic_store(&test_focus_timeout_race, 0);
+    atomic_store(&test_focus_clock_offset, 0);
+
+    /* Timeout owns a still-pending intent: its cancellation is determinate,
+     * unlike the applied race above. */
+    atomic_store(&test_focus_owner_hold, 1);
+    atomic_store(&test_focus_owner_entered, 0);
+    atomic_store(&test_focus_owner_applied, 0);
+    atomic_store(&test_focus_timeout_cancel, 1);
+    struct test_focus_dispatch_s timeout = { .id = test_reply_prepare(5) };
+    assert(pthread_create(&caller, NULL, test_focus_dispatch_thread, &timeout) == 0);
+    assert(pthread_join(caller, NULL) == 0);
+    assert(timeout.result == -ETIMEDOUT);
+    bkfocus_intent_status(&result);
+    assert(result.phase == 4 && result.error == -ECANCELED);
+    assert(message_bus_pop_inbound(&delivered, 0) == ERROR);
+    voice_request_complete(timeout.id, -ETIMEDOUT);
+    atomic_store(&test_focus_timeout_cancel, 0);
+    atomic_store(&test_focus_owner_hold, 0);
+    while (!atomic_load(&test_focus_owner_applied)) sched_yield();
+
+    /* A different id superseding the pending one is unknown to this request. */
+    atomic_store(&test_focus_owner_hold, 1);
+    atomic_store(&test_focus_owner_entered, 0);
+    atomic_store(&test_focus_owner_applied, 0);
+    struct test_focus_dispatch_s replaced = { .id = test_reply_prepare(5) };
+    assert(pthread_create(&caller, NULL, test_focus_dispatch_thread, &replaced) == 0);
+    for (unsigned wait = 0; !atomic_load(&test_focus_owner_entered) && wait < 2000; wait++)
+        usleep(1000);
+    assert(atomic_load(&test_focus_owner_entered));
+    bkfocus_intent_status(&result);
+    assert(result.phase == 1);
+    assert(bkfocus_intent_cancel(result.id) == 0);
+    bkfocus_intent_step(bkvoice_config_now_ms(NULL), true);
+    uint32_t replacement;
+    assert(bkfocus_intent_submit(1, 1000, &replacement) == 0 && replacement != result.id);
+    assert(pthread_join(caller, NULL) == 0);
+    assert(replaced.result == -EINPROGRESS);
+    assert(message_bus_pop_inbound(&delivered, 0) == ERROR);
+    voice_request_complete(replaced.id, -EINPROGRESS);
+    assert(bkfocus_intent_cancel(replacement) == 0);
+    atomic_store(&test_focus_owner_hold, 0);
+    while (!atomic_load(&test_focus_owner_applied)) sched_yield();
+    atomic_store(&test_focus_clock_offset, 0);
+
+    assert(voice_channel_set_local_text_handler(NULL) == 0);
+    atomic_store(&test_focus_owner_live, 0);
+    assert(sem_post(&g_product_wake) == 0);
+    assert(pthread_join(owner, NULL) == 0);
+    assert(sem_destroy(&g_product_wake) == 0);
+    message_bus_destroy();
+    puts("FOCUS_TEXT_DISPATCH_PASS start-status-pause-resume-cancel-guard-miss-replay-stale-busy");
 }
 
 static void test_body_commit(void)
@@ -1218,6 +1651,20 @@ static void test_reply_pipeline(void)
     test_wait_first_pcm();
     assert(test_drains == 0 && test_closes == 0);
     assert(s_voice.turn_active && s_voice.reply_stream_active);
+    int media = test_wait_stage(id, "first_media");
+    pthread_mutex_lock(&test_stage_lock);
+    int body = test_stage_index(id, "final_first");
+    int submit = test_stage_index(id, "tts_submit");
+    int pcm = test_stage_index(id, "first_pcm");
+    assert(body >= 0 && submit > body && pcm > submit && media > pcm);
+    assert(test_stage_index(id, "playback_end") < 0);
+    assert(test_stage_index(id, "channel_idle") < 0);
+    unsigned long long tail_release_ms = voice_now_ms();
+    assert(test_stages[media].ms <= tail_release_ms);
+    printf("VOICE_LEDGER request=%llu final_first=%llu tts_submit=%llu first_pcm=%llu first_media=%llu fixture_tail_release=%llu\n",
+        (unsigned long long)id, test_stages[body].ms, test_stages[submit].ms,
+        test_stages[pcm].ms, test_stages[media].ms, tail_release_ms);
+    pthread_mutex_unlock(&test_stage_lock);
     const char tail[] = "第二句没有标点";
     assert(voice_channel_reply_stream(id, AGENT_REPLY_DELTA,
         tail, sizeof(tail) - 1) == 0);
@@ -1227,7 +1674,23 @@ static void test_reply_pipeline(void)
     assert(test_opens == 1 && test_drains == 1 && test_closes == 1);
     assert(s_voice.turn_active && !s_voice.reply_stream_active);
     voice_request_complete(id, 0);
-    assert(voice_channel_is_idle());
+    assert(voice_channel_is_idle() && voice_channel_request_id() == id);
+    pthread_mutex_lock(&test_stage_lock);
+    int peak = test_stage_index(id, "queue_peak");
+    int end = test_stage_index(id, "playback_end");
+    int idle = test_stage_index(id, "channel_idle");
+    assert(peak >= 0 && test_stages[peak].value > 0 &&
+        test_stages[peak].value <= TTS_QUEUE_BYTES);
+    assert(end > peak && idle > end && !test_stages[end].result);
+    unsigned int requests = 0;
+    for (size_t n = 0; n < test_stage_count; n++)
+        if (test_stages[n].request == id && !strcmp(test_stages[n].name, "tts_submit"))
+            requests++;
+    assert(requests == 2);
+    printf("VOICE_LEDGER request=%llu tts_requests=%u queue_peak=%llu playback_end=%llu channel_idle=%llu cloud=fixture acoustic=unobserved\n",
+        (unsigned long long)id, requests, test_stages[peak].value,
+        test_stages[end].ms, test_stages[idle].ms);
+    pthread_mutex_unlock(&test_stage_lock);
 
     id = test_reply_prepare(6);
     assert(voice_channel_reply_stream(id, AGENT_REPLY_BEGIN, NULL, 0) == 0);
@@ -1304,7 +1767,12 @@ int main(int argc, char **argv)
             voice_request_complete(current, 0);
         } else if (!strncmp(argv[1], "sse-", 4)) {
             test_sse_seed = (unsigned int)strtoul(argv[1] + 4, NULL, 10);
+            if (test_sse_seed == 1) test_reply_pipeline();
             test_sse_pipeline();
+        } else if (!strcmp(argv[1], "local-text")) {
+            test_local_text_dispatch();
+        } else if (!strcmp(argv[1], "focus-text")) {
+            test_focus_text_dispatch();
         } else return 2;
         puts("CONTRACT_PASS");
         return 0;
@@ -1339,6 +1807,7 @@ int main(int argc, char **argv)
         }
     }
     test_reply_pipeline();
+    test_focus_text_dispatch();
     test_body_commit();
     test_sse_pipeline();
     puts("BKVOICE_AGENT_QUEUE_HOST_PASS atomic-body-commit cancel-before-after history-once stream-failure-no-history wake-ack cancel-next-turn reply-before-end utf8-tail cancel-recover single-media preconnect fragmented-pcm bounded-ring media-error duplicate-eof");

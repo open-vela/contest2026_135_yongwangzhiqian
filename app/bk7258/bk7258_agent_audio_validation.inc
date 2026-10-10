@@ -316,13 +316,166 @@ static int product_audio_validation(void)
 #endif
 
 #ifdef CONFIG_BK7258_AUDIO_PIPELINE_VALIDATION
+/* Finite startup validation of the public preference, before normal Agent
+ * admission. This exercises the production config/store/application path;
+ * it is not proof of phone authentication or an additional USB permission.
+ * Restore the original value even when a controlled voice turn fails. */
+static int product_pipeline_response_length(unsigned int mode)
+{
+  struct bk7258_response_length_s before;
+  struct bkcontrol_status_s status;
+  uint8_t record[32] = {'R', 'L', 'P', '1'};
+  int ret = bk7258_preferences_response_length_get(&before);
+  if (ret) return ret;
+  product_put32(record + 4, mode);
+  product_put64(record + 8, before.revision);
+  memcpy(record + 16, "PIPE-RLP", 8);
+  product_put64(record + 24, before.revision);
+  ret = product_config(NULL, BKCONTROL_CONFIG_BEGIN,
+                       BKCONTROL_CONFIG_RESPONSE_LENGTH, 0, NULL,
+                       sizeof(record), &status);
+  if (!ret)
+    ret = product_config(NULL, BKCONTROL_CONFIG_APPLY,
+                         BKCONTROL_CONFIG_RESPONSE_LENGTH, 0, record,
+                         sizeof(record), &status);
+  if (!ret)
+    ret = product_config(NULL, BKCONTROL_CONFIG_READ,
+                         BKCONTROL_CONFIG_RESPONSE_LENGTH, 0, NULL, 0,
+                         &status);
+  if (!ret && (status.config_total != 24 ||
+      memcmp(status.config_chunk, "RLS1", 4) ||
+      status.config_chunk[7] != mode ||
+      product_be64(status.config_chunk + 8) != before.revision + 1u))
+    ret = -EPROTO;
+  if (!ret)
+    ret = product_config(NULL, BKCONTROL_CONFIG_READ,
+                         BKCONTROL_CONFIG_RESPONSE_LENGTH, 16, NULL, 0,
+                         &status);
+  if (!ret && (status.config_chunk[0] || status.config_chunk[1] ||
+      status.config_chunk[2] || status.config_chunk[3] != mode))
+    ret = -EPROTO;
+  syslog(LOG_NOTICE,
+         "BKRLP mode=%u expected_revision=%llu ret=%d source=startup-fixture\n",
+         mode, (unsigned long long)before.revision, ret);
+  return ret;
+}
+
 /* This calls the real manual voice owner and Agent service worker. Only the
  * external services are fixed memory responses. Mic samples are erased by the
  * capture owner; the ASR adapter substitutes deterministic PCM before encode. */
+/* Reuses the existing controlled ASR peer; recognized text traverses the
+ * actual voice dispatch, product guard, intent queue and owner timer. */
+static int product_focus_validation(void)
+{
+  struct bkfocus_intent_status_s status;
+  static const unsigned int expected[] = {1, 1, 2, 1, 4, 1};
+  bkfocus_intent_status(&status);
+  if (status.timer.state == 1 || status.timer.state == 2) return -EBUSY;
+  const struct bkfocus_intent_status_s before = status;
+  int result = 0;
+  for (unsigned int i = 0; i < sizeof(expected) / sizeof(expected[0]); i++)
+    {
+      atomic_store(&g_pipeline_complete, false);
+      atomic_store(&g_pipeline_result, -EINPROGRESS);
+      result = bkagent_cloud_validation_reset(0);
+      if (!result) result = bkcloud_fixture_reset(
+        BKCLOUD_FIXTURE_FOCUS_START + i);
+      if (!result) result = voice_channel_start();
+      if (!result)
+        {
+          nxsig_usleep(250000);
+          result = voice_channel_stop();
+        }
+      struct bkcloud_fixture_report_s peer;
+      bkcloud_fixture_report(&peer);
+      bkfocus_intent_status(&status);
+      if (!before.ready)
+        {
+          /* An unbound device must reject this command. Validate that
+           * boundary without granting owner access or failing core startup.
+           * Positive timer execution remains explicitly unverified here.
+           */
+          bool rejected = result == -ESHUTDOWN &&
+            atomic_load(&g_pipeline_complete) &&
+            atomic_load(&g_pipeline_result) == -ESHUTDOWN &&
+            voice_channel_is_idle() && !status.ready &&
+            status.id == before.id && status.phase == before.phase &&
+            status.timer.state == before.timer.state &&
+            status.timer.revision == before.timer.revision &&
+            status.timer.remaining_ms == before.timer.remaining_ms &&
+            status.timer.duration_ms == before.timer.duration_ms &&
+            peer.asr_requests == 1 && !peer.plan_requests &&
+            !peer.final_requests && !peer.tts_requests;
+          if (rejected) result = 0;
+          else if (!result) result = -EPROTO;
+          syslog(LOG_NOTICE,
+            "BKFOCUS execution=blocked-admission rejection_check=%d "
+            "result=%d asr=%u plan=%u final=%u tts=%u idle=%d\n",
+            rejected, result, peer.asr_requests, peer.plan_requests,
+            peer.final_requests, peer.tts_requests, voice_channel_is_idle());
+          break;
+        }
+      if (!result && (!atomic_load(&g_pipeline_complete) ||
+          atomic_load(&g_pipeline_result) || !voice_channel_is_idle() ||
+          status.timer.state != expected[i] || peer.asr_requests != 1 ||
+          peer.plan_requests || peer.final_requests || peer.tts_requests))
+        result = -EPROTO;
+      unsigned visual = product_focus_visual(bkvoice_config_now_ms(NULL),
+                                             true, 0);
+      syslog(LOG_NOTICE,
+        "BKFOCUS validation=%u result=%d state=%u phase=%u revision=%llu "
+        "remaining_ms=%llu observed_ms=%llu visual=%08x "
+        "asr=%u plan=%u final=%u tts=%u idle=%d\n", i, result,
+        status.timer.state, status.phase,
+        (unsigned long long)status.timer.revision,
+        (unsigned long long)status.timer.remaining_ms,
+        (unsigned long long)status.observed_ms, visual, peer.asr_requests,
+        peer.plan_requests, peer.final_requests, peer.tts_requests,
+        voice_channel_is_idle());
+      if (result) break;
+    }
+  if (!result && before.ready)
+    {
+      /* The last one-second timer completes on the existing owner. */
+      nxsig_usleep(1200000);
+      bkfocus_intent_status(&status);
+      if (status.timer.state != 3) result = -EPROTO;
+      syslog(LOG_NOTICE, "BKFOCUS completed result=%d state=%u\n", result,
+             status.timer.state);
+      nxsig_usleep(5100000);
+      bkfocus_intent_status(&status);
+      unsigned visual = product_focus_visual(bkvoice_config_now_ms(NULL),
+                                             true, status.visual);
+      if (visual) result = -EPROTO;
+      syslog(LOG_NOTICE, "BKFOCUS expired result=%d visual=%08x\n", result,
+             visual);
+    }
+  /* Do not leave a validation-created pending/running timer after failure.
+   * The normal owner applies this cleanup; never erase user configuration. */
+  if (result)
+    {
+      (void)voice_channel_cancel();
+      bkfocus_intent_status(&status);
+      if (status.phase == 1) (void)bkfocus_intent_cancel(status.id);
+      if (status.timer.state == 1 || status.timer.state == 2)
+        {
+          uint32_t cleanup;
+          (void)bkfocus_intent_submit(4, 0, &cleanup);
+          sem_post(&g_product_wake);
+        }
+    }
+  atomic_store(&g_focus_local_done, false);
+  return result;
+}
+
 static int product_pipeline_validation(void)
 {
-  if (atomic_load(&g_agent_core_ready) || !voice_channel_is_idle()) return -EBUSY;
-  int result = bkagent_cloud_validation_begin();
+  if (atomic_load(&g_agent_core_ready) || !voice_channel_is_idle() ||
+      bkprov_network_busy()) return -EBUSY;
+  struct bk7258_response_length_s original;
+  int result = bk7258_preferences_response_length_get(&original);
+  if (result) return result;
+  result = bkagent_cloud_validation_begin();
   syslog(LOG_NOTICE, "BKPIPE begin=%d peer=memory no-network fixed-ASR-PCM\n", result);
   if (result) return result;
   atomic_store(&g_pipeline_window, true);
@@ -332,7 +485,8 @@ static int product_pipeline_validation(void)
       atomic_store(&g_pipeline_media, false);
       atomic_store(&g_pipeline_complete, false);
       atomic_store(&g_pipeline_result, -EINPROGRESS);
-      result = bkagent_cloud_validation_reset(cancel);
+      result = product_pipeline_response_length((session + 1u) % 3u);
+      if (!result) result = bkagent_cloud_validation_reset(cancel);
       if (!result) result = voice_channel_start();
       if (!result)
         {
@@ -385,6 +539,7 @@ static int product_pipeline_validation(void)
       if (!result && (!idle || !samples || !texts ||
           !atomic_load(&g_pipeline_media) ||
           peer.asr_requests != 1 || peer.plan_requests != 1 ||
+          peer.decision_requests != 1 ||
           peer.final_requests != 1 || (cancel &&
           (peer.tail_released_after_media || peer.tts_requests != 1 ||
            pcm.bytes[1] != 0)) || (!cancel &&
@@ -392,11 +547,11 @@ static int product_pipeline_validation(void)
         result = -EPROTO;
       syslog(LOG_NOTICE,
         "BKPIPE session=%u ret=%d complete=%d idle=%d media=%d cancel=%d "
-        "asr=%u plan=%u final=%u tts=%u tail_after_media=%d samples=%d texts=%d "
+        "asr=%u plan=%u final=%u tts=%u decision=%u tail_after_media=%d samples=%d texts=%d "
         "pcm0=%zu/%08lx pcm1=%zu/%08lx\n", session, result, complete, idle,
         atomic_load(&g_pipeline_media), canceled, peer.asr_requests,
         peer.plan_requests, peer.final_requests, peer.tts_requests,
-        peer.tail_released_after_media, samples, texts, pcm.bytes[0],
+        peer.decision_requests, peer.tail_released_after_media, samples, texts, pcm.bytes[0],
         (unsigned long)pcm.hash[0], pcm.bytes[1], (unsigned long)pcm.hash[1]);
       if (!idle)
         {
@@ -405,9 +560,33 @@ static int product_pipeline_validation(void)
                  voice_channel_is_idle());
         }
     }
+  if (!result) result = product_focus_validation();
   int restored = bkagent_cloud_validation_end();
+  uint64_t restore_deadline = bkvoice_config_now_ms(NULL) + 3000;
+  int preference_restored;
+  do
+    {
+      preference_restored = product_pipeline_response_length(original.mode);
+      if (preference_restored != -EBUSY ||
+          bkvoice_config_now_ms(NULL) >= restore_deadline) break;
+      nxsig_usleep(50000);
+    }
+  while (true);
+  struct bk7258_response_length_s retained;
+  if (!preference_restored)
+    {
+      preference_restored = bk7258_preferences_response_length_get(&retained);
+      if (!preference_restored && retained.mode != original.mode)
+        preference_restored = -ESTALE;
+    }
+  if (!restored) restored = preference_restored;
+  syslog(preference_restored ? LOG_ERR : LOG_NOTICE,
+         "BKRLP restore=%d original_mode=%u outcome=%s\n",
+         preference_restored, (unsigned int)original.mode,
+         preference_restored ? "preference-restore-failed" : "mode-restored");
   atomic_store(&g_pipeline_window, false);
-  syslog(LOG_NOTICE, "BKPIPE restore=%d idle=%d saved-config-untouched\n",
+  syslog(LOG_NOTICE,
+         "BKPIPE restore=%d idle=%d cloud-config-untouched preference-tested\n",
          restored, voice_channel_is_idle());
   return result ? result : restored;
 }

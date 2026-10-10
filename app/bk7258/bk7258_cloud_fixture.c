@@ -23,14 +23,29 @@ static void scan(struct bkcloud_fixture_ctx_s *ctx, const uint8_t *data, size_t 
              ctx->scan[sizeof(ctx->scan) - 2] = data[i]; }
       ctx->scan[ctx->scan_size] = 0;
       if (strstr(ctx->scan, "\"stream\":true")) ctx->stream = true;
+      if (strstr(ctx->scan, "\"type\":\"json_object\""))
+        ctx->decision_only = true;
     }
 }
 
 static int make_reply(struct bkcloud_fixture_ctx_s *ctx)
 {
   const char *body;
+  char recognized[256];
   if (ctx->role == BKCLOUD_FIXTURE_ASR)
-    body = "{\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"message\":{\"content\":\"固定识别文本\",\"tool_calls\":[]}}]}";
+    {
+      static const char *const focus[] =
+        {"开始专注60秒", "专注还剩多久？", "暂停专注", "继续专注",
+         "取消当前专注计时", "开始专注1秒"};
+      const char *text = ctx->mode >= BKCLOUD_FIXTURE_FOCUS_START &&
+                         ctx->mode <= BKCLOUD_FIXTURE_FOCUS_FINISH ?
+                         focus[ctx->mode - BKCLOUD_FIXTURE_FOCUS_START] :
+                         "固定识别文本";
+      snprintf(recognized, sizeof(recognized),
+        "{\"choices\":[{\"index\":0,\"finish_reason\":\"stop\","
+        "\"message\":{\"content\":\"%s\",\"tool_calls\":[]}}]}", text);
+      body = recognized;
+    }
   else if (ctx->role == BKCLOUD_FIXTURE_TTS)
     {
       const char *quad = (g_report.tts_requests & 1u) ? "AgAC" : "AQAB";
@@ -48,6 +63,8 @@ static int make_reply(struct bkcloud_fixture_ctx_s *ctx)
       memmove(ctx->reply + h, ctx->reply, at); memcpy(ctx->reply, header, (size_t)h);
       ctx->reply_size = at + (size_t)h; goto counted;
     }
+  else if (!ctx->stream && ctx->decision_only)
+    body = "{\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"message\":{\"content\":\"{\\\"voice_phase\\\":\\\"final\\\"}\",\"tool_calls\":[]}}]}";
   else if (!ctx->stream)
     body = "{\"choices\":[{\"index\":0,\"finish_reason\":\"tool_calls\",\"message\":{\"content\":\"\",\"tool_calls\":[{\"id\":\"fixture-final\",\"type\":\"function\",\"function\":{\"name\":\"agent_finalize\",\"arguments\":\"{}\"}}]}}]}";
   else
@@ -67,7 +84,11 @@ counted:
   if (ctx->role == BKCLOUD_FIXTURE_ASR) g_report.asr_requests++;
   else if (ctx->role == BKCLOUD_FIXTURE_TTS) g_report.tts_requests++;
   else if (ctx->stream) g_report.final_requests++;
-  else g_report.plan_requests++;
+  else
+    {
+      g_report.plan_requests++;
+      if (ctx->decision_only) g_report.decision_requests++;
+    }
   g_report.source_bytes += ctx->sent;
   g_report.source_hash ^= ctx->source_hash;
   pthread_mutex_unlock(&g_lock);
@@ -81,6 +102,7 @@ static int open_peer(void *arg, const char *host, uint16_t port, uint64_t due)
   if (!ctx || ctx->opened) return -EINVAL;
   ctx->offset = ctx->sent = ctx->scan_size = 0; ctx->reply_ready = false;
   ctx->stream = false; ctx->source_hash = 2166136261u;
+  ctx->decision_only = false;
   pthread_mutex_lock(&g_lock); ctx->mode = g_mode; pthread_mutex_unlock(&g_lock);
   atomic_store(&ctx->canceled, false);
   ctx->opened = true; pthread_mutex_lock(&g_lock); g_active++;
@@ -150,7 +172,7 @@ int bkcloud_fixture_cancel(struct bkcloud_fixture_ctx_s *ctx)
 int bkcloud_fixture_end(struct bkcloud_fixture_ctx_s *ctx)
 { return ctx ? (ctx->opened ? -EBUSY : 0) : -EINVAL; }
 int bkcloud_fixture_reset(enum bkcloud_fixture_mode_e mode)
-{ if (mode > BKCLOUD_FIXTURE_CANCEL_TAIL) return -EINVAL;
+{ if (mode > BKCLOUD_FIXTURE_FOCUS_FINISH) return -EINVAL;
   pthread_mutex_lock(&g_lock); if (g_active) { pthread_mutex_unlock(&g_lock); return -EBUSY; }
   memset(&g_report, 0, sizeof(g_report)); g_media_started = false; g_mode = mode;
   pthread_mutex_unlock(&g_lock); return 0; }
