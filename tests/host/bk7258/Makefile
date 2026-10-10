@@ -615,14 +615,19 @@ run-voice-media-player: $(BUILD)/test_bk7258_agent_media_player
 $(BUILD)/test_agent_tts_queue: test_bk7258_agent_media_player.c \
 	$(OPENVELA_ROOT)/packages/ai_agent/src/voice/voice_channel.c \
 	$(OPENVELA_ROOT)/packages/ai_agent/src/llm/llm_stream.c \
-	$(OPENVELA_ROOT)/packages/ai_agent/src/core/message_bus.c | $(BUILD)
+	$(OPENVELA_ROOT)/packages/ai_agent/src/core/message_bus.c \
+	$(REPOSITORY_ROOT)/app/bk7258/bk7258_focus.c \
+	$(REPOSITORY_ROOT)/app/bk7258/bk7258_focus_intent.c | $(BUILD)
 	$(CC) $(CFLAGS) -DTEST_AGENT_TTS_QUEUE -DOK=0 -DERROR=-1 \
 		-ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-I $(MOCKS) -I $(OPENVELA_ROOT)/packages/ai_agent/include \
 		-I $(OPENVELA_ROOT)/packages/ai_agent/src \
+		-I $(REPOSITORY_ROOT)/app/bk7258 \
 		-I $(OPENVELA_ROOT)/apps/netutils/cjson/cJSON $< \
 		$(OPENVELA_ROOT)/packages/ai_agent/src/llm/llm_stream.c \
 		$(OPENVELA_ROOT)/packages/ai_agent/src/core/message_bus.c \
+		$(REPOSITORY_ROOT)/app/bk7258/bk7258_focus.c \
+		$(REPOSITORY_ROOT)/app/bk7258/bk7258_focus_intent.c \
 		$(OPENVELA_ROOT)/apps/netutils/cjson/cJSON/cJSON.c -o $@
 
 .PHONY: run-agent-tts-queue
@@ -2106,6 +2111,17 @@ $(BUILD)/test_shaniu_models_durability: test_shaniu_models_durability.c $(VOICE_
 	    $(VOICE_PACK_ROOT)/bk7258_cloud_config.c $(VOICE_PACK_ROOT)/bk7258_provision_store.c \
 	    -Wl,--gc-sections -Wl,--wrap=mkdir -Wl,--wrap=bkprov_store_open -Wl,--wrap=fsync \
 	    -Wl,--wrap=lstat -Wl,--wrap=bkprov_store_check_filesystem $(VOICE_OTA_MBEDCRYPTO) -o $@
+
+$(BUILD)/test_shaniu_response_length_store: test_shaniu_response_length_store.c $(VOICE_PACK_ROOT)/bk7258_preferences.c $(VOICE_PACK_ROOT)/bk7258_provision_store.c $(VOICE_OTA_MBEDCRYPTO) | $(BUILD)
+	$(CC) $(VOICE_PACK_CFLAGS) -pthread -ffunction-sections -fdata-sections -DCONFIG_BK7258_PROVISION_GATT \
+	    -I $(MOCKS) -I $(VOICE_PACK_ROOT) -I $(OPENVELA_ROOT)/external/unqlite/unqlite \
+	    -I $(VOICE_OTA_MBEDTLS_SOURCE)/include $< $(VOICE_PACK_ROOT)/bk7258_preferences.c \
+	    $(VOICE_PACK_ROOT)/bk7258_provision_store.c -Wl,--gc-sections -Wl,--wrap=mkdir \
+	    -Wl,--wrap=bkprov_store_open -Wl,--wrap=fsync -Wl,--wrap=lstat $(VOICE_OTA_MBEDCRYPTO) -o $@
+
+.PHONY: run-response-length-store
+run-response-length-store: $(BUILD)/test_shaniu_response_length_store
+	./$(BUILD)/test_shaniu_response_length_store
 
 # Extract exact production command bodies; never maintain a test copy of their
 # state/replace logic. Rendering and NuttX synchronization stay at the boundary.

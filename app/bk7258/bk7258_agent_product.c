@@ -41,6 +41,7 @@
 #include "agent_compat.h"
 #include "agent_config.h"
 #include "core/agent_loop.h"
+#include "core/agent_trace.h"
 #include "core/memory_store.h"
 #include "core/message_bus.h"
 #include "core/session_mgr.h"
@@ -92,6 +93,7 @@
 #endif
 #include "bk7258_pc_grants.h"
 #include "bk7258_focus_intent.h"
+#include "bk7258_focus_pixels.h"
 #ifdef CONFIG_BK7258_NFC_SERVICE
 #include "bk7258_nfc_service.h"
 #ifdef CONFIG_BK7258_PROVISION_GATT
@@ -217,6 +219,9 @@ void bk7258_agent_product_wake(void)
   atomic_fetch_or(&g_product_events, 4);
   sem_post(&g_product_wake);
 }
+
+
+#include "bk7258_agent_focus.inc"
 
 static void bk7258_agent_voice_event(int event, int result)
 {
@@ -1242,6 +1247,103 @@ static int product_response_mode(enum bkcontrol_command_e command,
 #endif
 }
 
+static void product_put32(uint8_t *p, uint32_t value)
+{
+  for (unsigned int i = 0; i < 4; i++) p[i] = value >> (24 - 8 * i);
+}
+
+static void product_put64(uint8_t *p, uint64_t value)
+{
+  for (unsigned int i = 0; i < 8; i++) p[i] = value >> (56 - 8 * i);
+}
+
+static int product_response_length(enum bkcontrol_command_e command,
+  uint32_t offset, const uint8_t *record, size_t size,
+  struct bkcontrol_status_s *status)
+{
+#ifdef CONFIG_BK7258_PREFERENCES
+  struct bk7258_response_length_s value;
+  int ret = bk7258_preferences_response_length_get(&value);
+  if (ret) return ret;
+  if (command == BKCONTROL_CONFIG_READ)
+    {
+      unsigned int applied = 0;
+      int applied_ret = bkagent_cloud_get_response_length(&applied);
+      if (offset > 16 || (offset & 15u)) return -ERANGE;
+      if (applied_ret && applied_ret != -EAGAIN) return applied_ret;
+      uint8_t wire[24] =
+      {
+        'R', 'L', 'S', '1'
+      };
+
+      product_put32(wire + 4, value.mode);
+      product_put64(wire + 8, value.revision);
+      product_put32(wire + 16, applied_ret ? UINT32_MAX : applied);
+      status->config_total = sizeof(wire);
+      memset(status->config_chunk, 0, sizeof(status->config_chunk));
+      size_t count = sizeof(wire) - offset;
+      if (count > sizeof(status->config_chunk))
+        count = sizeof(status->config_chunk);
+      memcpy(status->config_chunk, wire + offset, count);
+      return 0;
+    }
+
+  if (command != BKCONTROL_CONFIG_BEGIN && command != BKCONTROL_CONFIG_APPLY)
+    {
+      return -EINVAL;
+    }
+
+  if ((atomic_load(&g_voice_initialized) && !voice_channel_is_idle()) ||
+      bkprov_network_busy())
+    {
+      return -EBUSY;
+    }
+
+  if (size != 32)
+    {
+      return -EMSGSIZE;
+    }
+
+  if (command == BKCONTROL_CONFIG_BEGIN)
+    {
+      return 0;
+    }
+
+  if (!record || memcmp(record, "RLP1", 4) || record[4] || record[5] ||
+      record[6] || record[7] > BK7258_RESPONSE_LENGTH_DETAILED)
+    {
+      return -EBADMSG;
+    }
+
+  uint8_t nonzero = 0;
+  for (unsigned int i = 16; i < 32; i++) nonzero |= record[i];
+  if (!nonzero)
+    {
+      return -EBADMSG;
+    }
+
+  ret = bk7258_preferences_response_length_set(
+    (enum bk7258_response_length_e)record[7], product_be64(record + 8),
+    record + 16);
+  if (!ret)
+    {
+      ret = bk7258_preferences_response_length_get(&value);
+      if (!ret && (value.mode != record[7] ||
+                   value.revision != product_be64(record + 8) + 1u))
+        ret = -EIO;
+      if (!ret)
+        {
+          bkagent_cloud_set_response_length(value.mode);
+        }
+    }
+
+  return ret;
+#else
+  (void)command; (void)offset; (void)record; (void)size; (void)status;
+  return -ENOTSUP;
+#endif
+}
+
 static int product_wake_threshold(enum bkcontrol_command_e command,
   uint32_t offset, const uint8_t *record, size_t size,
   struct bkcontrol_status_s *status)
@@ -1642,6 +1744,11 @@ static int product_config(void *context, enum bkcontrol_command_e command,
       return product_response_mode(command, offset, record, size, status);
     }
 
+  if (kind == BKCONTROL_CONFIG_RESPONSE_LENGTH)
+    {
+      return product_response_length(command, offset, record, size, status);
+    }
+
   if (kind == BKCONTROL_CONFIG_WAKE_THRESHOLD)
     {
       return product_wake_threshold(command, offset, record, size, status);
@@ -1663,7 +1770,6 @@ static int product_config(void *context, enum bkcontrol_command_e command,
             {
               return ret;
             }
-
           uint32_t fields[] =
             {
               display.state, (uint32_t)display.last_error,
@@ -2580,6 +2686,8 @@ static int product_reset_step(void)
 #ifdef CONFIG_BK7258_PREFERENCES
   ret = bk7258_preferences_cloud_models_reset_complete();
   if (ret < 0) return ret;
+  ret = bk7258_preferences_response_length_reset_complete();
+  if (ret < 0) return ret;
 #endif
   ret = bkprov_owner_unbind();
   if (ret < 0) return ret;
@@ -3006,9 +3114,10 @@ static int bk7258_agent_config_task(int argc, FAR char *argv[])
         (!atomic_load(&g_voice_initialized) || voice_channel_is_idle()));
       bkfocus_intent_step(now, g_control_bound && !bkagent_ota_busy());
 #ifdef CONFIG_BK7258_DISPLAY_SERVICE
-      bk7258_display_focus(bkpc_tasks_visual(&g_pc_tasks, now,
-        !atomic_load(&g_voice_initialized) || voice_channel_is_idle(),
-        bkfocus_visual(now)));
+      bool focus_idle = !atomic_load(&g_voice_initialized) ||
+                        voice_channel_is_idle();
+      bk7258_display_focus(product_focus_visual(now, focus_idle,
+        bkpc_tasks_visual(&g_pc_tasks, now, focus_idle, bkfocus_visual(now))));
 #endif
       if (now >= voice_cleanup_at)
         {
@@ -3030,7 +3139,8 @@ static int bk7258_agent_config_task(int argc, FAR char *argv[])
            * cancel outcome exits.
            */
 
-          voice_action = voice_interaction_active &&
+          bool local_done = atomic_exchange(&g_focus_local_done, false);
+          voice_action = voice_interaction_active && !local_done &&
                          !product_voice_result_exits_interaction(
                            voice_turn_result) ?
                          VOICE_ACTION_CONTINUE : VOICE_ACTION_REARM;
@@ -3042,6 +3152,7 @@ static int bk7258_agent_config_task(int argc, FAR char *argv[])
       if (voice_action != VOICE_ACTION_NONE && now >= voice_action_at)
         {
           enum voice_action_e attempted = voice_action;
+          uint64_t completed_request = voice_channel_request_id();
           int action;
           if (voice_action == VOICE_ACTION_CONTINUE)
             {
@@ -3052,8 +3163,12 @@ static int bk7258_agent_config_task(int argc, FAR char *argv[])
               action = bk7258_agent_trigger_rearm();
             }
 
-          if (action == 0 || (voice_action == VOICE_ACTION_REARM &&
-                              bk7258_agent_trigger_armed()))
+          bool rearmed = attempted == VOICE_ACTION_REARM &&
+                         bk7258_agent_trigger_armed();
+          agent_trace_stage(completed_request,
+                            attempted == VOICE_ACTION_REARM ?
+                            "rearm" : "capture_resume", rearmed, action);
+          if (action == 0 || rearmed)
             {
               voice_action = VOICE_ACTION_NONE;
             }
@@ -3375,6 +3490,21 @@ static int bk7258_agent_config_task(int argc, FAR char *argv[])
           syslog(thinking_ret ? LOG_WARNING : LOG_INFO,
                  "BKVOICE response mode restore result=%d thinking=%d\n",
                  thinking_ret, thinking_ret ? -1 : (int)thinking);
+
+          struct bk7258_response_length_s response_length;
+          int response_length_ret =
+            bk7258_preferences_response_length_get(&response_length);
+          if (!response_length_ret)
+            {
+              bkagent_cloud_set_response_length(response_length.mode);
+            }
+
+          preferences_pending |= response_length_ret == -EBUSY;
+          syslog(response_length_ret ? LOG_WARNING : LOG_INFO,
+                 "BKVOICE response length restore result=%d mode=%d "
+                 "revision=%llu\n", response_length_ret,
+                 response_length_ret ? -1 : response_length.mode,
+                 (unsigned long long)response_length.revision);
 #endif
           preferences_retry_at = now + 1000;
         }
@@ -3613,6 +3743,10 @@ int ai_agent_main(int argc, FAR char *argv[])
     {
       ret = voice_channel_init();
     }
+
+#ifdef CONFIG_BK7258_VOICE_TLS
+  if (!ret) ret = voice_channel_set_local_text_handler(product_focus_text);
+#endif
 
 #ifdef CONFIG_BK7258_AUDIO_PLAYBACK_VALIDATION
 #ifdef CONFIG_BK7258_AUDIO_CAPTURE_VALIDATION
