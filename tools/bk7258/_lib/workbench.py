@@ -26,6 +26,17 @@ class ControlError(ValueError):
     pass
 
 
+class DeviceRejected(ControlError):
+    def __init__(self, code):
+        self.code = code
+        self.kind = (
+            "unauthorized"
+            if code in (-1, -13)
+            else "unsupported" if code in (-38, -95) else "failed"
+        )
+        super().__init__(f"Device rejected the operation ({code})")
+
+
 NATIVE_REOPEN_SETTLE_SECONDS = 1.1
 
 
@@ -353,10 +364,70 @@ class ControlClient:
                 raise ControlError("Invalid SDC1 response")
             self._sequence += 1
             if error:
-                raise ControlError(f"Device rejected the operation ({error})")
+                raise DeviceRejected(error)
             return tuple(fields)
         finally:
             frame[:] = b"\x00" * len(frame)
+
+    def _camera_block_exchange(self, selector, deadline):
+        """Read one fixed-size CAMERA_BLOCK reply without changing SDC1 framing."""
+        if not isinstance(selector, bytes) or len(selector) != 20:
+            raise ControlError("Invalid camera block selector")
+        kind, _identity, offset, total = struct.unpack(">IQII", selector)
+        if (
+            kind != 25 << 16
+            or offset % 16
+            or not 0 < total <= 102400
+            or offset >= total
+        ):
+            raise ControlError("Invalid camera block selector")
+        if self._sequence >= 0x7FFFFFFF:
+            raise ControlError("Control sequence exhausted")
+        frame = bytearray(
+            struct.pack(">4I", 0x53444331, 15, self._sequence, len(selector))
+        )
+        frame.extend(selector)
+        response = bytearray()
+        try:
+            sent = 0
+            while sent < len(frame):
+                count = self._call(
+                    lambda: self._tls.write(memoryview(frame)[sent:]), deadline
+                )
+                if not 0 < count <= len(frame) - sent:
+                    raise ControlError("Invalid TLS write")
+                sent += count
+            while len(response) < 536:
+                part = self._call(lambda: self._tls.read(536 - len(response)), deadline)
+                if not part:
+                    raise ControlError("TLS stream ended before the response")
+                response.extend(part)
+            magic, reply, sequence, size = struct.unpack(">4I", response[:16])
+            if (magic, reply, sequence, size) != (
+                0x53444331,
+                15 | 0x80000000,
+                self._sequence,
+                520,
+            ):
+                raise ControlError("Invalid camera block response")
+            error, result_total = struct.unpack(">iI", response[16:24])
+            data = bytes(response[24:])
+            self._sequence += 1
+            if error:
+                if result_total or any(data):
+                    raise ControlError("Invalid camera block error response")
+                if error > 0:
+                    raise ControlError("Invalid camera block error response")
+                raise DeviceRejected(error)
+            if result_total != total:
+                raise ControlError("Invalid camera block length")
+            remaining = total - offset
+            if remaining < 512 and any(data[remaining:]):
+                raise ControlError("Invalid camera block tail padding")
+            return result_total, data
+        finally:
+            frame[:] = b"\x00" * len(frame)
+            response[:] = b"\x00" * len(response)
 
     def _read(self, command):
         if self.closed or not self.authenticated:
@@ -899,6 +970,9 @@ def add_arguments(parser):
             "pair-finish",
             "task-event",
             "task-status",
+            "camera-status",
+            "camera-capture",
+            "camera-cancel",
             "trial-start",
             "trial-status",
             "trial-cancel",
@@ -1002,7 +1076,9 @@ def add_arguments(parser):
     parser.add_argument("--response", type=Path)
     parser.add_argument("--confirm-device-sha256")
     parser.add_argument(
-        "--allow", nargs="+", choices=("resources", "scenes", "tasks", "diagnostics")
+        "--allow",
+        nargs="+",
+        choices=("resources", "scenes", "tasks", "diagnostics", "camera"),
     )
 
 
@@ -1119,6 +1195,18 @@ def run(args, *, observe=None, cancel_requested=None):
                 workbench_profile.create(args.profile, certificate, pin, key)
                 return dict(profile_saved=True, device_authorization_verified=False)
         with authorized_client(args) as client:
+            if args.operation.startswith("camera-"):
+                from . import workbench_camera
+
+                if args.operation == "camera-status":
+                    return workbench_camera.status(client)
+                if args.operation == "camera-cancel":
+                    return workbench_camera.cancel(client)
+                return workbench_camera.capture(
+                    client,
+                    preview=getattr(args, "camera_preview", False),
+                    cancel_requested=cancel_requested,
+                )
             if args.operation.startswith("catalog-"):
                 return workbench_catalog.perform(client, args)
             if args.operation.startswith("default-"):

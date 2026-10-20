@@ -2137,6 +2137,18 @@ $(BUILD)/test_shaniu_focus_intent: test_shaniu_focus_intent.c $(VOICE_PACK_ROOT)
 		-I $(OPENVELA_ROOT)/apps/netutils/cjson/cJSON $(filter %.c,$^) \
 		$(OPENVELA_ROOT)/apps/netutils/cjson/cJSON/cJSON.c -o $@
 
+$(BUILD)/test_local_content: test_local_content.c $(VOICE_PACK_ROOT)/bk7258_agent_local_content.inc $(VOICE_PACK_ROOT)/bk7258_local_content.c $(VOICE_PACK_ROOT)/bk7258_local_content.h $(VOICE_PACK_ROOT)/bk7258_nfc_scene.c $(VOICE_PACK_ROOT)/bk7258_nfc_bindings.c $(VOICE_PACK_ROOT)/bk7258_nfc_core.c $(VOICE_PACK_ROOT)/bk7258_provision_store.c $(VOICE_PACK_ROOT)/bk7258_focus.c $(VOICE_PACK_ROOT)/bk7258_focus_intent.c $(VOICE_OTA_MBEDCRYPTO) | $(BUILD)
+	$(CC) $(VOICE_PACK_CFLAGS) -D_DEFAULT_SOURCE -pthread -I $(MOCKS) \
+	  -I $(VOICE_PACK_ROOT) -I $(OPENVELA_ROOT)/packages/ai_agent/include \
+	  -I $(OPENVELA_ROOT)/apps/netutils/cjson/cJSON \
+	  -I $(VOICE_OTA_MBEDTLS_SOURCE)/include \
+	  -DBKCONTENT_PATH='"$(abspath $(BUILD))/local-content.pcm"' \
+	  $(filter %.c,$^) $(OPENVELA_ROOT)/apps/netutils/cjson/cJSON/cJSON.c $(VOICE_OTA_MBEDCRYPTO) -o $@
+
+$(BUILD)/test_nfc_scene_actions: test_nfc_scene_actions.c $(VOICE_PACK_ROOT)/bk7258_nfc_bindings.c $(VOICE_PACK_ROOT)/bk7258_nfc_core.c $(VOICE_PACK_ROOT)/bk7258_provision_store.c $(VOICE_OTA_MBEDCRYPTO) | $(BUILD)
+	$(CC) $(VOICE_PACK_CFLAGS) -I $(VOICE_PACK_ROOT) -I $(VOICE_OTA_MBEDTLS_SOURCE)/include \
+	  $(filter %.c,$^) $(VOICE_OTA_MBEDCRYPTO) -o $@
+
 $(BUILD)/test_shaniu_nfc_bindings: test_shaniu_nfc_bindings.c $(VOICE_PACK_ROOT)/bk7258_nfc_bindings.c $(VOICE_PACK_ROOT)/bk7258_nfc_core.c $(VOICE_PACK_ROOT)/bk7258_provision_store.c $(VOICE_OTA_MBEDCRYPTO) | $(BUILD)
 	$(CC) $(VOICE_PACK_CFLAGS) -I $(VOICE_PACK_ROOT) -I $(VOICE_OTA_MBEDTLS_SOURCE)/include \
 	  $< $(VOICE_PACK_ROOT)/bk7258_nfc_bindings.c $(VOICE_PACK_ROOT)/bk7258_nfc_core.c \
@@ -2180,6 +2192,17 @@ $(BUILD)/test_shaniu_motion_quiesce: test_shaniu_motion_quiesce.c test_bk7258_mo
 
 $(BUILD)/test_shaniu_motion_actions: test_shaniu_motion_actions.c $(VOICE_PACK_ROOT)/bk7258_motion_core.c $(VOICE_PACK_ROOT)/bk7258_motion_core.h | $(BUILD)
 	$(CC) -std=c11 -Wall -Wextra -Werror -fsanitize=undefined -fno-sanitize-recover=all -I $(VOICE_PACK_ROOT) $< $(VOICE_PACK_ROOT)/bk7258_motion_core.c -o $@
+
+$(BUILD)/test_shaniu_companion_display: test_shaniu_companion_display.c $(VOICE_PACK_ROOT)/bk7258_display_companion.inc $(VOICE_PACK_ROOT)/bk7258_display_service.h | $(BUILD)
+	$(CC) -std=c11 -Wall -Wextra -Werror -fsanitize=undefined -fno-sanitize-recover=all -I $(VOICE_PACK_ROOT) $< -o $@
+
+$(BUILD)/test_shaniu_motion_poll: test_shaniu_motion_poll.c test_bk7258_motion_rpc.c bk7258_sensor_rpc_test.h $(wildcard $(VOICE_PACK_ROOT)/bk7258_motion_*.c) $(wildcard $(VOICE_PACK_ROOT)/bk7258_motion_*.h) $(SENSOR_RPC_SHIM)/.ready
+	$(CC) -std=c11 -Wall -Wextra -Werror -Wno-unused-function -fsanitize=undefined -fno-sanitize-recover=all -I $(SENSOR_RPC_SHIM) -I $(VOICE_PACK_ROOT) $< -o $@
+
+$(BUILD)/test_shaniu_haptic_product: test_shaniu_haptic_product.c bk7258_sensor_rpc_test.h $(VOICE_PACK_ROOT)/bk7258_haptic_service.c $(VOICE_PACK_ROOT)/bk7258_haptic_service.h $(SENSOR_RPC_SHIM)/.ready
+	mkdir -p $(BUILD)/haptic-include/arch/board
+	touch $(BUILD)/haptic-include/arch/board/board.h
+	$(CC) -std=c11 -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable -fsanitize=undefined -fno-sanitize-recover=all -I $(BUILD)/haptic-include -I $(SENSOR_RPC_SHIM) -I $(VOICE_PACK_ROOT) $< -o $@
 
 # Native CDC byte adapter; only the device node is redirected to a host PTY.
 $(BUILD)/test_control_serial: $(REPOSITORY_ROOT)/app/bk7258/bk7258_control_serial.c \
@@ -2230,3 +2253,6 @@ $(BUILD)/test_agent_audio_playback: test_agent_audio_playback.c \
 	    -I $(OPENVELA_ROOT)/packages/ai_agent/include -I $(MEDIA_INCLUDE) -I $(MOCKS) \
 	    $< $(OPENVELA_ROOT)/packages/ai_agent/src/voice/audio_playback.c \
 	    -Wl,--wrap=write,--wrap=fcntl,--wrap=clock_gettime,--wrap=usleep,--wrap=sem_clockwait -o $@
+
+$(BUILD)/test_pc_camera: test_pc_camera.c $(VOICE_PACK_ROOT)/bk7258_pc_camera.c $(VOICE_PACK_ROOT)/bk7258_pc_camera.h $(VOICE_PACK_ROOT)/bk7258_control_session.h | $(BUILD)
+	$(CC) $(CFLAGS) -Werror -pthread -D_POSIX_C_SOURCE=200809L -DCONFIG_BK7258_VISION_FPS=30 -Dclock_gettime=fixture_clock_gettime -I$(MOCKS) -I$(VOICE_PACK_ROOT) $(filter %.c,$^) -o $@
